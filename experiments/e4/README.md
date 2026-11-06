@@ -29,4 +29,10 @@ python experiments/e4/e4.py --provider vllm --base-url http://127.0.0.1:8000 --m
 python experiments/e4/e4.py --provider anthropic --model claude-haiku-5-5 --max-input-tokens 900000
 ```
 
+**Live result (2026-11-06): Pass on both.**
+- **Anthropic Haiku 5.5:** 99.9% of predicted savings realised (104,616 of 104,732 tokens), 0 of 60 tool choices changed.
+- **vLLM Qwen3-4B:** 97.5% realised (13,872 of 14,229), 1 of 60 changed.
+
+See [`runs/2026-11-06-live.md`](runs/2026-11-06-live.md), including why the vLLM saving is smaller (Qwen3 renders tools after the system prompt).
+
 Mock result (2026-11-06): predicted 91,399 tokens, realised 91,184 (99.8%), Pass. The mock's cache is independent of Prefixwise: it computes the longest prefix each request shares with an earlier one. So this shows Prefixwise's avoidable-token accounting matches real prefix-cache behaviour. Task success in the mock is always 100%; only a live model can show whether reordering tools changes which tool it picks.

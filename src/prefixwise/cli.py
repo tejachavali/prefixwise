@@ -66,7 +66,7 @@ def cmd_serve(args) -> int:
 
 
 def cmd_fixes(args) -> int:
-    from .fixes import FIX_ADVICE
+    from .fixes import FIX_ADVICE, FIX_STATUS
 
     led = _open_existing_ledger(args)
     summary = led.summary()
@@ -83,7 +83,9 @@ def cmd_fixes(args) -> int:
                      "share_of_prompt_tokens": (r["avoidable_tokens"] / summary["prompt_tokens"])
                      if summary["prompt_tokens"] else None,
                      "fix": advice["fix"], "proxy_toggle": advice["toggle"],
-                     "status": "recommended (predicted; prove it with experiments/e4)"})
+                     "status": (FIX_STATUS.get(advice["toggle"] or "", {}).get("status")
+                                or "recommended (predicted; prove it with experiments/e4)"),
+                     "evidence": FIX_STATUS.get(advice["toggle"] or "", {}).get("evidence")})
     recs.sort(key=lambda x: -x["predicted_savings_tokens"])
     if args.json:
         print(json.dumps({"recommendations": recs, "requests_rewritten_by_fixes": fixed_requests}, indent=2))
@@ -98,6 +100,8 @@ def cmd_fixes(args) -> int:
         print(f"   fix: {r['fix']}")
         if toggle:
             print(toggle)
+        if r["evidence"]:
+            print(f"   {r['status']}: {r['evidence']}")
     if fixed_requests:
         print("\nAlready active: " + ", ".join(f"{k} rewrote {v} requests" for k, v in fixed_requests.items()))
     return 0
