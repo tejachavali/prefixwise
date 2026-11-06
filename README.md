@@ -138,6 +138,10 @@ Avoidable tokens for a waste turn = the part of the previous turn's prompt that 
 - OpenAI's default in-memory cache TTL is not a fixed number, so after a long gap a cold OpenAI cache is `unknown` unless you send `X-Prefixwise-Cache-Ttl`.
 - Costs are not priced yet (`avoidable_cost` is null): rates change, and a guessed rate is worse than none.
 
+## Working on Prefixwise
+
+Agents and people working on this repo: read [`WORKLOG.md`](WORKLOG.md) first. It has the current goal, why, what to run, and what happens with each result. `build.log` records outcomes.
+
 ## Development
 
 ```bash
