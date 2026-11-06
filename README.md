@@ -98,6 +98,7 @@ Avoidable tokens for a waste turn = the part of the previous turn's prompt that 
 | Command | |
 |---|---|
 | `prefixwise serve [--upstream URL] [--mock] [--fix canonical_tools] [--host H] [--port P] [--ledger FILE]` | Run the proxy. Ledger defaults to `./prefixwise.db`. `--fix` applies an opt-in, reversible rewrite to every request (see below). |
+| `prefixwise prices [--json]` | The dated price table behind dollar costs, and where each rate came from. |
 | `prefixwise fixes [--json]` | The fixes that would save the most, ranked by the avoidable tokens your own ledger attributes to each cause. |
 | `prefixwise report [--by cause\|session_id\|agent_id\|model\|provider\|task_id] [--json]` | Totals and a breakdown, most avoidable first. |
 | `prefixwise task ID --success\|--failure` | Record a task outcome (safe while the proxy runs). |
@@ -119,7 +120,9 @@ Avoidable tokens for a waste turn = the part of the previous turn's prompt that 
 
 **Response headers:** `X-Prefixwise-Request-Id` always; `X-Prefixwise-Cause`, `X-Prefixwise-Legit`, `X-Prefixwise-Avoidable-Tokens` on non-streaming responses; `X-Prefixwise-Fixes` when a fix rewrote the request. Streamed requests are classified when the stream ends: read them from `GET /requests/<id>`.
 
-**Environment:** `PREFIXWISE_UPSTREAM_URL`, `PREFIXWISE_API_KEY` (overrides client auth; `x-api-key` for Anthropic), `PREFIXWISE_LEDGER_PATH`, `PREFIXWISE_HMAC_KEY` (HMAC short blocks so their hashes cannot be dictionary-guessed), `PREFIXWISE_MAX_SESSIONS` (default 10,000), `PREFIXWISE_FIXES` (e.g. `canonical_tools`), `PREFIXWISE_AUTH_TOKEN` (require `X-Prefixwise-Token`), `PREFIXWISE_MAX_BODY_BYTES`, `PORT`.
+**Environment:** `PREFIXWISE_UPSTREAM_URL`, `PREFIXWISE_API_KEY` (overrides client auth; `x-api-key` for Anthropic), `PREFIXWISE_LEDGER_PATH`, `PREFIXWISE_HMAC_KEY` (HMAC short blocks so their hashes cannot be dictionary-guessed), `PREFIXWISE_MAX_SESSIONS` (default 10,000), `PREFIXWISE_FIXES` (e.g. `canonical_tools`), `PREFIXWISE_AUTH_TOKEN` (require `X-Prefixwise-Token`), `PREFIXWISE_MAX_BODY_BYTES`, `PREFIXWISE_PRICES` (your own rates file), `PORT`.
+
+**Dollar costs.** Each request is priced from the provider's own usage breakdown (uncached input, cache reads, cache writes by TTL, output), using a dated price table: `prefixwise prices` shows it. *Avoidable cost* is the avoidable tokens times (input price − cache-read price): what they would have cost as cache hits. A model with no rates shows `-`, never an estimate. To add OpenAI models or your negotiated rates, write a JSON file in the same format (`prefixwise prices --json` prints one) and set `PREFIXWISE_PRICES=/path/prices.json`. Your entries override the built-in ones. `prefixwise report` and `prefixwise fixes` then show dollars, and say how many requests were priced.
 
 **Fixes the proxy can apply.** `canonical_tools` sorts tools by name and sorts each tool's keys before forwarding, so a tool list that drifts between turns (plugin reload, dict rebuild) stops breaking the cache. It is off by default; with it off, requests pass through unchanged. Prefixwise classifies the request the provider actually received. Fixes that would change what the model reads, like moving a timestamp out of the system prompt, are advice only: `prefixwise fixes` lists them. `canonical_tools` is **proven**: in [E4](experiments/e4/runs/2026-11-06-live.md), turning it on realised 99.9% (Anthropic Haiku 5.5) and 97.5% (vLLM Qwen3-4B) of the savings Prefixwise predicted, with task success flat.
 
@@ -146,7 +149,7 @@ Found a vulnerability? See [SECURITY.md](SECURITY.md).
 - One proxy process keeps session state in memory: run one instance per agent fleet, or send all of a session's turns to the same instance.
 - `evicted` needs vLLM KV events, which the proxy does not consume yet.
 - OpenAI's default in-memory cache TTL is not a fixed number, so after a long gap a cold OpenAI cache is `unknown` unless you send `X-Prefixwise-Cache-Ttl`.
-- Costs are not priced yet (`avoidable_cost` is null): rates change, and a guessed rate is worse than none.
+- **Dollar costs:** only models in the dated price table are priced: Claude Haiku, Sonnet and Opus 5.5 and Fable 5.1, read from Anthropic's pricing page on 2026-11-06. Everything else, OpenAI included, shows `-` until you add rates with `PREFIXWISE_PRICES`. Batch, fast-mode and data-residency multipliers are not modelled.
 
 ## Working on Prefixwise
 

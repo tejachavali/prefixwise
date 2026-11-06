@@ -46,6 +46,8 @@ class LedgerEntry:
     request_id: str | None = None
     completion_tokens: int = 0
     fixes: str | None = None  # comma-separated proxy fixes that rewrote this request
+    cost: float | None = None  # USD for the whole request; None = a rate was unknown
+    price_as_of: str | None = None  # date of the price table that priced it
 
 
 def avoidable_tokens(prompt_tokens: int, cached_tokens: int, *,
@@ -85,7 +87,7 @@ def reuse_adjusted_reads(write_multiplier: float, read_multiplier: float) -> flo
 
 # Columns added after the first schema; added in place to older ledgers.
 _MIGRATIONS = {"task_id": "TEXT", "request_id": "TEXT", "completion_tokens": "INTEGER",
-               "fixes": "TEXT"}
+               "fixes": "TEXT", "cost": "REAL", "price_as_of": "TEXT"}
 
 
 class Ledger:
@@ -137,15 +139,16 @@ class Ledger:
                 """INSERT INTO entries (session_id, agent_id, provider, model, cause,
                     legit, prompt_tokens, cached_tokens, avoidable_tokens,
                     avoidable_cost, task_success, native_reason, classifier_version,
-                    task_id, request_id, completion_tokens, fixes)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    task_id, request_id, completion_tokens, fixes, cost, price_as_of)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (entry.session_id, entry.agent_id, entry.provider, entry.model,
                  entry.cause, None if entry.legit is None else int(entry.legit),
                  entry.prompt_tokens, entry.cached_tokens, entry.avoidable_tokens,
                  entry.avoidable_cost,
                  None if entry.task_success is None else int(entry.task_success),
                  entry.native_reason, entry.classifier_version,
-                 entry.task_id, entry.request_id, entry.completion_tokens, entry.fixes),
+                 entry.task_id, entry.request_id, entry.completion_tokens, entry.fixes,
+                 entry.cost, entry.price_as_of),
             )
             if entry.task_id and entry.task_success is not None:
                 self._set_task_outcome_locked(entry.task_id, entry.task_success)
@@ -211,12 +214,33 @@ class Ledger:
                 """SELECT COUNT(*), COALESCE(SUM(prompt_tokens), 0), COALESCE(SUM(cached_tokens), 0),
                           COALESCE(SUM(completion_tokens), 0), COALESCE(SUM(avoidable_tokens), 0)
                    FROM entries""").fetchone()
+            priced, cost, avoidable_cost = self.conn.execute(
+                """SELECT COUNT(cost), COALESCE(SUM(cost), 0), COALESCE(SUM(avoidable_cost), 0)
+                   FROM entries""").fetchone()
         return {"requests": n, "prompt_tokens": prompt, "cached_tokens": cached,
                 "completion_tokens": completion, "avoidable_tokens": avoidable,
                 "cache_hit_rate": (cached / prompt) if prompt else None,
                 "avoidable_share": (avoidable / prompt) if prompt else None,
                 "tasks": self.task_counts(),
-                "tokens_per_successful_task": self.tokens_per_successful_task()}
+                "tokens_per_successful_task": self.tokens_per_successful_task(),
+                # Dollars cover only priced requests; priced_requests says how many.
+                "priced_requests": priced,
+                "cost": cost if priced else None,
+                "avoidable_cost": avoidable_cost if priced else None,
+                "cost_per_successful_task": self.cost_per_successful_task()}
+
+    def cost_per_successful_task(self) -> float | None:
+        """Dollars on resolved tasks (failures included) / successful tasks.
+        None unless every request on those tasks was priced: a partial sum
+        would understate it."""
+        with self._lock:
+            n, priced, total = self.conn.execute(
+                """SELECT COUNT(*), COUNT(e.cost), COALESCE(SUM(e.cost), 0)
+                   FROM entries e JOIN tasks t ON e.task_id = t.task_id""").fetchone()
+        successful = self.task_counts()["successful"]
+        if not successful or not n or priced != n:
+            return None
+        return total / successful
 
     ROLLUP_KEYS = ("cause", "session_id", "agent_id", "model", "provider", "task_id")
 
@@ -228,7 +252,8 @@ class Ledger:
             rows = self.conn.execute(
                 f"""SELECT {by}, COUNT(*), COALESCE(SUM(prompt_tokens), 0),
                            COALESCE(SUM(cached_tokens), 0), COALESCE(SUM(avoidable_tokens), 0),
-                           SUM(CASE WHEN legit = 0 THEN 1 ELSE 0 END)
+                           SUM(CASE WHEN legit = 0 THEN 1 ELSE 0 END),
+                           COUNT(cost), SUM(cost), SUM(avoidable_cost)
                     FROM entries GROUP BY {by}
                     ORDER BY SUM(avoidable_tokens) DESC, COUNT(*) DESC""").fetchall()
             # Tokens per successful task within each group: tokens on resolved
@@ -239,10 +264,11 @@ class Ledger:
                     FROM entries e JOIN tasks t ON e.task_id = t.task_id
                     GROUP BY e.{by}""").fetchall()}
         out = []
-        for k, n, pt, ct, at, w in rows:
+        for k, n, pt, ct, at, w, priced, cost, acost in rows:
             tok, ok = per_task.get(k, (0, 0))
             out.append({by: k, "requests": n, "prompt_tokens": pt, "cached_tokens": ct,
                         "avoidable_tokens": at, "waste_requests": w or 0,
+                        "priced_requests": priced, "cost": cost, "avoidable_cost": acost,
                         "successful_tasks": ok,
                         "tokens_per_successful_task": (tok / ok) if ok else None})
         return out

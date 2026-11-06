@@ -353,3 +353,10 @@
 - What changed: canonical_tools marked proven (FIX_STATUS, shown by
   `prefixwise fixes`); run record; README/CHANGELOG/WORKLOG.
 - Tests: 117 passed.
+
+## 2026-11-06 PST -- commit 7987ac3bee0ae1373a5a99ff569865762af238f9 (dollar costs)
+- What changed: dated price table (Anthropic, verified from the
+  official page 2026-11-06), per-request and avoidable cost in the
+  ledger, report/fixes in dollars, `prefixwise prices`, user rates file.
+- Tests: 127 passed. Wheel includes prices.json; installed CLI works.
+- Not done: OpenAI rates (official pages unreachable here; Muse task C).
