@@ -80,13 +80,15 @@ In mock mode (no `PREFIXWISE_UPSTREAM_URL` set) the proxy returns synthetic usag
 
 ```bash
 curl -s http://127.0.0.1:8080/health
-curl -s -X POST http://127.0.0.1:8080/v1/chat/completions \
+curl -si -X POST http://127.0.0.1:8080/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{"model":"gpt-5.6","session_id":"s1","messages":[{"role":"system","content":"You are helpful."},{"role":"user","content":"hi"}]}'
 curl -s http://127.0.0.1:8080/ledger
 ```
 
 With a real upstream, set `PREFIXWISE_UPSTREAM_URL` (e.g. `https://api.openai.com`) and `PREFIXWISE_API_KEY`. The proxy forwards with `X-Request-Id` and `X-Session-ID` for the engine join.
+
+The client gets the upstream response and status unchanged, so the proxy is a drop-in base URL. Prefixwise's verdict rides in response headers (`X-Prefixwise-Cause`, `X-Prefixwise-Legit`, `X-Prefixwise-Avoidable-Tokens`, `X-Prefixwise-Request-Id`). Pass session and agent identity as `X-Prefixwise-Session-Id` / `X-Prefixwise-Agent-Id` headers, or as `session_id` / `agent_id` body fields, which are stripped before forwarding. Client auth headers pass through; `PREFIXWISE_API_KEY`, if set, overrides them (`x-api-key` for Anthropic). Not yet supported: `stream: true` (rejected with a 400) and the OpenAI Responses API, so OpenAI `comparison_response_id` chaining is not sent.
 
 ## E1-open: classifier validation without API credits
 

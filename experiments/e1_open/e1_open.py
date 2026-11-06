@@ -321,10 +321,11 @@ def run(*, vllm_url: str, model: str, model_alias: str, mock: bool,
     state = {"injected": "first_write"}
 
     if mock:
-        def _mock_forward(provider, body, request_id, session_id):
-            return ({"prompt_tokens": PROMPT_TOKENS_MOCK,
-                     "cached_tokens": simulate_cached_tokens(state["injected"])},
-                    f"resp-{request_id[:8]}")
+        def _mock_forward(provider, body, request_id, session_id, client_headers):
+            return 200, {"id": f"resp-{request_id[:8]}",
+                         "usage": {"prompt_tokens": PROMPT_TOKENS_MOCK,
+                                   "prompt_tokens_details": {
+                                       "cached_tokens": simulate_cached_tokens(state["injected"])}}}
         proxy._forward = _mock_forward  # type: ignore[method-assign]
 
     results: list[dict] = []
@@ -348,17 +349,16 @@ def run(*, vllm_url: str, model: str, model_alias: str, mock: bool,
                               question=QUESTIONS[session_idx % len(QUESTIONS)],
                               grow=script is SESSION_C)
             upstream_error = False
-            try:
-                result, _entry = proxy.handle("vllm", dict(body))
+            result, _entry = proxy.handle("vllm", dict(body))
+            if result["status"] < 400:
                 predicted = result["cause"]
-                usage = result["usage"]
-                cached = int(usage.get("cached_tokens", 0) or 0)
-                prompt_tokens = int(usage.get("prompt_tokens", 0) or 0)
-            except Exception as exc:  # upstream rejected the model alias, etc.
+                cached, prompt_tokens = result["cached_tokens"], result["prompt_tokens"]
+            else:  # upstream rejected the model alias, etc.
                 upstream_error = True
                 predicted = _classify_direct(proxy, session_id, body)
                 cached, prompt_tokens = 0, PROMPT_TOKENS_MOCK
-                print(f"turn {turn_no}: upstream error ({exc}), classified in-process as {predicted}")
+                print(f"turn {turn_no}: upstream error {result['status']} "
+                      f"({json.dumps(result['response'])[:200]}), classified in-process as {predicted}")
             results.append({
                 "turn": turn_no, "session_id": session_id, "injected": injected,
                 "predicted": predicted, "cached_tokens": cached,
