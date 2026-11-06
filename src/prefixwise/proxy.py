@@ -88,8 +88,44 @@ def extract_blocks(body: dict, provider: str) -> list[tuple[str, object]]:
     for m in body.get("messages", []) or []:
         if m.get("role") == "system" and provider != "anthropic":
             continue
-        blocks.append(("messages", m))
+        blocks.append(("tool_results" if _is_tool_result(m, provider) else "messages", m))
     return blocks
+
+
+def _is_tool_result(m: dict, provider: str) -> bool:
+    """Tool output is its own block group, so a mutated or cleared result is
+    TOOL_RESULT_MUTATION (or a compaction), not a generic history edit.
+    OpenAI chat: role "tool". Anthropic: a user turn made only of
+    tool_result blocks. Responses: function_call_output items."""
+    if m.get("type") == "function_call_output":
+        return True
+    if provider == "anthropic":
+        content = m.get("content")
+        return (m.get("role") == "user" and isinstance(content, list) and bool(content)
+                and all(isinstance(c, dict) and c.get("type") == "tool_result" for c in content))
+    return m.get("role") == "tool"
+
+
+def cache_ttl_seconds(provider: str, body: dict, headers: dict | None = None) -> float | None:
+    """The cache lifetime that applies to this request, or None if unknown.
+
+    An X-Prefixwise-Cache-Ttl header wins. Anthropic: 5 minutes by default,
+    1 hour when a cache_control breakpoint asks for ttl "1h". OpenAI: 24 h
+    with prompt_cache_retention "24h"; the default in-memory retention is
+    not a fixed number (5-10 min, up to 1 h), so it stays unknown. vLLM and
+    other engines evict by memory pressure, not time.
+    """
+    raw = (headers or {}).get("x-prefixwise-cache-ttl")
+    if raw:
+        try:
+            return float(raw)
+        except ValueError:
+            pass
+    if provider == "anthropic":
+        return 3600.0 if '"ttl": "1h"' in json.dumps(body) else 300.0
+    if provider == "openai" and body.get("prompt_cache_retention") == "24h":
+        return 86400.0
+    return None
 
 
 def is_responses_body(body: dict) -> bool:
@@ -111,7 +147,8 @@ def _extract_responses_blocks(body: dict) -> list[tuple[str, object]]:
     if isinstance(items, str):
         items = [{"role": "user", "content": items}]
     for item in items or []:
-        blocks.append(("messages", item))
+        role = "tool_results" if isinstance(item, dict) and _is_tool_result(item, "openai") else "messages"
+        blocks.append((role, item))
     return blocks
 
 
@@ -342,6 +379,8 @@ class PrefixwiseProxy:
             "compaction_event": bool(body.get("prefixwise_compaction_event", False))
             or headers.get("x-prefixwise-compaction-event") in ("1", "true"),
             "stream": bool(body.get("stream")),
+            "fork_of": headers.get("x-prefixwise-fork-of"),
+            "ttl_seconds": cache_ttl_seconds(provider, body, headers),
         }
 
     def finalize(self, ctx: dict, status: int, payload: dict) -> tuple[dict, LedgerEntry]:
@@ -368,9 +407,10 @@ class PrefixwiseProxy:
         prior = self.snapshot_by_response.get(prev_id)
         if prior is None:
             return None, None
-        head = [b for b in fps if b.role != "messages"]
-        new_msgs = [b for b in fps if b.role == "messages"]
-        old_msgs = [b for b in prior.blocks if b.role == "messages"]
+        convo = ("messages", "tool_results")
+        head = [b for b in fps if b.role not in convo]
+        new_msgs = [b for b in fps if b.role in convo]
+        old_msgs = [b for b in prior.blocks if b.role in convo]
         return head + old_msgs + new_msgs, prior
 
     def _finalize_locked(self, ctx, status, payload, usage, prompt_tokens, cached,
@@ -393,7 +433,10 @@ class PrefixwiseProxy:
                                params={k: body.get(k) for k in
                                        ("tool_choice", "thinking", "reasoning", "output_format",
                                         "text_format", "text", "verbosity") if body.get(k) is not None},
-                               has_breakpoint=has_cache_breakpoint(body))
+                               has_breakpoint=has_cache_breakpoint(body),
+                               ttl_seconds=ctx.get("ttl_seconds"),
+                               fork_parent_session_id=ctx.get("fork_of"),
+                               session_id=session_id)
         if unknown_parent:
             result = Classification(MissCause.UNKNOWN, None,
                                     "previous_response_id points to a response this proxy never saw;"
@@ -608,6 +651,14 @@ class PrefixwiseProxy:
         return out + [b"data: [DONE]\n", b"\n"]
 
 
+class PrefixwiseHTTPServer(ThreadingHTTPServer):
+    """Threaded server sized for agent fleets. The stdlib default listen
+    backlog is 5, so a burst of parallel requests got connection resets."""
+
+    request_queue_size = 256
+    daemon_threads = True
+
+
 def make_handler(proxy: PrefixwiseProxy):
     class Handler(BaseHTTPRequestHandler):
         # HTTP/1.0: a streamed body ends when the connection closes, so no
@@ -711,7 +762,7 @@ def serve(host: str = "127.0.0.1", port: int = 8080, *, ledger_path: str | None 
     ledger_path = ledger_path or os.environ.get("PREFIXWISE_LEDGER_PATH", ":memory:")
     proxy = PrefixwiseProxy(ledger_path=ledger_path, upstream_url=upstream_url, mock=mock,
                             hmac_key=hmac_key.encode() if hmac_key else None)
-    server = ThreadingHTTPServer((host, port), make_handler(proxy))
+    server = PrefixwiseHTTPServer((host, port), make_handler(proxy))
     if not quiet:
         target = "MOCK upstream (synthetic usage, no API calls)" if proxy.mock else proxy.upstream_url
         print(f"Prefixwise proxy on http://{host}:{server.server_address[1]}")

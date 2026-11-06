@@ -18,7 +18,8 @@ from pathlib import Path
 
 from .classifier import RequestSnapshot, classify
 from .fingerprint import BlockFingerprint, Fingerprinter
-from .proxy import completion_tokens_of, extract_blocks, has_cache_breakpoint, normalize_usage
+from .proxy import (cache_ttl_seconds, completion_tokens_of, extract_blocks, has_cache_breakpoint,
+                    normalize_usage)
 
 PARAM_KEYS = ("tool_choice", "thinking", "reasoning", "output_format", "text_format", "verbosity")
 
@@ -90,6 +91,7 @@ def _snapshot(turn: Turn, provider: str, fp: Fingerprinter) -> RequestSnapshot:
                            gap_seconds=turn.gap_seconds, compaction_event=turn.compaction_event,
                            params={k: turn.body.get(k) for k in PARAM_KEYS if turn.body.get(k) is not None},
                            has_breakpoint=has_cache_breakpoint(turn.body),
+                           ttl_seconds=cache_ttl_seconds(provider, turn.body),
                            min_prefix_tokens=min_prefix)
 
 

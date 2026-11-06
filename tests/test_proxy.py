@@ -4,7 +4,8 @@ import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from prefixwise.proxy import PrefixwiseProxy, has_cache_breakpoint, make_handler, normalize_usage
+from prefixwise.proxy import (PrefixwiseHTTPServer, PrefixwiseProxy, has_cache_breakpoint, make_handler,
+                              normalize_usage)
 
 
 def start(server):
@@ -14,7 +15,7 @@ def start(server):
 
 def run_proxy(**kw):
     proxy = PrefixwiseProxy(**kw)
-    server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(proxy))
+    server = PrefixwiseHTTPServer(("127.0.0.1", 0), make_handler(proxy))
     return proxy, server, start(server)
 
 
@@ -458,3 +459,57 @@ def test_responses_stream_usage_from_completed_event():
     finally:
         server.shutdown()
         up.server.shutdown()
+
+
+def test_tool_result_mutation_through_proxy():
+    proxy, server, port = run_proxy()
+    try:
+        msgs = [{"role": "system", "content": "You are an agent."},
+                {"role": "user", "content": "run the tests"},
+                {"role": "assistant", "tool_calls": [{"id": "c1", "type": "function",
+                                                      "function": {"name": "sh", "arguments": "{}"}}]},
+                {"role": "tool", "tool_call_id": "c1", "content": "3 passed in 0.41s"}]
+        post(port, "/v1/chat/completions", {"model": "m", "session_id": "tr", "messages": msgs})
+        # The harness re-renders the earlier tool output (timing changed): waste.
+        msgs2 = msgs[:3] + [{**msgs[3], "content": "3 passed in 0.39s"}]
+        _, _, h = post(port, "/v1/chat/completions", {"model": "m", "session_id": "tr", "messages": msgs2})
+        assert h["X-Prefixwise-Cause"] == "tool_result_mutation" and h["X-Prefixwise-Legit"] == "false"
+    finally:
+        server.shutdown()
+
+
+def test_anthropic_ttl_expired_and_one_hour_ttl():
+    import time as _time
+
+    payload = {"id": "msg", "usage": {"input_tokens": 2000, "cache_read_input_tokens": 0,
+                                      "cache_creation_input_tokens": 0}}
+    up = FakeUpstream(payload=payload)
+    proxy, server, port = run_proxy(upstream_url=up.url)
+    try:
+        def body(ttl=None, session="ttl"):
+            cc = {"type": "ephemeral", **({"ttl": ttl} if ttl else {})}
+            return {"model": "claude-sonnet-5-5", "session_id": session,
+                    "system": [{"type": "text", "text": "x", "cache_control": cc}],
+                    "messages": [{"role": "user", "content": "hi"}]}
+        post(port, "/v1/messages", body())
+        proxy.last_seen["ttl"] = _time.time() - 600  # 10 minutes idle > 5 min default
+        _, _, h = post(port, "/v1/messages", body())
+        assert h["X-Prefixwise-Cause"] == "ttl_expired"
+        # Same 10-minute gap in a session that asked for a 1 h cache: not expiry.
+        post(port, "/v1/messages", body("1h", "ttl1h"))
+        proxy.last_seen["ttl1h"] = _time.time() - 600
+        _, _, h = post(port, "/v1/messages", body("1h", "ttl1h"))
+        assert h["X-Prefixwise-Cause"] == "routing_miss"
+    finally:
+        server.shutdown()
+        up.server.shutdown()
+
+
+def test_fork_header_marks_first_turn():
+    proxy, server, port = run_proxy()
+    try:
+        _, _, h = post(port, "/v1/chat/completions", {**BODY, "session_id": "child"},
+                       {"X-Prefixwise-Fork-Of": "s1"})
+        assert h["X-Prefixwise-Cause"] == "fork_boundary" and h["X-Prefixwise-Avoidable-Tokens"] == "0"
+    finally:
+        server.shutdown()
