@@ -513,3 +513,29 @@ def test_fork_header_marks_first_turn():
         assert h["X-Prefixwise-Cause"] == "fork_boundary" and h["X-Prefixwise-Avoidable-Tokens"] == "0"
     finally:
         server.shutdown()
+
+
+def test_moving_anthropic_breakpoint_is_not_a_history_edit():
+    cc = {"type": "ephemeral"}
+    payloads = [{"id": "m1", "usage": {"input_tokens": 10, "cache_read_input_tokens": 0,
+                                       "cache_creation_input_tokens": 2000}},
+                {"id": "m2", "usage": {"input_tokens": 60, "cache_read_input_tokens": 2000,
+                                       "cache_creation_input_tokens": 40}}]
+    up = ScriptedUpstream(payloads)
+    proxy, server, port = run_proxy(upstream_url=up.url)
+    try:
+        system = [{"type": "text", "text": "You are helpful.", "cache_control": cc}]
+        t1 = {"model": "claude-haiku-5-5", "session_id": "bp", "max_tokens": 8, "system": system,
+              "messages": [{"role": "user", "content": [{"type": "text", "text": "q1", "cache_control": cc}]}]}
+        # Standard pattern: the breakpoint moves to the newest message.
+        t2 = {**t1, "messages": [{"role": "user", "content": [{"type": "text", "text": "q1"}]},
+                                 {"role": "assistant", "content": "a1"},
+                                 {"role": "user", "content": [{"type": "text", "text": "q2",
+                                                               "cache_control": cc}]}]}
+        post(port, "/v1/messages", t1)
+        _, _, h = post(port, "/v1/messages", t2)
+        assert h["X-Prefixwise-Cause"] == "none"
+        assert "cache_control" in json.dumps(up.requests[1]["body"])  # forwarded untouched
+    finally:
+        server.shutdown()
+        up.server.shutdown()

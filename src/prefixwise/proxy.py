@@ -67,6 +67,41 @@ def extract_blocks(body: dict, provider: str) -> list[tuple[str, object]]:
     Caching 201, verified Nov 2026); Anthropic is tools, system,
     messages. This is the v2 order, not the v1 assumption.
     """
+    blocks = [(role, _strip_cache_markers(value)) for role, value in _extract_blocks_raw(body, provider)]
+    if provider == "anthropic":
+        blocks = [(role, _anthropic_text_blocks(role, value)) for role, value in blocks]
+    return blocks
+
+
+def _anthropic_text_blocks(role: str, value: object) -> object:
+    """Anthropic treats string content as one text block: "x" and
+    [{"type": "text", "text": "x"}] render the same prompt. Clients switch
+    between the two (a message gets list form while it carries the moving
+    cache breakpoint, then reverts to a string), so fingerprint one form."""
+    if role == "system" and isinstance(value, str):
+        return [{"type": "text", "text": value}]
+    if isinstance(value, dict) and isinstance(value.get("content"), str):
+        return {**value, "content": [{"type": "text", "text": value["content"]}]}
+    return value
+
+
+def _strip_cache_markers(value: object) -> object:
+    """Drop cache_control markers before fingerprinting.
+
+    A breakpoint says where the provider should cache, not what the prompt
+    is. The standard Anthropic pattern moves the breakpoint to the newest
+    message every turn; fingerprinting the marker made every ordinary turn
+    look like HISTORY_EDIT. Breakpoint presence is checked separately
+    (has_cache_breakpoint) on the untouched body.
+    """
+    if isinstance(value, dict):
+        return {k: _strip_cache_markers(v) for k, v in value.items() if k != "cache_control"}
+    if isinstance(value, list):
+        return [_strip_cache_markers(v) for v in value]
+    return value
+
+
+def _extract_blocks_raw(body: dict, provider: str) -> list[tuple[str, object]]:
     if provider != "anthropic" and is_responses_body(body):
         return _extract_responses_blocks(body)
     blocks: list[tuple[str, object]] = []

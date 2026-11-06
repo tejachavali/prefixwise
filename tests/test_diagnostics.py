@@ -30,3 +30,20 @@ def test_agreement_scorer():
     assert s.unknown_rate == 0.0
     s.record(MissCause.UNKNOWN, None, "openai")
     assert s.unknown_rate == 1 / 4
+
+
+def test_native_agreement_accepts_refinements_not_wrong_places():
+    from prefixwise.classifier import MissCause as C
+    from prefixwise.diagnostics import AgreementScorer
+
+    s = AgreementScorer()
+    # Refinements of the provider's coarse reason agree.
+    assert s.record(C.VOLATILE_SYSTEM, "system_changed", "anthropic") is True
+    assert s.record(C.TOOL_RESULT_MUTATION, "messages_changed", "anthropic") is True
+    assert s.record(C.SYSTEM_EDIT, "input_changed", "openai") is True
+    # A different block, or a different kind of change, does not.
+    assert s.record(C.SYSTEM_EDIT, "tools_changed", "anthropic") is False
+    assert s.record(C.TOOL_RESERIALIZE, "input_changed", "openai") is False
+    assert s.record(C.HISTORY_EDIT, "unavailable", "anthropic") is False
+    assert s.record(C.ROUTING_MISS, "model_changed", "openai") is False
+    assert s.record(C.NONE, "not_a_real_reason", "openai") is None  # unmapped: not scored
