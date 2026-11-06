@@ -93,8 +93,12 @@ class Ledger:
         import threading
 
         self._lock = threading.Lock()
-        self.conn = sqlite3.connect(path, check_same_thread=False)
+        # timeout: the CLI and a running proxy may share one ledger file.
+        self.conn = sqlite3.connect(path, check_same_thread=False, timeout=10)
         with self._lock:
+            if path != ":memory:":
+                # WAL lets `prefixwise report` read while the proxy writes.
+                self.conn.execute("PRAGMA journal_mode=WAL")
             self.conn.execute(
                 """CREATE TABLE IF NOT EXISTS entries (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -190,6 +194,43 @@ class Ledger:
             row = cur.fetchone()
             names = [d[0] for d in cur.description]
         return dict(zip(names, row)) if row else None
+
+    def summary(self) -> dict:
+        """Totals across the whole ledger, for reports."""
+        with self._lock:
+            n, prompt, cached, completion, avoidable = self.conn.execute(
+                """SELECT COUNT(*), COALESCE(SUM(prompt_tokens), 0), COALESCE(SUM(cached_tokens), 0),
+                          COALESCE(SUM(completion_tokens), 0), COALESCE(SUM(avoidable_tokens), 0)
+                   FROM entries""").fetchone()
+        return {"requests": n, "prompt_tokens": prompt, "cached_tokens": cached,
+                "completion_tokens": completion, "avoidable_tokens": avoidable,
+                "cache_hit_rate": (cached / prompt) if prompt else None,
+                "avoidable_share": (avoidable / prompt) if prompt else None,
+                "tasks": self.task_counts(),
+                "tokens_per_successful_task": self.tokens_per_successful_task()}
+
+    ROLLUP_KEYS = ("cause", "session_id", "agent_id", "model", "provider", "task_id")
+
+    def rollup(self, by: str = "cause") -> list[dict]:
+        """Requests and tokens grouped by one column, most avoidable first."""
+        if by not in self.ROLLUP_KEYS:
+            raise ValueError(f"rollup key must be one of {self.ROLLUP_KEYS}")
+        with self._lock:
+            rows = self.conn.execute(
+                f"""SELECT {by}, COUNT(*), COALESCE(SUM(prompt_tokens), 0),
+                           COALESCE(SUM(cached_tokens), 0), COALESCE(SUM(avoidable_tokens), 0),
+                           SUM(CASE WHEN legit = 0 THEN 1 ELSE 0 END)
+                    FROM entries GROUP BY {by}
+                    ORDER BY SUM(avoidable_tokens) DESC, COUNT(*) DESC""").fetchall()
+        return [{by: k, "requests": n, "prompt_tokens": pt, "cached_tokens": ct,
+                 "avoidable_tokens": at, "waste_requests": w or 0}
+                for k, n, pt, ct, at, w in rows]
+
+    def recent(self, limit: int = 20) -> list[dict]:
+        with self._lock:
+            cur = self.conn.execute("SELECT * FROM entries ORDER BY id DESC LIMIT ?", (limit,))
+            names = [d[0] for d in cur.description]
+            return [dict(zip(names, r)) for r in cur.fetchall()]
 
     def rollup_by_cause(self) -> list[dict]:
         with self._lock:

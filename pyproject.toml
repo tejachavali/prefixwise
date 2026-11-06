@@ -11,6 +11,7 @@ license = "MIT"
 authors = [{name = "Teja Chavali"}]
 
 [project.scripts]
+prefixwise = "prefixwise.cli:main"
 prefixwise-proxy = "prefixwise.proxy:serve"
 
 [project.optional-dependencies]
