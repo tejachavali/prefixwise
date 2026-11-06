@@ -88,7 +88,18 @@ curl -s http://127.0.0.1:8080/ledger
 
 With a real upstream, set `PREFIXWISE_UPSTREAM_URL` (e.g. `https://api.openai.com`) and `PREFIXWISE_API_KEY`. The proxy forwards with `X-Request-Id` and `X-Session-ID` for the engine join.
 
-The client gets the upstream response and status unchanged, so the proxy is a drop-in base URL. Prefixwise's verdict rides in response headers (`X-Prefixwise-Cause`, `X-Prefixwise-Legit`, `X-Prefixwise-Avoidable-Tokens`, `X-Prefixwise-Request-Id`). Pass session and agent identity as `X-Prefixwise-Session-Id` / `X-Prefixwise-Agent-Id` headers, or as `session_id` / `agent_id` body fields, which are stripped before forwarding. Client auth headers pass through; `PREFIXWISE_API_KEY`, if set, overrides them (`x-api-key` for Anthropic). Not yet supported: `stream: true` (rejected with a 400) and the OpenAI Responses API, so OpenAI `comparison_response_id` chaining is not sent.
+The client gets the upstream response and status unchanged, so the proxy is a drop-in base URL. Prefixwise's verdict rides in response headers (`X-Prefixwise-Cause`, `X-Prefixwise-Legit`, `X-Prefixwise-Avoidable-Tokens`, `X-Prefixwise-Request-Id`). Pass session and agent identity as `X-Prefixwise-Session-Id` / `X-Prefixwise-Agent-Id` headers, or as `session_id` / `agent_id` body fields, which are stripped before forwarding. Client auth headers pass through; `PREFIXWISE_API_KEY`, if set, overrides them (`x-api-key` for Anthropic). Streaming (`stream: true`) is relayed as SSE, event by event, unchanged. For OpenAI-compatible upstreams the proxy asks for `stream_options.include_usage` and hides that usage chunk from clients that did not ask for it. Response headers go out before usage is known, so a streamed request's verdict is read afterwards from `GET /requests/<X-Prefixwise-Request-Id>`. A stream cut off before its usage arrives is not recorded. Not yet supported: the OpenAI Responses API, so OpenAI `comparison_response_id` chaining is not sent.
+
+### Tokens per successful task
+
+The headline metric is all tokens (prompt + completion) spent on finished tasks, failed ones included, divided by the number of successful tasks. Tag each request with a task, via the `X-Prefixwise-Task-Id` header or a `task_id` body field (stripped before forwarding), then record the outcome when the task ends:
+
+```bash
+curl -s -X POST http://127.0.0.1:8080/tasks -H 'Content-Type: application/json' \
+  -d '{"task_id":"fix-bug-123","success":true}'
+```
+
+Requests with no task, and tasks with no recorded outcome, are left out of the metric rather than guessed. Recording an outcome again overwrites it (a retried task that passes). Existing ledger files are migrated in place.
 
 ## E1-open: classifier validation without API credits
 

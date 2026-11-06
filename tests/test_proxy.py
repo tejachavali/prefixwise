@@ -33,8 +33,9 @@ def post(port, path, body, headers=None):
 class FakeUpstream:
     """Records what the proxy forwards; replies with a scripted status/payload."""
 
-    def __init__(self, status=200, payload=None):
+    def __init__(self, status=200, payload=None, stream_lines=None):
         self.status, self.payload, self.requests = status, payload, []
+        self.stream_lines = stream_lines
         outer = self
 
         class H(BaseHTTPRequestHandler):
@@ -45,6 +46,14 @@ class FakeUpstream:
                 body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
                 outer.requests.append({"path": self.path, "body": body,
                                        "headers": {k.lower(): v for k, v in self.headers.items()}})
+                if outer.stream_lines is not None:
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/event-stream")
+                    self.end_headers()
+                    for line in outer.stream_lines:
+                        self.wfile.write(line)
+                        self.wfile.flush()
+                    return
                 data = json.dumps(outer.payload).encode()
                 self.send_response(outer.status)
                 self.send_header("Content-Type", "application/json")
@@ -168,12 +177,10 @@ def test_unreachable_upstream_is_502():
         server.shutdown()
 
 
-def test_bad_json_stream_and_unknown_path():
+def test_bad_json_and_unknown_path():
     proxy, server, port = run_proxy()
     try:
         assert post(port, "/v1/chat/completions", b"{not json")[0] == 400
-        status, resp, _ = post(port, "/v1/chat/completions", {**BODY, "stream": True})
-        assert status == 400 and "stream" in resp["error"]["message"]
         assert post(port, "/v1/embeddings", BODY)[0] == 404
     finally:
         server.shutdown()
@@ -187,3 +194,137 @@ def test_normalize_usage_and_breakpoints():
     assert has_cache_breakpoint({"tools": [{"name": "t", "cache_control": {"type": "ephemeral"}}]})
     assert has_cache_breakpoint({"cache_control": {"type": "ephemeral"}})
     assert not has_cache_breakpoint({"system": "x", "messages": [{"role": "user", "content": "hi"}]})
+
+
+
+def stream(port, path, body, headers=None):
+    """POST a streaming request; return (status, raw body bytes, headers)."""
+    req = urllib.request.Request(f"http://127.0.0.1:{port}{path}", method="POST",
+                                 data=json.dumps(body).encode(),
+                                 headers={"Content-Type": "application/json", **(headers or {})})
+    with urllib.request.urlopen(req, timeout=10) as r:
+        return r.status, r.read(), r.headers
+
+
+def get(port, path):
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}{path}", timeout=10) as r:
+            return r.status, json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        return e.code, json.loads(e.read())
+
+
+def sse(*events):
+    out = []
+    for name, obj in events:
+        if name:
+            out.append(f"event: {name}\n".encode())
+        out += [b"data: " + (obj if isinstance(obj, bytes) else json.dumps(obj).encode()) + b"\n", b"\n"]
+    return out
+
+
+OPENAI_STREAM = sse(
+    (None, {"id": "c1", "choices": [{"index": 0, "delta": {"content": "hel"}}], "usage": None}),
+    (None, {"id": "c1", "choices": [{"index": 0, "delta": {"content": "lo"}, "finish_reason": "stop"}],
+            "usage": None}),
+    (None, {"id": "c1", "choices": [], "usage": {"prompt_tokens": 2000, "completion_tokens": 2,
+                                                 "prompt_tokens_details": {"cached_tokens": 1800}}}),
+    (None, b"[DONE]"),
+)
+
+
+def test_openai_stream_relayed_usage_injected_and_hidden():
+    up = FakeUpstream(stream_lines=OPENAI_STREAM)
+    proxy, server, port = run_proxy(upstream_url=up.url)
+    try:
+        body = {**BODY, "stream": True, "task_id": "task-1"}
+        status, raw, headers = stream(port, "/v1/chat/completions", body)
+        assert status == 200 and headers["Content-Type"] == "text/event-stream"
+        # Proxy asked for usage; the client did not, so the usage chunk is hidden.
+        assert up.requests[0]["body"]["stream_options"] == {"include_usage": True}
+        assert "task_id" not in up.requests[0]["body"]
+        assert b'"hel"' in raw and b'"lo"' in raw and b"data: [DONE]" in raw
+        assert b"prompt_tokens" not in raw
+        status, row = get(port, f"/requests/{headers['X-Prefixwise-Request-Id']}")
+        assert status == 200
+        assert (row["cause"], row["prompt_tokens"], row["cached_tokens"], row["completion_tokens"],
+                row["task_id"]) == ("first_write", 2000, 1800, 2, "task-1")
+    finally:
+        server.shutdown()
+        up.server.shutdown()
+
+
+def test_openai_stream_usage_kept_when_client_asked():
+    up = FakeUpstream(stream_lines=OPENAI_STREAM)
+    proxy, server, port = run_proxy(upstream_url=up.url)
+    try:
+        body = {**BODY, "stream": True, "stream_options": {"include_usage": True}}
+        _, raw, _ = stream(port, "/v1/chat/completions", body)
+        assert b"prompt_tokens" in raw  # the client asked for it, so it gets it
+    finally:
+        server.shutdown()
+        up.server.shutdown()
+
+
+def test_anthropic_stream_usage_from_start_and_delta():
+    events = sse(
+        ("message_start", {"type": "message_start", "message": {
+            "id": "msg_9", "type": "message", "content": [],
+            "usage": {"input_tokens": 50, "cache_read_input_tokens": 1900,
+                      "cache_creation_input_tokens": 50, "output_tokens": 1}}}),
+        ("content_block_delta", {"type": "content_block_delta", "index": 0,
+                                 "delta": {"type": "text_delta", "text": "hi"}}),
+        ("message_delta", {"type": "message_delta", "delta": {"stop_reason": "end_turn"},
+                           "usage": {"output_tokens": 7}}),
+        ("message_stop", {"type": "message_stop"}),
+    )
+    up = FakeUpstream(stream_lines=events)
+    proxy, server, port = run_proxy(upstream_url=up.url, api_key="k")
+    try:
+        body = {"model": "claude-sonnet-5-5", "session_id": "a", "stream": True,
+                "system": [{"type": "text", "text": "x", "cache_control": {"type": "ephemeral"}}],
+                "messages": [{"role": "user", "content": "hi"}]}
+        _, raw, h = stream(port, "/v1/messages", body)
+        assert b"stream_options" not in json.dumps(up.requests[0]["body"]).encode()
+        assert raw.count(b"event: ") == 4  # every event relayed
+        row = proxy.ledger.get_request(h["X-Prefixwise-Request-Id"])
+        assert (row["prompt_tokens"], row["cached_tokens"], row["completion_tokens"]) == (2000, 1900, 7)
+        stream(port, "/v1/messages", body)  # second turn chains diagnostics from the stream id
+        assert up.requests[1]["body"]["diagnostics"] == {"previous_message_id": "msg_9"}
+    finally:
+        server.shutdown()
+        up.server.shutdown()
+
+
+def test_stream_upstream_error_is_json_and_not_recorded():
+    err = {"error": {"message": "bad", "type": "invalid_request_error"}}
+    up = FakeUpstream(status=400, payload=err)
+    proxy, server, port = run_proxy(upstream_url=up.url)
+    try:
+        status, resp, _ = post(port, "/v1/chat/completions", {**BODY, "stream": True})
+        assert status == 400 and resp == err
+        assert proxy.ledger.rollup_by_cause() == []
+    finally:
+        server.shutdown()
+        up.server.shutdown()
+
+
+def test_mock_stream_then_task_outcome_metric():
+    proxy, server, port = run_proxy()
+    try:
+        hdr = {"X-Prefixwise-Task-Id": "fix-bug-1"}
+        _, raw1, h1 = stream(port, "/v1/chat/completions", {**BODY, "stream": True}, hdr)
+        _, raw2, _ = stream(port, "/v1/messages", {"model": "c", "session_id": "m", "stream": True,
+                                                    "messages": [{"role": "user", "content": "hi"}]}, hdr)
+        assert b"[prefixwise mock]" in raw1 and b"[DONE]" in raw1 and b"usage" not in raw1
+        assert b"event: message_stop" in raw2
+        assert get(port, f"/requests/{h1['X-Prefixwise-Request-Id']}")[1]["cause"] == "first_write"
+        assert post(port, "/tasks", {"task_id": "fix-bug-1"})[0] == 400  # success required
+        assert post(port, "/tasks", {"task_id": "fix-bug-1", "success": True})[0] == 200
+        _, ledger = get(port, "/ledger")
+        # Two requests of 2,000 prompt + 1 completion tokens, one successful task.
+        assert ledger["tasks"] == {"resolved": 1, "successful": 1}
+        assert ledger["tokens_per_successful_task"] == 4002.0
+        assert get(port, "/requests/nope")[0] == 404
+    finally:
+        server.shutdown()

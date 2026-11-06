@@ -93,3 +93,25 @@
   the threaded server; tokens_per_successful_task per request, not per
   task; tool results not split from messages; TTL/eviction/fork inputs
   never populated by the proxy.
+
+## 2026-11-06 PST -- commit 3fbb766ff63359f17e3e88c3ea9ee17bcb8c0d89
+- What changed: tokens_per_successful_task is now all prompt +
+  completion tokens on resolved tasks (failures included) divided by
+  successful tasks; new tasks table, task_id / request_id /
+  completion_tokens columns, in-place migration of old ledgers. Proxy:
+  task_id via X-Prefixwise-Task-Id or body field; POST /tasks;
+  GET /requests/<id>; stream=true relayed as SSE (OpenAI include_usage
+  injected and hidden unless requested; Anthropic usage from
+  message_start + message_delta), recorded when the stream ends.
+- Tests: PYTHONPATH=src python3 -m pytest tests/ -q -- 50 passed in 6.88s.
+- Proxy smoke test: mock proxy on :8091 driven by the openai and
+  anthropic Python SDKs: non-stream and stream both providers OK,
+  include_usage passthrough OK, Anthropic final message usage OK,
+  POST /tasks then /ledger: 5 requests x 2,001 tokens / 1 task = 10005.
+  e1_open.py --mock: 120 turns, agreement 100.0%, Pass YES.
+- Failures/fixes: mock Anthropic SSE packed event: and data: into one
+  chunk, so usage was never parsed (only the mock; real upstreams are
+  read with readline). Fixed: one list item per line.
+- Still open: OpenAI Responses API; per-session proxy state not locked;
+  tool results not split from messages; TTL/eviction/fork inputs never
+  populated by the proxy.
