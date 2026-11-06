@@ -35,37 +35,49 @@ Shared handoff between the agents working on Prefixwise. It says **what is being
 
 ## Now
 
-**Goal: dogfood Prefixwise on real agent traffic for a day or two** (launch gate 2; gate 1, E4, passed).
+**Goals (Muse, on Teja's behalf):**
+- **A.** Set up PyPI publishing, so `pip install prefixwise` works.
+- **B.** Dogfood Prefixwise on real agent traffic (launch gate 2; gate 1, E4, passed).
 
-**Why:** every result so far comes from scripted turns: E1's injected causes and E4's recorded sessions. Real agents are messier: long tool outputs, retries, compaction, streaming, parallel sessions. Running it for real will surface rough edges no experiment can, and gives a real `prefixwise report` to show people instead of the README's illustrative one.
+**Why:**
+- **A:** trying Prefixwise should be one command.
+- **B:** every result so far comes from scripted turns: E1's injected causes and E4's recorded sessions. Real agents are messier: long tool outputs, retries, compaction, streaming, parallel sessions. Real traffic will surface rough edges no experiment can, and gives a real `prefixwise report` to replace the README's illustrative one.
 
-**Who:** Teja, on a machine with a real agent. Muse can't do this one: a Colab VM doesn't run a day of real agent work.
+### A. PyPI (about 5 minutes; needs Teja's PyPI and GitHub logins in the browser)
+1. On pypi.org, logged in as Teja: **Your projects → Publishing → Add a new pending publisher**, with:
+   - PyPI project name `prefixwise`
+   - owner `tejachavali`, repository `prefixwise`
+   - workflow `release.yml`
+   - environment `pypi`
+2. On GitHub, logged in as Teja: `tejachavali/prefixwise` → **Settings → Environments → New environment**, named `pypi`, with no secrets.
+3. **Don't tag.** Report back that both are done; Claude pushes the `v0.3.0` tag, watches the release workflow and checks `pip install prefixwise`.
 
-**How:**
-1. `pip install "git+https://github.com/tejachavali/prefixwise"` (or `pip install prefixwise` once 0.3.0 is on PyPI).
-2. `prefixwise serve --upstream https://api.anthropic.com` (or `https://api.openai.com`). It listens on 127.0.0.1:8080; the ledger goes to `./prefixwise.db`.
-3. Point the agent at it: `ANTHROPIC_BASE_URL=http://127.0.0.1:8080` for Anthropic-based tools, `base_url="http://127.0.0.1:8080/v1"` for OpenAI SDKs. If you can set headers, add `X-Prefixwise-Session-Id` per conversation.
-4. Work normally for a day.
+### B. Dogfood (an hour or more of real work)
+1. `pip install "git+https://github.com/tejachavali/prefixwise"` (from `main`).
+2. `prefixwise serve --upstream https://api.anthropic.com --ledger dogfood.db`. It listens on 127.0.0.1:8080. Keys stay in environment variables.
+3. Point a **real agent doing real work** at it. Preferably your own model calls, if your client lets you set the API base URL to `http://127.0.0.1:8080` (Anthropic) or `http://127.0.0.1:8080/v1` (OpenAI). Otherwise run an open-source coding agent on a real task. Set `X-Prefixwise-Session-Id` per conversation if you can.
+4. Don't script the traffic. The point is behaviour Prefixwise hasn't seen.
 
 **Report back:**
 - the output of `prefixwise report`, `prefixwise report --by model` and `prefixwise fixes`
-- anything that broke or looked wrong: errors, odd causes, a large `unknown` share
+- which agent you used and roughly how long it ran
+- anything that broke or looked wrong (errors, odd causes, a large `unknown` share), with the request IDs
 
-Nothing private is needed: the ledger holds no prompt text.
+The ledger holds no prompt text, so these are safe to share. Don't share `dogfood.db` itself if the work was private.
 
 **What Claude does with it:**
 - **Broken things:** fix them first.
-- **A large `unknown` or `routing_miss` share:** look at what evidence is missing and whether a header or a provider field would close it.
-- **A wasteful cause that dominates:** check its fix advice is right, and consider whether it can become a proxy toggle (next E4 candidate).
-- **All clean:** use the report as the README's real example, then launch.
+- **A large `unknown` or `routing_miss` share:** find the missing evidence (a header, a provider field).
+- **A wasteful cause that dominates:** check its advice, and consider a proxy toggle for it (the next E4 candidate).
+- **All clean:** the report becomes the README's real example, and then launch.
 
-**Not blocking:** the next fix to prove after dogfooding is probably moving volatile values out of the system prompt. That needs an app change rather than a proxy toggle, so its E4 would compare two versions of a recorded session.
+**Not blocking:** the next fix to prove after dogfooding is probably moving volatile values out of the system prompt. That needs an app change rather than a proxy toggle, so its E4 compares two versions of a recorded session.
 
 ## In parallel (Claude): launch gates
 
 Teja asked when Prefixwise can go public for people to try. The gates, in order:
 1. **E4 live pass:** done 2026-11-06, `canonical_tools` proven.
-2. **Dogfooding:** a day or two in front of a real agent; see "Now".
+2. **Dogfooding:** Muse, on Teja's behalf; see "Now" B.
 3. **Security review:** done, PR #13. See below.
 4. **Launch polish:** done, PR #14 (v0.3.0 prepared, release workflow, CONTRIBUTING, CHANGELOG, issue templates). Publishing needs Teja's one-time PyPI setup; see CONTRIBUTING.md "Releasing".
 
@@ -109,3 +121,4 @@ Then a soft launch to a few people who run agents (Omni's founder is a candidate
 - **2026-11-06:** Claude: launch polish (PR #14). Version 0.3.0 prepared, not published. The name `prefixwise` is free on PyPI as of today. Trusted-publishing workflow added; Teja does the one-time PyPI pending-publisher setup, then tags `v0.3.0`.
 - **2026-11-06:** Teja dropped the legal-clearance gate from the launch plan (Teja's call).
 - **2026-11-06:** Muse ran E4 live. Pass on vLLM (97.5% of predicted realised, 1/60 task flip) and Anthropic (99.9%, 0/60). `canonical_tools` marked proven (PR #15). Next: Teja dogfoods on a real agent.
+- **2026-11-06:** Teja asked Muse to do the PyPI setup and dogfooding on Teja's behalf. Claude pushes the v0.3.0 tag once Muse confirms the setup.
