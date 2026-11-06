@@ -95,6 +95,13 @@ class Ledger:
         import threading
 
         self._lock = threading.Lock()
+        # The ledger holds no prompt text, but its ids and counts are still
+        # the user's business: create it owner-only (0600).
+        if path != ":memory:":
+            import os
+
+            if not os.path.exists(path):
+                os.close(os.open(path, os.O_CREAT | os.O_WRONLY, 0o600))
         # timeout: the CLI and a running proxy may share one ledger file.
         self.conn = sqlite3.connect(path, check_same_thread=False, timeout=10)
         with self._lock:

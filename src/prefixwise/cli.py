@@ -59,7 +59,7 @@ def cmd_serve(args) -> int:
     try:
         serve(host=args.host, port=args.port, ledger_path=ledger,
               upstream_url=args.upstream, mock=True if args.mock else None,
-              fixes=args.fix or None)
+              fixes=args.fix or None, allow_unauthenticated=args.allow_unauthenticated)
     except ValueError as exc:  # unknown --fix name
         sys.exit(f"prefixwise: {exc}")
     return 0
@@ -219,6 +219,9 @@ def build_parser() -> argparse.ArgumentParser:
                                       "(default: $PREFIXWISE_UPSTREAM_URL; none = mock mode). "
                                       "API key: $PREFIXWISE_API_KEY, or the client's own auth header.")
     p.add_argument("--mock", action="store_true", help="synthetic responses, no upstream calls")
+    p.add_argument("--allow-unauthenticated", action="store_true",
+                   help="listen beyond localhost with PREFIXWISE_API_KEY set but no PREFIXWISE_AUTH_TOKEN "
+                        "(anyone who reaches the port can spend the key)")
     p.add_argument("--fix", action="append", metavar="NAME",
                    help="apply a fix to every request before forwarding (repeatable). "
                         "Available: canonical_tools. Default: $PREFIXWISE_FIXES or none")

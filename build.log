@@ -333,3 +333,14 @@
   X-Prefixwise-Fixes; without it -> tool_reserialize; `prefixwise
   fixes` ranks tool_reserialize with the toggle; unknown fix rejected.
 - Not yet run live (vLLM on Colab, then Anthropic).
+
+## 2026-11-06 PST -- commit 40989e9c8155228096a997e13553a183ea21b6e9 (security hardening)
+- What changed: input validation (400), body limits (400/413), error
+  containment (500, no internals), ledger 0600, PREFIXWISE_AUTH_TOKEN +
+  refuse exposed key without auth, Docker docs on 127.0.0.1, SECURITY.md.
+- Found by PoC against a live proxy before fixing: malformed shapes
+  dropped connections with tracebacks; Content-Length -1 hung a thread;
+  unbounded body; ledger 644; open relay for PREFIXWISE_API_KEY when
+  published beyond localhost. All re-run after the fix: 400/400/400,
+  400 and 413 in 0.00s, 0600, 401/401/200, refusal message.
+- Tests: 116 passed (12 new in tests/test_security.py).
