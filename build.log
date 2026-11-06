@@ -307,3 +307,15 @@
   --turn-delay, status/error/incomplete_details recorded; run records;
   README Limits now states live-verified scope.
 - Tests: 93 passed.
+
+## 2026-11-06 PST -- commit 94be956589e27793bfe57dbcd8859ef98038aa37 (E1-hosted round 4)
+- Live (Muse, Colab, main fa7e974): Anthropic --repeats 1: 20 turns, 0
+  errors, native 100.0% (7 turns), injected 100.0%, UNKNOWN 0.0%,
+  model_switch 2/2, 174,472 input tokens. Cumulative Anthropic: 37/37
+  native agreement. OpenAI gpt-5.6-luna probes with --turn-delay 30 and
+  120: STOP, unavailable on every comparison, all turns status
+  incomplete (max_output_tokens). Standalone completed-baseline check:
+  unavailable. Spend: OpenAI $0.09; Anthropic console lagging ($4.96
+  balance).
+- What changed: OpenAI max_output_tokens 256; run record; README.
+- Tests: 93 passed.
