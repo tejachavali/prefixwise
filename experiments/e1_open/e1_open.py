@@ -321,7 +321,7 @@ def run(*, vllm_url: str, model: str, model_alias: str, mock: bool,
     state = {"injected": "first_write"}
 
     if mock:
-        def _mock_forward(provider, body, request_id, session_id, client_headers):
+        def _mock_forward(provider, body, request_id, session_id, client_headers, api="chat"):
             return 200, {"id": f"resp-{request_id[:8]}",
                          "usage": {"prompt_tokens": PROMPT_TOKENS_MOCK,
                                    "prompt_tokens_details": {

@@ -15,6 +15,7 @@ records a ledger entry, and forwards to the upstream when configured.
 
 Endpoints:
 - POST /v1/chat/completions  (OpenAI-compatible)
+- POST /v1/responses         (OpenAI Responses API, comparison_response_id chained)
 - POST /v1/messages          (Anthropic-compatible, diagnostics chained)
 - POST /tasks               (record a task outcome)
 - GET  /health, GET /ledger  (ledger roll-up as JSON)
@@ -53,8 +54,8 @@ import urllib.request
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from .classifier import RequestSnapshot, classify
-from .diagnostics import AgreementScorer, anthropic_diagnostics
+from .classifier import Classification, MissCause, RequestSnapshot, classify
+from .diagnostics import AgreementScorer, anthropic_diagnostics, openai_comparison_options
 from .fingerprint import Fingerprinter
 from .ledger import Ledger, LedgerEntry, avoidable_for_turn
 
@@ -66,6 +67,8 @@ def extract_blocks(body: dict, provider: str) -> list[tuple[str, object]]:
     Caching 201, verified Nov 2026); Anthropic is tools, system,
     messages. This is the v2 order, not the v1 assumption.
     """
+    if provider != "anthropic" and is_responses_body(body):
+        return _extract_responses_blocks(body)
     blocks: list[tuple[str, object]] = []
     # One block per tool: the classifier compares the tool multiset, so
     # a reordered tool list is TOOL_RESERIALIZE, not a catalog change.
@@ -86,6 +89,29 @@ def extract_blocks(body: dict, provider: str) -> list[tuple[str, object]]:
         if m.get("role") == "system" and provider != "anthropic":
             continue
         blocks.append(("messages", m))
+    return blocks
+
+
+def is_responses_body(body: dict) -> bool:
+    """OpenAI Responses API bodies carry input / instructions, not messages."""
+    return "messages" not in body and ("input" in body or "instructions" in body)
+
+
+def _extract_responses_blocks(body: dict) -> list[tuple[str, object]]:
+    """Responses API: tools, then instructions, then input items, in prefix order.
+
+    A string input is one user message. With previous_response_id the input
+    holds only the new items; the proxy stitches them onto the stored prior
+    turn (see PrefixwiseProxy.finalize).
+    """
+    blocks: list[tuple[str, object]] = [("tools", t) for t in body.get("tools") or []]
+    if body.get("instructions") is not None:
+        blocks.append(("system", body["instructions"]))
+    items = body.get("input")
+    if isinstance(items, str):
+        items = [{"role": "user", "content": items}]
+    for item in items or []:
+        blocks.append(("messages", item))
     return blocks
 
 
@@ -130,6 +156,9 @@ def normalize_usage(provider: str, usage: dict) -> tuple[int, int]:
         read = int(usage.get("cache_read_input_tokens", 0) or 0)
         write = int(usage.get("cache_creation_input_tokens", 0) or 0)
         return int(usage.get("input_tokens", 0) or 0) + read + write, read
+    if "prompt_tokens" not in usage and "input_tokens" in usage:  # Responses API
+        details = usage.get("input_tokens_details") or {}
+        return int(usage.get("input_tokens", 0) or 0), int(details.get("cached_tokens", 0) or 0)
     prompt = int(usage.get("prompt_tokens", 0) or 0)
     details = usage.get("prompt_tokens_details") or {}
     cached = int(details.get("cached_tokens", 0) or usage.get("cached_tokens", 0) or 0)
@@ -137,8 +166,9 @@ def normalize_usage(provider: str, usage: dict) -> tuple[int, int]:
 
 
 def completion_tokens_of(provider: str, usage: dict) -> int:
-    key = "output_tokens" if provider == "anthropic" else "completion_tokens"
-    return int(usage.get(key, 0) or 0)
+    if provider == "anthropic" or ("completion_tokens" not in usage and "output_tokens" in usage):
+        return int(usage.get("output_tokens", 0) or 0)
+    return int(usage.get("completion_tokens", 0) or 0)
 
 
 def has_cache_breakpoint(body: dict) -> bool:
@@ -179,8 +209,9 @@ class StreamAccumulator:
     message_delta carries output_tokens (and may repeat input fields).
     """
 
-    def __init__(self, provider: str, suppress_usage_chunk: bool = False):
+    def __init__(self, provider: str, suppress_usage_chunk: bool = False, api: str = "chat"):
         self.provider = provider
+        self.api = api
         self.suppress_usage_chunk = suppress_usage_chunk
         self.payload: dict = {"usage": {}}
         self.saw_usage = False
@@ -201,6 +232,9 @@ class StreamAccumulator:
         if self.provider == "anthropic":
             self._feed_anthropic(event)
             return True
+        if self.api == "responses":
+            self._feed_responses(event)
+            return True
         if event.get("id") and "id" not in self.payload:
             self.payload["id"] = event["id"]
         for key in ("prompt_cache_diagnostics", "diagnostics"):
@@ -212,6 +246,21 @@ class StreamAccumulator:
             if self.suppress_usage_chunk and not event.get("choices"):
                 return False
         return True
+
+    def _feed_responses(self, event: dict) -> None:
+        """Responses API: every response.* lifecycle event carries the response
+        object; response.completed (or .incomplete) carries usage and any
+        prompt_cache_diagnostics. No stream_options needed."""
+        resp = event.get("response")
+        if not isinstance(resp, dict):
+            return
+        if resp.get("id"):
+            self.payload["id"] = resp["id"]
+        if isinstance(resp.get("prompt_cache_diagnostics"), dict):
+            self.payload["prompt_cache_diagnostics"] = resp["prompt_cache_diagnostics"]
+        if isinstance(resp.get("usage"), dict):
+            self.payload["usage"] = resp["usage"]
+            self.saw_usage = True
 
     def _feed_anthropic(self, event: dict) -> None:
         kind = event.get("type")
@@ -249,10 +298,15 @@ class PrefixwiseProxy:
         self.last_snapshot: dict[str, RequestSnapshot] = _SessionMap(MAX_SESSIONS)
         self.last_response_id: dict[str, str | None] = _SessionMap(MAX_SESSIONS)
         self.last_seen: dict[str, float] = _SessionMap(MAX_SESSIONS)
+        # Responses API: snapshot per response id, so a turn sent with
+        # previous_response_id (input = new items only) can be stitched
+        # onto the exact turn it continues, including branches.
+        self.snapshot_by_response: dict[str, RequestSnapshot] = _SessionMap(MAX_SESSIONS)
 
     # -- shared request path ---------------------------------------------------------
 
-    def prepare(self, provider: str, body: dict, headers: dict[str, str] | None = None) -> dict:
+    def prepare(self, provider: str, body: dict, headers: dict[str, str] | None = None,
+                api: str = "chat") -> dict:
         """Read identity, strip Prefixwise fields, chain diagnostics.
 
         Returns a context dict for forward/finalize. body itself is not
@@ -267,15 +321,17 @@ class PrefixwiseProxy:
         if provider == "vllm":
             forward_body["session_id"] = session_id
         # Native diagnostics chaining. Anthropic: diagnostics object (GA,
-        # no beta header). OpenAI comparison_response_id exists only on
-        # the Responses API, which this proxy does not serve yet, so it is
-        # not sent to /v1/chat/completions.
+        # no beta header). OpenAI: prompt_cache_options.comparison_response_id,
+        # Responses API only (it does not exist on /v1/chat/completions). A
+        # client that sets its own comparison id keeps it.
+        with self._lock:
+            previous_id = self.last_response_id.get(session_id)
         if provider == "anthropic":
-            with self._lock:
-                previous_id = self.last_response_id.get(session_id)
             forward_body.update(anthropic_diagnostics(previous_id))
+        elif api == "responses" and previous_id and "prompt_cache_options" not in body:
+            forward_body.update(openai_comparison_options(previous_id))
         return {
-            "provider": provider, "body": body, "headers": headers,
+            "provider": provider, "api": api, "body": body, "headers": headers,
             "forward_body": forward_body, "session_id": session_id,
             "agent_id": str(headers.get("x-prefixwise-agent-id") or body.get("agent_id") or "proxy"),
             "task_id": str(task_id) if task_id else None,
@@ -301,6 +357,22 @@ class PrefixwiseProxy:
             return self._finalize_locked(ctx, status, payload, usage, prompt_tokens, cached,
                                          native_reason, response_id, fps)
 
+    def _stitch(self, ctx: dict, fps: list) -> tuple[list | None, RequestSnapshot | None]:
+        """Responses API with previous_response_id: the input holds only new
+        items. The cached prefix is the prior turn's blocks plus these, so
+        the comparable request is prior message blocks + new message blocks,
+        under this turn's own tools and instructions (both are resent).
+        Returns (blocks, prior snapshot); (None, None) if the prior turn was
+        never seen by this proxy. Caller holds self._lock."""
+        prev_id = ctx["body"].get("previous_response_id")
+        prior = self.snapshot_by_response.get(prev_id)
+        if prior is None:
+            return None, None
+        head = [b for b in fps if b.role != "messages"]
+        new_msgs = [b for b in fps if b.role == "messages"]
+        old_msgs = [b for b in prior.blocks if b.role == "messages"]
+        return head + old_msgs + new_msgs, prior
+
     def _finalize_locked(self, ctx, status, payload, usage, prompt_tokens, cached,
                          native_reason, response_id, fps) -> tuple[dict, LedgerEntry]:
         provider, body, session_id = ctx["provider"], ctx["body"], ctx["session_id"]
@@ -308,18 +380,33 @@ class PrefixwiseProxy:
         gap_seconds = (now - self.last_seen[session_id]) if session_id in self.last_seen else None
         self.last_seen[session_id] = now
         prev = self.last_snapshot.get(session_id)
+        unknown_parent = False
+        if ctx.get("api") == "responses" and body.get("previous_response_id"):
+            stitched, prior = self._stitch(ctx, fps)
+            if stitched is None:
+                unknown_parent = True  # continues a turn this proxy never saw
+            else:
+                fps, prev = stitched, prior
         curr = RequestSnapshot(model=ctx["model"], provider=provider, blocks=fps,
                                prompt_tokens=prompt_tokens, cached_tokens=cached,
                                gap_seconds=gap_seconds, compaction_event=ctx["compaction_event"],
                                params={k: body.get(k) for k in
                                        ("tool_choice", "thinking", "reasoning", "output_format",
-                                        "text_format", "verbosity") if body.get(k) is not None},
+                                        "text_format", "text", "verbosity") if body.get(k) is not None},
                                has_breakpoint=has_cache_breakpoint(body))
-        result = classify(prev, curr, native_reason=native_reason)
+        if unknown_parent:
+            result = Classification(MissCause.UNKNOWN, None,
+                                    "previous_response_id points to a response this proxy never saw;"
+                                    " the cached prefix cannot be reconstructed",
+                                    native_reason=native_reason)
+        else:
+            result = classify(prev, curr, native_reason=native_reason)
         self.scorer.record(result.cause, native_reason, provider)
         self.last_snapshot[session_id] = curr
         if response_id:
             self.last_response_id[session_id] = response_id
+            if ctx.get("api") == "responses":
+                self.snapshot_by_response[response_id] = curr
 
         entry = LedgerEntry(
             session_id=session_id, agent_id=ctx["agent_id"],
@@ -339,8 +426,8 @@ class PrefixwiseProxy:
 
     # -- non-streaming ---------------------------------------------------------------
 
-    def handle(self, provider: str, body: dict,
-               headers: dict[str, str] | None = None) -> tuple[dict, LedgerEntry | None]:
+    def handle(self, provider: str, body: dict, headers: dict[str, str] | None = None,
+               api: str = "chat") -> tuple[dict, LedgerEntry | None]:
         """Classify, forward, and record one non-streaming request.
 
         Returns (result, entry). result["status"] and result["response"]
@@ -348,18 +435,19 @@ class PrefixwiseProxy:
         unchanged. On an upstream error nothing is classified or
         recorded (no usage to score) and entry is None.
         """
-        ctx = self.prepare(provider, body, headers)
+        ctx = self.prepare(provider, body, headers, api=api)
         if ctx["stream"]:
             return {"request_id": ctx["request_id"], "status": 400, "cause": None,
                     "response": _error(400, "use handle_stream for stream=true")}, None
         status, payload = self._forward(provider, ctx["forward_body"], ctx["request_id"],
-                                        ctx["session_id"], ctx["headers"])
+                                        ctx["session_id"], ctx["headers"], api=api)
         if status >= 400:
             return {"request_id": ctx["request_id"], "status": status, "cause": None,
                     "response": payload}, None
         return self.finalize(ctx, status, payload)
 
-    def _mock_payload(self, provider: str, model: str, request_id: str, session_id: str) -> dict:
+    def _mock_payload(self, provider: str, model: str, request_id: str, session_id: str,
+                      api: str = "chat") -> dict:
         # Synthetic usage: later turns in a session reuse the prefix.
         # 2,000 prompt tokens so the OpenAI 1,024 minimum does not fire.
         with self._lock:
@@ -371,6 +459,13 @@ class PrefixwiseProxy:
                     "stop_reason": "end_turn",
                     "usage": {"input_tokens": 2000 - cached, "cache_read_input_tokens": cached,
                               "cache_creation_input_tokens": 0, "output_tokens": 1}}
+        if api == "responses":
+            return {"id": rid, "object": "response", "status": "completed", "model": model,
+                    "output": [{"type": "message", "role": "assistant", "status": "completed",
+                                "content": [{"type": "output_text", "text": "[prefixwise mock]",
+                                             "annotations": []}]}],
+                    "usage": {"input_tokens": 2000, "input_tokens_details": {"cached_tokens": cached},
+                              "output_tokens": 1, "total_tokens": 2001}}
         return {"id": rid, "object": "chat.completion", "model": model,
                 "choices": [{"index": 0, "finish_reason": "stop",
                              "message": {"role": "assistant", "content": "[prefixwise mock]"}}],
@@ -378,7 +473,7 @@ class PrefixwiseProxy:
                           "prompt_tokens_details": {"cached_tokens": cached}}}
 
     def _upstream_request(self, provider: str, body: dict, request_id: str, session_id: str,
-                          client_headers: dict[str, str]) -> urllib.request.Request:
+                          client_headers: dict[str, str], api: str = "chat") -> urllib.request.Request:
         headers = {k: v for k, v in client_headers.items() if k in PASSTHROUGH_HEADERS}
         headers.update({"content-type": "application/json",
                         "x-request-id": request_id, "x-session-id": session_id})
@@ -389,7 +484,8 @@ class PrefixwiseProxy:
             headers.setdefault("anthropic-version", ANTHROPIC_VERSION)
         elif self.api_key:
             headers["authorization"] = f"Bearer {self.api_key}"
-        path = "/v1/messages" if provider == "anthropic" else "/v1/chat/completions"
+        path = ("/v1/messages" if provider == "anthropic"
+                else "/v1/responses" if api == "responses" else "/v1/chat/completions")
         return urllib.request.Request(self.upstream_url + path, method="POST",
                                       data=json.dumps(body).encode(), headers=headers)
 
@@ -402,13 +498,13 @@ class PrefixwiseProxy:
             return exc.code, _error(exc.code, raw.decode("utf-8", "replace")[:2000])
 
     def _forward(self, provider: str, body: dict, request_id: str, session_id: str,
-                 client_headers: dict[str, str]) -> tuple[int, dict]:
+                 client_headers: dict[str, str], api: str = "chat") -> tuple[int, dict]:
         """Send to the upstream. Returns (status, payload); never raises
         for upstream errors, so the client gets the upstream's own error."""
         if self.mock:
             return 200, self._mock_payload(provider, str(body.get("model", "unknown")),
-                                           request_id, session_id)
-        req = self._upstream_request(provider, body, request_id, session_id, client_headers)
+                                           request_id, session_id, api)
+        req = self._upstream_request(provider, body, request_id, session_id, client_headers, api)
         try:
             with urllib.request.urlopen(req, timeout=UPSTREAM_TIMEOUT) as resp:
                 return resp.status, json.loads(resp.read() or b"{}")
@@ -428,19 +524,19 @@ class PrefixwiseProxy:
         lines is an iterator of raw SSE lines to relay; on failure lines
         is None and error_payload is the upstream (or proxy) error.
         """
-        provider, fwd = ctx["provider"], ctx["forward_body"]
+        provider, fwd, api = ctx["provider"], ctx["forward_body"], ctx.get("api", "chat")
         injected = False
-        if provider != "anthropic":
+        if provider != "anthropic" and api != "responses":  # Responses always report usage
             opts = dict(fwd.get("stream_options") or {})
             if not opts.get("include_usage"):
                 opts["include_usage"] = True
                 fwd["stream_options"] = opts
                 injected = True
-        acc = StreamAccumulator(provider, suppress_usage_chunk=injected)
+        acc = StreamAccumulator(provider, suppress_usage_chunk=injected, api=api)
         if self.mock:
             return 200, iter(self._mock_stream(ctx)), acc, None
         req = self._upstream_request(provider, fwd, ctx["request_id"], ctx["session_id"],
-                                     ctx["headers"])
+                                     ctx["headers"], api)
         try:
             resp = urllib.request.urlopen(req, timeout=UPSTREAM_TIMEOUT)
         except urllib.error.HTTPError as exc:
@@ -460,7 +556,7 @@ class PrefixwiseProxy:
 
     def _mock_stream(self, ctx: dict) -> list[bytes]:
         payload = self._mock_payload(ctx["provider"], ctx["model"], ctx["request_id"],
-                                     ctx["session_id"])
+                                     ctx["session_id"], ctx.get("api", "chat"))
         def ev(obj, name=None):  # one list item per line, as readline() yields them
             head = [f"event: {name}\n".encode()] if name else []
             return head + [b"data: " + json.dumps(obj).encode() + b"\n", b"\n"]
@@ -478,6 +574,31 @@ class PrefixwiseProxy:
             out += ev({"type": "message_delta", "delta": {"stop_reason": "end_turn"},
                        "usage": {"output_tokens": u["output_tokens"]}}, "message_delta")
             return out + ev({"type": "message_stop"}, "message_stop")
+        if ctx.get("api") == "responses":
+            # The full event sequence SDKs expect: item and part opened, text
+            # delta, then every done event, then response.completed.
+            created = {**payload, "status": "in_progress", "output": [], "usage": None}
+            item = {**payload["output"][0], "id": "msg_mock"}
+            part = item["content"][0]
+            text = part["text"]
+            seq = [("response.created", {"response": created}),
+                   ("response.in_progress", {"response": created}),
+                   ("response.output_item.added", {"output_index": 0,
+                                                   "item": {**item, "status": "in_progress", "content": []}}),
+                   ("response.content_part.added", {"item_id": "msg_mock", "output_index": 0,
+                                                    "content_index": 0, "part": {**part, "text": ""}}),
+                   ("response.output_text.delta", {"item_id": "msg_mock", "output_index": 0,
+                                                   "content_index": 0, "delta": text}),
+                   ("response.output_text.done", {"item_id": "msg_mock", "output_index": 0,
+                                                  "content_index": 0, "text": text}),
+                   ("response.content_part.done", {"item_id": "msg_mock", "output_index": 0,
+                                                   "content_index": 0, "part": part}),
+                   ("response.output_item.done", {"output_index": 0, "item": item}),
+                   ("response.completed", {"response": {**payload, "output": [item]}})]
+            out = []
+            for i, (name, data) in enumerate(seq):
+                out += ev({"type": name, "sequence_number": i, **data}, name)
+            return out
         base = {"id": payload["id"], "object": "chat.completion.chunk", "model": ctx["model"]}
         out = ev({**base, "choices": [{"index": 0, "delta": {"role": "assistant",
                                                              "content": "[prefixwise mock]"}}]})
@@ -524,7 +645,7 @@ def make_handler(proxy: PrefixwiseProxy):
             return body
 
         def do_POST(self):
-            if self.path not in ("/v1/chat/completions", "/v1/messages", "/tasks"):
+            if self.path not in ("/v1/chat/completions", "/v1/responses", "/v1/messages", "/tasks"):
                 return self._json(404, _error(404, f"unsupported path {self.path}"))
             try:
                 body = self._read_json()
@@ -533,9 +654,10 @@ def make_handler(proxy: PrefixwiseProxy):
             if self.path == "/tasks":
                 return self._task(body)
             provider = "anthropic" if self.path == "/v1/messages" else "openai"
+            api = "responses" if self.path == "/v1/responses" else "chat"
             if body.get("stream"):
-                return self._stream(provider, body)
-            result, _ = proxy.handle(provider, body, dict(self.headers.items()))
+                return self._stream(provider, body, api)
+            result, _ = proxy.handle(provider, body, dict(self.headers.items()), api=api)
             # The client gets the upstream response unchanged; Prefixwise's
             # verdict rides in headers so drop-in clients are unaffected.
             extra = {"X-Prefixwise-Request-Id": result["request_id"]}
@@ -552,8 +674,8 @@ def make_handler(proxy: PrefixwiseProxy):
             proxy.ledger.set_task_outcome(task_id, success)
             return self._json(200, {"ok": True, "task_id": task_id, "success": success})
 
-        def _stream(self, provider: str, body: dict):
-            ctx = proxy.prepare(provider, body, dict(self.headers.items()))
+        def _stream(self, provider: str, body: dict, api: str = "chat"):
+            ctx = proxy.prepare(provider, body, dict(self.headers.items()), api=api)
             status, lines, acc, err = proxy.open_stream(ctx)
             if lines is None:
                 return self._json(status, err, {"X-Prefixwise-Request-Id": ctx["request_id"]})
@@ -595,7 +717,7 @@ def serve(host: str = "127.0.0.1", port: int = 8080, *, ledger_path: str | None 
         print(f"Prefixwise proxy on http://{host}:{server.server_address[1]}")
         print(f"  upstream: {target}")
         print(f"  ledger:   {ledger_path}")
-        print("  POST /v1/chat/completions  POST /v1/messages  POST /tasks")
+        print("  POST /v1/chat/completions  POST /v1/responses  POST /v1/messages  POST /tasks")
         print("  GET  /ledger  GET /requests/<id>  GET /health", flush=True)
     try:
         server.serve_forever()
