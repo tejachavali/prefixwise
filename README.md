@@ -73,8 +73,10 @@ Not a cost dashboard, not a prompt optimiser or compressor, not a router or gate
 ```bash
 python3 -m pip install --break-system-packages pytest  # or: pip install -e ".[dev]"
 PYTHONPATH=src python3 -m pytest tests/ -q
-PORT=8080 python3 -m prefixwise.proxy
+PYTHONPATH=src python3 -m prefixwise serve --mock   # or, installed: prefixwise serve --mock
 ```
+
+CLI: `prefixwise serve` (proxy, ledger in `./prefixwise.db`), `prefixwise report [--by cause|session_id|agent_id|model|task_id]`, `prefixwise task <id> --success|--failure`, `prefixwise request <request-id>`, and `prefixwise explain a.json b.json` or `prefixwise explain session.jsonl` to explain cache misses offline from saved request bodies.
 
 In mock mode (no `PREFIXWISE_UPSTREAM_URL` set) the proxy returns synthetic usage so the fingerprint, classifier, and ledger path can be exercised with no API key and no cost:
 

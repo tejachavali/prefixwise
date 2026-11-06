@@ -233,13 +233,15 @@ class StreamAccumulator:
 
 class PrefixwiseProxy:
     def __init__(self, ledger_path: str = ":memory:", hmac_key: bytes | None = None,
-                 upstream_url: str | None = None, api_key: str | None = None):
+                 upstream_url: str | None = None, api_key: str | None = None,
+                 mock: bool | None = None):
         self.ledger = Ledger(ledger_path)
         self.fingerprinter = Fingerprinter(hmac_key=hmac_key)
         self.scorer = AgreementScorer()
         self.upstream_url = (upstream_url or os.environ.get("PREFIXWISE_UPSTREAM_URL") or "").rstrip("/")
         self.api_key = api_key or os.environ.get("PREFIXWISE_API_KEY")
-        self.mock = not self.upstream_url or os.environ.get("PREFIXWISE_MOCK_UPSTREAM") == "1"
+        self.mock = mock if mock is not None else (
+            not self.upstream_url or os.environ.get("PREFIXWISE_MOCK_UPSTREAM") == "1")
         # Per-session state, shared across the threaded server's handlers.
         # Every read and write holds self._lock: the classifier must compare
         # a turn with the turn recorded just before it, never a torn state.
@@ -580,14 +582,27 @@ def make_handler(proxy: PrefixwiseProxy):
     return Handler
 
 
-def serve(host: str = "127.0.0.1", port: int = 8080):
+def serve(host: str = "127.0.0.1", port: int = 8080, *, ledger_path: str | None = None,
+          upstream_url: str | None = None, mock: bool | None = None, quiet: bool = False):
+    """Run the proxy until interrupted. Settings fall back to PREFIXWISE_* env vars."""
     hmac_key = os.environ.get("PREFIXWISE_HMAC_KEY")
-    proxy = PrefixwiseProxy(ledger_path=os.environ.get("PREFIXWISE_LEDGER_PATH", ":memory:"),
+    ledger_path = ledger_path or os.environ.get("PREFIXWISE_LEDGER_PATH", ":memory:")
+    proxy = PrefixwiseProxy(ledger_path=ledger_path, upstream_url=upstream_url, mock=mock,
                             hmac_key=hmac_key.encode() if hmac_key else None)
     server = ThreadingHTTPServer((host, port), make_handler(proxy))
-    print(f"Prefixwise proxy on http://{host}:{port} (mock={proxy.mock})")
-    print("POST /v1/chat/completions, POST /v1/messages, GET /ledger, GET /health")
-    server.serve_forever()
+    if not quiet:
+        target = "MOCK upstream (synthetic usage, no API calls)" if proxy.mock else proxy.upstream_url
+        print(f"Prefixwise proxy on http://{host}:{server.server_address[1]}")
+        print(f"  upstream: {target}")
+        print(f"  ledger:   {ledger_path}")
+        print("  POST /v1/chat/completions  POST /v1/messages  POST /tasks")
+        print("  GET  /ledger  GET /requests/<id>  GET /health", flush=True)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
 
 
 if __name__ == "__main__":
