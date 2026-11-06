@@ -1,0 +1,230 @@
+"""Miss-cause classifier (v2 taxonomy, 19 causes).
+
+Exactly one cause per request: the first divergence in prefix order.
+``UNKNOWN`` when evidence is absent, never a guess.
+
+Legitimacy is a separate column from cause: a legitimate change still
+costs tokens, but it is not waste. A policy can later mark a catalog
+change avoidable (masking instead of removing) without renaming the cause.
+
+Provider order (verified, not assumed):
+- Anthropic: tools, system, messages.
+- OpenAI: tools are injected before developer instructions, so
+  tools, developer/system, messages. (OpenAI Prompt Caching 201.)
+
+Rules run in v2 order; the first that fires wins, the rest are recorded
+as secondary. Provider native reasons (Anthropic 6, OpenAI 9) map onto
+this taxonomy in diagnostics.py; they are a partial agreement signal,
+not ground truth: providers report the earliest divergence only, in a
+coarse taxonomy, and neither names TTL expiry, routing, or eviction.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from enum import Enum
+
+from .fingerprint import BlockFingerprint
+
+
+class MissCause(str, Enum):
+    FIRST_WRITE = "first_write"
+    MODEL_SWITCH = "model_switch"
+    VOLATILE_SYSTEM = "volatile_system"
+    SYSTEM_EDIT = "system_edit"
+    TOOL_RESERIALIZE = "tool_reserialize"
+    TOOL_CATALOG_CHANGE = "tool_catalog_change"
+    COMPACTION_REWRITE = "compaction_rewrite"
+    HISTORY_EDIT = "history_edit"
+    TOOL_RESULT_MUTATION = "tool_result_mutation"
+    FORK_BOUNDARY = "fork_boundary"
+    PARAM_RENDERED = "param_rendered"
+    BELOW_MIN_PREFIX = "below_min_prefix"
+    BREAKPOINT_MISPLACED = "breakpoint_misplaced"
+    TTL_EXPIRED = "ttl_expired"
+    EVICTED = "evicted"
+    ROUTING_MISS = "routing_miss"
+    RETRY_REPLAY = "retry_replay"
+    NONE = "none"
+    UNKNOWN = "unknown"
+
+
+# Provider minimum cacheable prefix, tokens. Anthropic is model-dependent:
+# 512-4,096 (512 for Claude Fable/Mythos/Opus/Sonnet/Haiku 5.x, 2,048 for
+# Mythos Preview / Opus 4.7, 4,096 for Opus 4.6/4.5 and Haiku 4.5,
+# 1,024 for Opus 4.8 / Sonnet 5 / Sonnet 4.6). Use the model-specific
+# value when known; the dict below is the per-model table, not a range.
+ANTHROPIC_MIN_PREFIX = {
+    "512": 512, "2048": 2048, "4096": 4096, "1024": 1024,
+}
+OPENAI_MIN_PREFIX = 1024
+GEMINI_MIN_PREFIX = 4096  # Gemini 3.x; 2,048 on 2.5. ai.google.dev, Nov 2026.
+
+
+@dataclass
+class RequestSnapshot:
+    model: str
+    provider: str = "unknown"
+    blocks: list[BlockFingerprint] = field(default_factory=list)
+    # Prompt-affecting params that change the rendered request without
+    # changing any block: tool_choice, thinking/reasoning, output_format,
+    # context_management, beta headers, temperature is NOT one of these.
+    params: dict = field(default_factory=dict)
+    prompt_tokens: int = 0
+    cached_tokens: int = 0
+    # Seconds since the previous turn in this session; None = unknown.
+    gap_seconds: float | None = None
+    ttl_seconds: float | None = None
+    compaction_event: bool = False
+    fork_parent_session_id: str | None = None
+    session_id: str | None = None
+    # vLLM KV events for this session between the two turns.
+    evicted_block_hashes: list[str] = field(default_factory=list)
+    # Anthropic cache_control present anywhere in the request.
+    has_breakpoint: bool = False
+    breakpoint_after_volatile: bool = False
+    min_prefix_tokens: int | None = None
+
+
+@dataclass
+class Classification:
+    cause: MissCause
+    legit: bool | None  # True = legitimate, False = waste, None = n/a
+    evidence: str
+    secondary: list[MissCause] = field(default_factory=list)
+    native_reason: str | None = None
+    classifier_version: str = "2.0"
+
+
+def _blocks_by_role(blocks: list[BlockFingerprint]) -> dict[str, list[BlockFingerprint]]:
+    out: dict[str, list[BlockFingerprint]] = {}
+    for b in blocks:
+        out.setdefault(b.role, []).append(b)
+    return out
+
+
+def _tool_multiset(blocks: list[BlockFingerprint]) -> list[str]:
+    return sorted(b.canonical for b in blocks if b.role == "tools")
+
+
+def classify(prev: RequestSnapshot | None, curr: RequestSnapshot,
+             *, native_reason: str | None = None) -> Classification:
+    """Classify one turn against the previous turn in the same session."""
+    if prev is None:
+        return Classification(MissCause.FIRST_WRITE, True, "no prior request in session",
+                              native_reason=native_reason)
+    if curr.fork_parent_session_id:
+        return Classification(MissCause.FORK_BOUNDARY, True,
+                              "new session whose prefix equals a parent session prefix",
+                              native_reason=native_reason)
+    if prev.model != curr.model:
+        return Classification(MissCause.MODEL_SWITCH, True,
+                              f"model {prev.model} -> {curr.model}", native_reason=native_reason)
+
+    prev_by_role = _blocks_by_role(prev.blocks)
+    curr_by_role = _blocks_by_role(curr.blocks)
+    secondary: list[MissCause] = []
+
+    # First divergence in prefix order: system, tools, messages, tool_results, user.
+    for role in ("system", "system_dynamic", "tools", "messages", "tool_results", "user"):
+        p, c = prev_by_role.get(role, []), curr_by_role.get(role, [])
+        if [b.canonical for b in p] == [b.canonical for b in c] and \
+           [b.raw for b in p] == [b.raw for b in c] and \
+           [b.masked for b in p] == [b.masked for b in c]:
+            continue
+        if role in ("system", "system_dynamic"):
+            if [b.masked for b in p] == [b.masked for b in c]:
+                return Classification(MissCause.VOLATILE_SYSTEM, False,
+                                      "system raw hash changed, masked hash equal (dates/ids/numbers only)",
+                                      secondary, native_reason)
+            return Classification(MissCause.SYSTEM_EDIT, None,
+                                  "system masked hash changed", secondary, native_reason)
+        if role == "tools":
+            if _tool_multiset(prev.blocks) == _tool_multiset(curr.blocks):
+                return Classification(MissCause.TOOL_RESERIALIZE, False,
+                                      "tool multiset of canonical hashes equal; sequence or raw bytes differ",
+                                      secondary, native_reason)
+            return Classification(MissCause.TOOL_CATALOG_CHANGE, True,
+                                  "tool multiset differs", secondary, native_reason)
+        if role == "messages":
+            cause = MissCause.COMPACTION_REWRITE if curr.compaction_event else MissCause.HISTORY_EDIT
+            legit = True if curr.compaction_event else False
+            ev = "message blocks before previous tail changed with a PreCompact/compaction event" \
+                if curr.compaction_event else "message blocks changed without a compaction event"
+            return Classification(cause, legit, ev, secondary, native_reason)
+        if role == "tool_results":
+            return Classification(MissCause.TOOL_RESULT_MUTATION, False,
+                                  "a tool-result block changed in place, same tool",
+                                  secondary, native_reason)
+        # user role divergence with no other cause: fall through to param/TTL checks.
+        secondary.append(MissCause.HISTORY_EDIT)
+
+    # Blocks equal (or only the user turn changed): check params, prefix, TTL, eviction.
+    if prev.params != curr.params:
+        changed = sorted(set(prev.params) ^ set(curr.params) |
+                         {k for k in prev.params.keys() & curr.params.keys() if prev.params[k] != curr.params[k]})
+        return Classification(MissCause.PARAM_RENDERED, None,
+                              f"blocks equal; prompt-affecting params changed: {changed}",
+                              secondary, native_reason)
+
+    min_prefix = curr.min_prefix_tokens
+    if min_prefix is None:
+        min_prefix = {"openai": OPENAI_MIN_PREFIX, "gemini": GEMINI_MIN_PREFIX}.get(curr.provider, None)
+    if min_prefix is not None and curr.prompt_tokens < min_prefix:
+        return Classification(MissCause.BELOW_MIN_PREFIX, None,
+                              f"cacheable prefix {curr.prompt_tokens} below provider minimum {min_prefix}",
+                              secondary, native_reason)
+
+    if curr.provider == "anthropic" and not curr.has_breakpoint:
+        return Classification(MissCause.BREAKPOINT_MISPLACED, False,
+                              "Anthropic: no cache_control anywhere, or breakpoint after a volatile block",
+                              secondary, native_reason)
+    if curr.breakpoint_after_volatile:
+        return Classification(MissCause.BREAKPOINT_MISPLACED, False,
+                              "breakpoint sits after a volatile block", secondary, native_reason)
+
+    # Identical replay within a short window is a retry, not a cache miss.
+    if prev.blocks and curr.blocks and \
+       [b.raw for b in prev.blocks] == [b.raw for b in curr.blocks] and \
+       curr.gap_seconds is not None and curr.gap_seconds < 60 and curr.cached_tokens == 0:
+        return Classification(MissCause.RETRY_REPLAY, False,
+                              "identical request within the retry window", secondary, native_reason)
+
+    if curr.evicted_block_hashes:
+        return Classification(MissCause.EVICTED, None,
+                              "BlockRemoved events for this session's blocks between the two turns",
+                              secondary, native_reason)
+
+    if curr.ttl_seconds is not None and curr.gap_seconds is not None and curr.gap_seconds > curr.ttl_seconds:
+        return Classification(MissCause.TTL_EXPIRED, True,
+                              f"gap {curr.gap_seconds}s since last turn exceeds applied TTL {curr.ttl_seconds}s",
+                              secondary, native_reason)
+
+    if curr.cached_tokens >= curr.prompt_tokens * 0.5 and curr.prompt_tokens > 0:
+        return Classification(MissCause.NONE, None,
+                              "append-only turn; cache_read at least half of the prior prefix",
+                              secondary, native_reason)
+    if curr.cached_tokens == 0 and curr.prompt_tokens > 0:
+        return Classification(MissCause.ROUTING_MISS, None,
+                              "blocks and params equal, gap within TTL, no eviction evidence, cache_read low",
+                              secondary, native_reason)
+    return Classification(MissCause.UNKNOWN, None,
+                          "diverged, no rule matched, or usage absent", secondary, native_reason)
+
+
+def classify_first_divergence(changed_role: str | None, *, model_changed: bool = False,
+                              compaction_event: bool = False) -> MissCause:
+    """Backwards-compatible helper from v1 (13-cause API)."""
+    if model_changed:
+        return MissCause.MODEL_SWITCH
+    if changed_role is None:
+        return MissCause.FIRST_WRITE
+    if changed_role in ("system", "system_dynamic"):
+        return MissCause.VOLATILE_SYSTEM
+    if changed_role == "tools":
+        return MissCause.TOOL_RESERIALIZE
+    if changed_role == "messages":
+        return MissCause.COMPACTION_REWRITE if compaction_event else MissCause.HISTORY_EDIT
+    if changed_role == "tool_results":
+        return MissCause.TOOL_RESULT_MUTATION
+    return MissCause.UNKNOWN

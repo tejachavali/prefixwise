@@ -1,0 +1,20 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "prefixwise"
+version = "0.1.0"
+description = "Model-agnostic ledger of avoidable agent token spend: name why prompt cache misses, price the miss, prove fixes without losing task success."
+requires-python = ">=3.11"
+license = "MIT"
+authors = [{name = "Teja Chavali"}]
+
+[project.scripts]
+prefixwise-proxy = "prefixwise.proxy:serve"
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
