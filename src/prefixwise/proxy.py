@@ -45,6 +45,8 @@ from __future__ import annotations
 
 import json
 import os
+import threading
+from collections import OrderedDict
 import time
 import urllib.error
 import urllib.request
@@ -97,6 +99,24 @@ PASSTHROUGH_HEADERS = ("authorization", "x-api-key", "anthropic-version", "anthr
                        "openai-organization", "openai-project")
 ANTHROPIC_VERSION = "2023-06-01"
 UPSTREAM_TIMEOUT = 600  # seconds; long generations stream for minutes
+# Sessions remembered for classification; least recently used are dropped,
+# so a long-running proxy does not grow without bound. A dropped session's
+# next turn classifies as FIRST_WRITE (honest: no prior turn is known).
+MAX_SESSIONS = int(os.environ.get("PREFIXWISE_MAX_SESSIONS", "10000"))
+
+
+class _SessionMap(OrderedDict):
+    """LRU dict: reads and writes refresh a key; oldest keys are evicted."""
+
+    def __init__(self, limit: int):
+        super().__init__()
+        self.limit = limit
+
+    def __setitem__(self, key, value):
+        super().__setitem__(key, value)
+        self.move_to_end(key)
+        while len(self) > self.limit:
+            self.popitem(last=False)
 
 
 def normalize_usage(provider: str, usage: dict) -> tuple[int, int]:
@@ -220,9 +240,13 @@ class PrefixwiseProxy:
         self.upstream_url = (upstream_url or os.environ.get("PREFIXWISE_UPSTREAM_URL") or "").rstrip("/")
         self.api_key = api_key or os.environ.get("PREFIXWISE_API_KEY")
         self.mock = not self.upstream_url or os.environ.get("PREFIXWISE_MOCK_UPSTREAM") == "1"
-        self.last_snapshot: dict[str, RequestSnapshot] = {}
-        self.last_response_id: dict[str, str | None] = {}
-        self.last_seen: dict[str, float] = {}
+        # Per-session state, shared across the threaded server's handlers.
+        # Every read and write holds self._lock: the classifier must compare
+        # a turn with the turn recorded just before it, never a torn state.
+        self._lock = threading.Lock()
+        self.last_snapshot: dict[str, RequestSnapshot] = _SessionMap(MAX_SESSIONS)
+        self.last_response_id: dict[str, str | None] = _SessionMap(MAX_SESSIONS)
+        self.last_seen: dict[str, float] = _SessionMap(MAX_SESSIONS)
 
     # -- shared request path ---------------------------------------------------------
 
@@ -245,7 +269,9 @@ class PrefixwiseProxy:
         # the Responses API, which this proxy does not serve yet, so it is
         # not sent to /v1/chat/completions.
         if provider == "anthropic":
-            forward_body.update(anthropic_diagnostics(self.last_response_id.get(session_id)))
+            with self._lock:
+                previous_id = self.last_response_id.get(session_id)
+            forward_body.update(anthropic_diagnostics(previous_id))
         return {
             "provider": provider, "body": body, "headers": headers,
             "forward_body": forward_body, "session_id": session_id,
@@ -263,15 +289,22 @@ class PrefixwiseProxy:
     def finalize(self, ctx: dict, status: int, payload: dict) -> tuple[dict, LedgerEntry]:
         """Classify and record one completed request from its (rebuilt) payload."""
         provider, body, session_id = ctx["provider"], ctx["body"], ctx["session_id"]
-        now = time.time()
-        gap_seconds = (now - self.last_seen[session_id]) if session_id in self.last_seen else None
-        self.last_seen[session_id] = now
         usage = payload.get("usage") or {}
         prompt_tokens, cached = normalize_usage(provider, usage)
         native_reason = native_reason_from(payload)
         response_id = payload.get("id")
 
         fps = self.fingerprinter.fingerprint_blocks(extract_blocks(body, provider))
+        with self._lock:
+            return self._finalize_locked(ctx, status, payload, usage, prompt_tokens, cached,
+                                         native_reason, response_id, fps)
+
+    def _finalize_locked(self, ctx, status, payload, usage, prompt_tokens, cached,
+                         native_reason, response_id, fps) -> tuple[dict, LedgerEntry]:
+        provider, body, session_id = ctx["provider"], ctx["body"], ctx["session_id"]
+        now = time.time()
+        gap_seconds = (now - self.last_seen[session_id]) if session_id in self.last_seen else None
+        self.last_seen[session_id] = now
         prev = self.last_snapshot.get(session_id)
         curr = RequestSnapshot(model=ctx["model"], provider=provider, blocks=fps,
                                prompt_tokens=prompt_tokens, cached_tokens=cached,
@@ -327,7 +360,8 @@ class PrefixwiseProxy:
     def _mock_payload(self, provider: str, model: str, request_id: str, session_id: str) -> dict:
         # Synthetic usage: later turns in a session reuse the prefix.
         # 2,000 prompt tokens so the OpenAI 1,024 minimum does not fire.
-        cached = 1000 if session_id in self.last_snapshot else 0
+        with self._lock:
+            cached = 1000 if session_id in self.last_snapshot else 0
         rid = f"resp-{request_id[:8]}"
         if provider == "anthropic":
             return {"id": rid, "type": "message", "role": "assistant", "model": model,

@@ -328,3 +328,35 @@ def test_mock_stream_then_task_outcome_metric():
         assert get(port, "/requests/nope")[0] == 404
     finally:
         server.shutdown()
+
+
+def test_concurrent_requests_all_recorded_and_sessions_consistent():
+    from concurrent.futures import ThreadPoolExecutor
+
+    proxy, server, port = run_proxy()
+    try:
+        def turn(i):
+            body = {**BODY, "session_id": f"s{i % 5}"}
+            return post(port, "/v1/chat/completions", body)[2]["X-Prefixwise-Cause"]
+
+        with ThreadPoolExecutor(max_workers=16) as pool:
+            causes = list(pool.map(turn, range(100)))
+        # Exactly one first write per session, however the threads interleave.
+        assert causes.count("first_write") == 5
+        # A turn racing its session's first write can see no cache yet (the
+        # mock decides cached tokens before the first turn is recorded), as a
+        # real cache would; it is a miss (an identical turn within 60 s is
+        # RETRY_REPLAY), never a second first write.
+        assert set(causes) <= {"first_write", "none", "routing_miss", "retry_replay"}
+        assert sum(r["requests"] for r in proxy.ledger.rollup_by_cause()) == 100
+    finally:
+        server.shutdown()
+
+
+def test_session_state_is_bounded():
+    from prefixwise.proxy import _SessionMap
+
+    m = _SessionMap(3)
+    for k in "abcd":
+        m[k] = 1
+    assert list(m) == ["b", "c", "d"]
