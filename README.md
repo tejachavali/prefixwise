@@ -124,12 +124,12 @@ Avoidable tokens for a waste turn = the part of the previous turn's prompt that 
 
 - **What has been verified live (2026-11-06):**
   - **E1-open, vLLM:** Qwen3-4B on vLLM 0.33.0, Colab L4. 120 turns, 9 injected causes including append-only growth. Agreement 100%, UNKNOWN 0%. See [`experiments/e1_open/runs/`](experiments/e1_open/runs/).
-  - **E1-hosted, Anthropic:** claude-haiku-5-5. On 30 misses diagnosed by Anthropic's own API (compaction, parameter change, system edit, tool catalog change, tool reorder, volatile system, 5 each), Prefixwise named a cause Anthropic's reason covers 30 out of 30 times. All 50 cache hits were classified as hits. UNKNOWN 0%. See [`experiments/e1_hosted/runs/`](experiments/e1_hosted/runs/).
+  - **E1-hosted, Anthropic:** claude-haiku-5-5. Across two runs, on 37 misses diagnosed by Anthropic's own API (compaction, model switch, parameter change, system edit, tool catalog change, tool reorder, volatile system), Prefixwise named a cause Anthropic's reason covers 37 out of 37 times. All 60 cache hits were classified as hits. UNKNOWN 0%. See [`experiments/e1_hosted/runs/`](experiments/e1_hosted/runs/).
 - **Not verified yet:**
-  - **OpenAI native agreement.** OpenAI returned `unavailable` for every diagnostics comparison so far; investigating.
-  - **`model_switch` against Anthropic.** A harness bug, now fixed, kept the switch from reaching the provider.
+  - **OpenAI native agreement.** OpenAI's `prompt_cache_diagnostics` returned `unavailable` for every comparison on gpt-5.6, -luna and -sol. That held with turn delays of 1 s, 30 s and 120 s, and on a minimal standalone call with a completed baseline. OpenAI's dashboard shows 0 diagnosed responses. Prefixwise still classifies OpenAI traffic; only the cross-check against OpenAI's own verdict is missing.
   - **Causes E1 does not inject:** TTL expiry, routing, eviction, tool-result mutation.
   - **Real agent traffic,** which is messier than scripted turns.
+- **Divergence is located per block, not per token.** An edit at the very end of a long system prompt is reported as `system_edit`, even if the provider could have reused everything before it. In one live OpenAI call, appending three words to 2,100 tokens of instructions gave 0 cached tokens, which looks more like routing than the edit itself.
 - One proxy process keeps session state in memory: run one instance per agent fleet, or send all of a session's turns to the same instance.
 - `evicted` needs vLLM KV events, which the proxy does not consume yet.
 - OpenAI's default in-memory cache TTL is not a fixed number, so after a long gap a cold OpenAI cache is `unknown` unless you send `X-Prefixwise-Cache-Ttl`.
@@ -234,7 +234,7 @@ Live run Nov 5-6, 2026 (Colab L4, vLLM 0.33.0, Qwen3-4B): agreement 90.0%, Pass 
 
 ### Build order (E1 first)
 
-1. **E1-open: passed live 2026-11-06** (Qwen3-4B, vLLM 0.33.0; 100%). **E1-hosted: Anthropic passed 2026-11-06** (30/30 native agreement); OpenAI pending diagnostics availability. Original plan: 120 turns on vLLM + Qwen3-8B with injected causes as ground truth; agreement >= 95%, UNKNOWN <= 10%. No API credits. Then **E1-hosted:** 100 consecutive turns on Anthropic and OpenAI with native diagnostics chained; Prefixwise's first-diverged block agrees with the native reason >= 95% of the time; UNKNOWN <= 10% of misses on real coding-agent traffic. Needs API credits and is still the provider-facing proof.
+1. **E1-open: passed live 2026-11-06** (Qwen3-4B, vLLM 0.33.0; 100%). **E1-hosted: Anthropic passed 2026-11-06** (37/37 native agreement over two runs); OpenAI diagnostics returned `unavailable` throughout. Original plan: 120 turns on vLLM + Qwen3-8B with injected causes as ground truth; agreement >= 95%, UNKNOWN <= 10%. No API credits. Then **E1-hosted:** 100 consecutive turns on Anthropic and OpenAI with native diagnostics chained; Prefixwise's first-diverged block agrees with the native reason >= 95% of the time; UNKNOWN <= 10% of misses on real coding-agent traffic. Needs API credits and is still the provider-facing proof.
 2. **E2/E3:** vLLM >= v0.30.0 + LMCache on one GPU box, ids set by the proxy; >= 95% of requests join on ids within 5 s; lookup-hash lines join on request id for >= 99% of requests.
 3. **E4:** one toggle (canonical tools or volatile-to-tail) on a recorded agent session replayed live; realised cache_read >= 50% of predicted over 50 requests; task success flat.
 4. **E5:** PreCompact snapshot on one harness; rewrite priced exactly once; compaction frequency reduced to task boundaries without a drop in a 10-task pass rate.

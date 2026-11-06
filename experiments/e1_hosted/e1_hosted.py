@@ -177,7 +177,10 @@ class SessionState:
             body["tool_choice"] = {"type": "none"} if self.tool_choice_any else {"type": "auto"}
             return body
         body = {"model": self.model, "instructions": self.system_text(), "tools": self.tools,
-                "input": copy.deepcopy(self.history), "max_output_tokens": 16,
+                # 256, not 16: GPT-5.6 models spend output on reasoning, and at
+                # 16 every turn ended "incomplete" (live, 2026-11-06). OpenAI's
+                # docs want a *completed* response as the comparison baseline.
+                "input": copy.deepcopy(self.history), "max_output_tokens": 256,
                 "text": {"verbosity": self.verbosity}}
         if OPENAI_OPTS["cache_key"]:
             body["prompt_cache_key"] = f"prefixwise-e1-{self.session_id}"
