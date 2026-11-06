@@ -249,3 +249,14 @@
 - Anthropic turns 3-4 were real misses (tool_reserialize, system_edit; 0 cached) with raw_diagnostics cache_miss_reason tools_changed / system_changed, but native_type and native_reason still null, so the gate STOPs.
 - OpenAI turns 3-4: turn 3 injected tool_reserialize but the provider still served the prefix (not a miss); turn 4 system_edit was a real miss but native type unavailable, native_reason null; prompt_cache_diagnostics {"type": "unavailable"} on turns 2-4.
 - No full runs were attempted (both probes STOP). Probe outputs: raw files in the Colab VM (Muse commit 34afe5d, not pushed: no GitHub login there); condensed verbatim record in experiments/e1_hosted/runs/2026-11-06-probes.md.
+
+## 2026-11-06 PST -- commit d17cbfebc4a12fb7f3b1c3b95cca1304a2d9198a (branch claude/e1-hosted, PR #9)
+- What changed: native reader handles Anthropic's live shape
+  diagnostics.cache_miss_reason.type; absent usage -> UNKNOWN (was
+  BELOW_MIN_PREFIX, could also have been RETRY_REPLAY); comparison id
+  merged into client prompt_cache_options; harness real-miss fix,
+  raw_usage printed, OpenAI diagnosis flags.
+- Tests: 91 passed (2 runs). Mock probe OK both providers with
+  Anthropic's real shape. E1-open mock: 120 turns, 100%, Pass YES.
+- Open: OpenAI returned prompt_cache_diagnostics {"type":
+  "unavailable"} on every chained turn (gpt-5.6-luna, mode implicit).
