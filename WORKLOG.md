@@ -68,11 +68,10 @@ The second part is the real risk. Models can be sensitive to tool order, and onl
 ## In parallel (Claude): launch gates
 
 Teja asked when Prefixwise can go public for people to try. The gates, in order:
-1. **Legal clearance:** Teja only, blocking.
-2. **E4 live pass:** the "Now" section above.
-3. **Dogfooding:** a day or two in front of a real agent.
-4. **Security review:** done, PR #13. See below.
-5. **Launch polish:** PyPI release, CONTRIBUTING and CHANGELOG, issue templates.
+1. **E4 live pass:** the "Now" section above.
+2. **Dogfooding:** a day or two in front of a real agent.
+3. **Security review:** done, PR #13. See below.
+4. **Launch polish:** done, PR #14 (v0.3.0 prepared, release workflow, CONTRIBUTING, CHANGELOG, issue templates). Publishing needs Teja's one-time PyPI setup; see CONTRIBUTING.md "Releasing".
 
 Then a soft launch to a few people who run agents (Omni's founder is a candidate), then wider.
 
@@ -111,3 +110,5 @@ Then a soft launch to a few people who run agents (Omni's founder is a candidate
 - **2026-11-06:** PR #11 merged (E4 harness, canonical_tools, WORKLOG). Muse started the E4 live runs.
 - **2026-11-06:** Teja asked for the personal note at the end of the README to be removed (PR #12). It remains in git history; whether to purge it is Teja's call.
 - **2026-11-06:** Claude ran a pre-launch security review: 5 real issues found by proof-of-concept and fixed (PR #13). Next for Claude: launch polish (PyPI trusted publishing, CONTRIBUTING, CHANGELOG). E4 live results still pending from Muse.
+- **2026-11-06:** Claude: launch polish (PR #14). Version 0.3.0 prepared, not published. The name `prefixwise` is free on PyPI as of today. Trusted-publishing workflow added; Teja does the one-time PyPI pending-publisher setup, then tags `v0.3.0`.
+- **2026-11-06:** Teja dropped the legal-clearance gate from the launch plan (Teja's call).
