@@ -97,7 +97,8 @@ Avoidable tokens for a waste turn = the part of the previous turn's prompt that 
 
 | Command | |
 |---|---|
-| `prefixwise serve [--upstream URL] [--mock] [--host H] [--port P] [--ledger FILE]` | Run the proxy. Ledger defaults to `./prefixwise.db`. |
+| `prefixwise serve [--upstream URL] [--mock] [--fix canonical_tools] [--host H] [--port P] [--ledger FILE]` | Run the proxy. Ledger defaults to `./prefixwise.db`. `--fix` applies an opt-in, reversible rewrite to every request (see below). |
+| `prefixwise fixes [--json]` | The fixes that would save the most, ranked by the avoidable tokens your own ledger attributes to each cause. |
 | `prefixwise report [--by cause\|session_id\|agent_id\|model\|provider\|task_id] [--json]` | Totals and a breakdown, most avoidable first. |
 | `prefixwise task ID --success\|--failure` | Record a task outcome (safe while the proxy runs). |
 | `prefixwise request REQUEST_ID [--json]` | One request's ledger entry (from `X-Prefixwise-Request-Id`). |
@@ -116,9 +117,11 @@ Avoidable tokens for a waste turn = the part of the previous turn's prompt that 
 | `X-Prefixwise-Fork-Of: <session>` | This session was forked from another. |
 | `X-Prefixwise-Cache-Ttl: <seconds>` | The cache lifetime, when known. |
 
-**Response headers:** `X-Prefixwise-Request-Id` always; `X-Prefixwise-Cause`, `X-Prefixwise-Legit`, `X-Prefixwise-Avoidable-Tokens` on non-streaming responses. Streamed requests are classified when the stream ends: read them from `GET /requests/<id>`.
+**Response headers:** `X-Prefixwise-Request-Id` always; `X-Prefixwise-Cause`, `X-Prefixwise-Legit`, `X-Prefixwise-Avoidable-Tokens` on non-streaming responses; `X-Prefixwise-Fixes` when a fix rewrote the request. Streamed requests are classified when the stream ends: read them from `GET /requests/<id>`.
 
-**Environment:** `PREFIXWISE_UPSTREAM_URL`, `PREFIXWISE_API_KEY` (overrides client auth; `x-api-key` for Anthropic), `PREFIXWISE_LEDGER_PATH`, `PREFIXWISE_HMAC_KEY` (HMAC short blocks so their hashes cannot be dictionary-guessed), `PREFIXWISE_MAX_SESSIONS` (default 10,000), `PORT`.
+**Environment:** `PREFIXWISE_UPSTREAM_URL`, `PREFIXWISE_API_KEY` (overrides client auth; `x-api-key` for Anthropic), `PREFIXWISE_LEDGER_PATH`, `PREFIXWISE_HMAC_KEY` (HMAC short blocks so their hashes cannot be dictionary-guessed), `PREFIXWISE_MAX_SESSIONS` (default 10,000), `PREFIXWISE_FIXES` (e.g. `canonical_tools`), `PORT`.
+
+**Fixes the proxy can apply.** `canonical_tools` sorts tools by name and sorts each tool's keys before forwarding, so a tool list that drifts between turns (plugin reload, dict rebuild) stops breaking the cache. It is off by default; with it off, requests pass through unchanged. Prefixwise classifies the request the provider actually received. Fixes that would change what the model reads, like moving a timestamp out of the system prompt, are advice only: `prefixwise fixes` lists them. Whether a fix saves what it predicts is what [E4](experiments/e4/) measures.
 
 ## Limits
 
@@ -236,7 +239,7 @@ Live run Nov 5-6, 2026 (Colab L4, vLLM 0.33.0, Qwen3-4B): agreement 90.0%, Pass 
 
 1. **E1-open: passed live 2026-11-06** (Qwen3-4B, vLLM 0.33.0; 100%). **E1-hosted: Anthropic passed 2026-11-06** (37/37 native agreement over two runs); OpenAI diagnostics returned `unavailable` throughout. Original plan: 120 turns on vLLM + Qwen3-8B with injected causes as ground truth; agreement >= 95%, UNKNOWN <= 10%. No API credits. Then **E1-hosted:** 100 consecutive turns on Anthropic and OpenAI with native diagnostics chained; Prefixwise's first-diverged block agrees with the native reason >= 95% of the time; UNKNOWN <= 10% of misses on real coding-agent traffic. Needs API credits and is still the provider-facing proof.
 2. **E2/E3:** vLLM >= v0.30.0 + LMCache on one GPU box, ids set by the proxy; >= 95% of requests join on ids within 5 s; lookup-hash lines join on request id for >= 99% of requests.
-3. **E4:** one toggle (canonical tools or volatile-to-tail) on a recorded agent session replayed live; realised cache_read >= 50% of predicted over 50 requests; task success flat.
+3. **E4 (harness ready, mock pass 2026-11-06: 99.8% of predicted realised; live run next, see `experiments/e4/`):** one toggle (canonical tools or volatile-to-tail) on a recorded agent session replayed live; realised cache_read >= 50% of predicted over 50 requests; task success flat.
 4. **E5:** PreCompact snapshot on one harness; rewrite priced exactly once; compaction frequency reduced to task boundaries without a drop in a 10-task pass rate.
 5. **SGLang adapter** (rid, session_id, return_cached_tokens_details).
 6. Hosted fleet roll-up, only if anyone asks.

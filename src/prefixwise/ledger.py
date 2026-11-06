@@ -45,6 +45,7 @@ class LedgerEntry:
     task_id: str | None = None
     request_id: str | None = None
     completion_tokens: int = 0
+    fixes: str | None = None  # comma-separated proxy fixes that rewrote this request
 
 
 def avoidable_tokens(prompt_tokens: int, cached_tokens: int, *,
@@ -83,7 +84,8 @@ def reuse_adjusted_reads(write_multiplier: float, read_multiplier: float) -> flo
 
 
 # Columns added after the first schema; added in place to older ledgers.
-_MIGRATIONS = {"task_id": "TEXT", "request_id": "TEXT", "completion_tokens": "INTEGER"}
+_MIGRATIONS = {"task_id": "TEXT", "request_id": "TEXT", "completion_tokens": "INTEGER",
+               "fixes": "TEXT"}
 
 
 class Ledger:
@@ -128,15 +130,15 @@ class Ledger:
                 """INSERT INTO entries (session_id, agent_id, provider, model, cause,
                     legit, prompt_tokens, cached_tokens, avoidable_tokens,
                     avoidable_cost, task_success, native_reason, classifier_version,
-                    task_id, request_id, completion_tokens)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    task_id, request_id, completion_tokens, fixes)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (entry.session_id, entry.agent_id, entry.provider, entry.model,
                  entry.cause, None if entry.legit is None else int(entry.legit),
                  entry.prompt_tokens, entry.cached_tokens, entry.avoidable_tokens,
                  entry.avoidable_cost,
                  None if entry.task_success is None else int(entry.task_success),
                  entry.native_reason, entry.classifier_version,
-                 entry.task_id, entry.request_id, entry.completion_tokens),
+                 entry.task_id, entry.request_id, entry.completion_tokens, entry.fixes),
             )
             if entry.task_id and entry.task_success is not None:
                 self._set_task_outcome_locked(entry.task_id, entry.task_success)

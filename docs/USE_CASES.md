@@ -28,6 +28,8 @@ prefixwise request <X-Prefixwise-Request-Id from any response>
 
 **Fix:** move the volatile value to the end of the prompt (or into the latest user message), restart the agent, and watch `avoidable` for that cause fall to zero in the next `prefixwise report`.
 
+To see every fix ranked by what it would save in *your* traffic, run `prefixwise fixes`. If the top item is `tool_reserialize`, the proxy can fix it without code changes: `prefixwise serve --fix canonical_tools`.
+
 ## 2. Diagnose one miss from your logs, without a proxy
 
 You have two consecutive request bodies from your logs and want to know why the second one did not hit the cache:
