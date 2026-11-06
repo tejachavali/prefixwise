@@ -172,3 +172,21 @@
   Backlog raised to 256: 40/40 clean. A first TTL test passed for the
   wrong reason (a ttl change also edits the system block); rewritten
   to use its own 1 h session.
+
+## 2026-11-06 PST -- commit af021de39e374335d49ca66cec27c4736f8ed14c (v0.2.0)
+- What changed: packaging (v0.2.0), Dockerfile, GitHub Actions CI,
+  explain --fail-on-waste, per-group tokens per successful task,
+  docs/USE_CASES.md, examples/, README restructured product-first.
+- Tests: 75 passed (source tree, 3.13); 75 passed against the installed
+  wheel on Python 3.11; editable install on 3.12 ran every CI step
+  (tests, E1 mock, CLI smoke) locally.
+- Docker: image built and run in mock mode: serve banner, POST 200,
+  task + report via docker exec, ledger persisted across restart.
+- Examples: explain turn1/turn2 -> VOLATILE_SYSTEM; session.jsonl ->
+  first_write, none, tool_result_mutation, tool_reserialize (exit 2);
+  examples/openai_agent.py against serve --mock -> 2 tasks, report OK.
+- Failures/fixes: first Dockerfile used pip install, which needs PyPI
+  for hatchling (blocked by this sandbox's TLS proxy); the package has
+  no runtime dependencies, so the image now copies src and runs
+  python -m prefixwise. README demotion briefly turned code comments
+  into headings; fixed.
