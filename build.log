@@ -115,3 +115,15 @@
 - Still open: OpenAI Responses API; per-session proxy state not locked;
   tool results not split from messages; TTL/eviction/fork inputs never
   populated by the proxy.
+
+## 2026-11-06 PST -- commit c4ccd7a9aed5cdd3dcbe62fde9192c79f8a97fa8
+- What changed: proxy per-session state under one lock; session maps
+  LRU-bounded (PREFIXWISE_MAX_SESSIONS, default 10,000).
+- Tests: PYTHONPATH=src python3 -m pytest tests/ -q -- 52 passed, 5
+  consecutive runs. New: 100 concurrent requests / 5 sessions -> exactly
+  5 first writes, 100 ledger rows.
+- Failures/fixes: first version of the concurrency test asserted 95
+  NONE; a turn racing its session's first write sees no cache (mock
+  decides cached tokens before the first turn is recorded) and is
+  ROUTING_MISS or RETRY_REPLAY, as a real cache would. Test now asserts
+  the invariant (one first write per session) instead.
