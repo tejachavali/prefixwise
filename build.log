@@ -228,3 +228,38 @@
   no runtime dependencies, so the image now copies src and runs
   python -m prefixwise. README demotion briefly turned code comments
   into headings; fixed.
+
+## 2026-11-06 05:42 PST -- commit fd4c003 (live E1-open re-run, no code change)
+- Setup: Colab free L4 GPU (NVIDIA L4, 23034 MiB, High-RAM), vLLM 0.33.0,
+  model Qwen/Qwen3-4B (alias Qwen/Qwen3-4B-alias), commit fd4c003
+  ("Merge remote main 3e3e774 and fix E1-open issues", verified latest
+  main at run time, re-checked 13:39 UTC, no re-pull needed). Flags:
+  --enable-prefix-caching --enable-prompt-tokens-details
+  --enable-auto-tool-choice --tool-call-parser hermes. vLLM started
+  cleanly ("vLLM ready" after ~240 s); experiment cell ran in 70.6 s.
+  Sign-in: saved Google password rejected once, not retried; Teja
+  approved device verification on his iPhone.
+- Result: 120 turns, agreement 100.0%, UNKNOWN rate 0.0%, Pass YES
+  (thresholds agreement >=95%, UNKNOWN <=10%). Per-cause, all 100%:
+  first_write 12/12, none 38/38, volatile_system 10/10,
+  tool_reserialize 10/10, tool_catalog_change 10/10, system_edit 10/10,
+  compaction_rewrite 10/10, retry_replay 10/10, model_switch 10/10.
+- Misses: none. Zero turns with predicted != injected, zero
+  upstream_error=True, zero unknown. (The JSON "misses": 70 is the
+  count of prefix-breaking injected turns, not prediction misses.)
+- retry_replay: fix worked. All 10 retry turns cached_tokens = 0
+  (prompt 1781-1791), fresh cache_salt + fresh upstream session id
+  per turn, e.g. turns 56/57 e1-open-s5-retry-56/57, cached 0/1786.
+- Session C: turns 2-10 all none in both sessions. e1-open-s10 turns
+  101-110 and e1-open-s11 turns 111-120: turn 1 first_write
+  (cached 1744/1756), turns 2-10 none, cached rising 1744, 1792, 1840,
+  1872, 1920, 1968, 2000, 2048, 2096 with prompt 1799-2144. No
+  routing_miss, no unknown, so no Qwen3 chat-template re-rendering
+  signal in Session C.
+- Evidence: experiments/e1_open/runs/2026-11-06-colab-l4-qwen3-4b.md
+  (558 bytes) and .json (37,722 bytes, 1,499 lines), copied verbatim
+  from the Colab runtime results e1_open_20261106-133035.md/.json.
+  results/ stays gitignored; runs/ is the committed copy.
+- Failures/fixes: none in this run. No harness or classifier change
+  was made, per the run instruction. One pip dependency-resolver
+  warning in the install cell; install completed and vLLM ran.
