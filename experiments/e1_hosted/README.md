@@ -11,17 +11,17 @@ Native reasons are coarse, so agreement means the Prefixwise cause is one the na
 ```bash
 python experiments/e1_hosted/e1_hosted.py --mock                 # free, no network: harness smoke test
 python experiments/e1_hosted/e1_hosted.py --estimate             # tokens a full run will send
-python experiments/e1_hosted/e1_hosted.py --probe --providers anthropic    # 2 real turns, under 1 cent
+python experiments/e1_hosted/e1_hosted.py --probe --providers anthropic    # 5 real turns, about a cent
 python experiments/e1_hosted/e1_hosted.py --providers anthropic --max-input-tokens 900000
 ```
 
-**Always probe first.** Prefixwise reads native diagnostics where the docs say they are. `--probe` prints `response_keys`, `raw_usage` and `raw_diagnostics` from the real API, so you can confirm the location before paying for 100 turns. If `native_reason` is null on a miss in the probe, stop and fix the reader (`proxy.native_reason_from`) first.
+**Always probe first.** The probe sends 5 turns: a first write, a hit, two deliberate misses (tools reordered, then system prompt edited), and a hit. A miss reason only exists on a miss, so `null` on the first write and the hits is expected. The probe passes when every *real* miss carries a native reason where Prefixwise reads it. It exits 3 and prints `STOP` otherwise, along with every cache- or diagnostics-shaped field it found, so you can see where the provider put the reason.
 
 Keys: `ANTHROPIC_API_KEY` / `OPENAI_API_KEY`, or none if a network proxy injects them per host. A 401, 403 or 404 stops the run immediately, so a wrong key or model id costs nothing more.
 
 ## Cost
 
-A full run is 100 turns per provider, about 740k input tokens each. Roughly half are deliberate misses (prefix re-processed), and half are cache reads. Output is capped at 16 tokens per turn.
+A full run is 100 turns per provider. `--estimate` says about 740k input tokens each, but it counts 4 characters per token and the first real probe (2026-11-06) measured about 2.4x fewer tokens, so expect roughly 300k. Roughly half are deliberate misses (prefix re-processed), and half are cache reads. Output is capped at 16 tokens per turn.
 
 | Provider / model | Approx. full-run cost |
 |---|---|

@@ -33,3 +33,27 @@ def test_estimate_counts_the_full_plan():
     est = estimate(["anthropic", "openai"], 5, {"anthropic": ("m", "alt"), "openai": ("m", None)})
     assert est["anthropic"]["turns"] == 100 and est["openai"]["turns"] == 100
     assert est["anthropic"]["input_tokens"] > 500_000
+
+
+def test_probe_exercises_real_misses_and_passes_in_mock(capsys):
+    assert main(["--mock", "--probe", "--output-dir", "/tmp/claude-probe-test"]) == 0
+    out = capsys.readouterr().out
+    assert "PROBE anthropic: OK" in out and "PROBE openai: OK" in out
+
+
+def test_probe_verdict_rules():
+    from e1_hosted import probe_verdict
+
+    hit = {"turn": 2, "injected": "none", "cached_tokens": 2900, "prompt_tokens": 3000,
+           "native_reason": None, "native_type": "cache_hit", "real_miss": False}
+    miss = {"turn": 3, "injected": "tool_reserialize", "cached_tokens": 0, "prompt_tokens": 3000,
+            "native_type": "unavailable", "real_miss": True, "cache_fields": {}, "predicted": "tool_reserialize",
+            "agree_native": None}
+    # Null reason on a hit is fine; null reason on a real miss stops the run.
+    ok, notes = probe_verdict([hit, {**miss, "native_reason": None}])
+    assert not ok and "REAL miss but no native reason" in " ".join(notes)
+    ok, _ = probe_verdict([hit, {**miss, "native_reason": "tools_changed", "agree_native": True}])
+    assert ok
+    # Without any real miss the probe proves nothing.
+    ok, notes = probe_verdict([hit])
+    assert not ok and "not exercised" in notes[-1]

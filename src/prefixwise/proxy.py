@@ -264,6 +264,18 @@ def native_reason_from(payload: dict) -> str | None:
     return None
 
 
+def native_type_from(payload: dict) -> str | None:
+    """The provider's diagnostic verdict type, when it gives one (OpenAI:
+    cache_hit, cache_miss, comparison_response_not_found, unavailable).
+    Distinct from the reason: a hit has a type but no reason."""
+    usage = payload.get("usage") or {}
+    for diag in (payload.get("prompt_cache_diagnostics"), payload.get("diagnostics"),
+                 usage.get("prompt_cache_diagnostics")):
+        if isinstance(diag, dict) and diag.get("type"):
+            return str(diag["type"])
+    return None
+
+
 def _error(status: int, message: str) -> dict:
     return {"error": {"type": "prefixwise_proxy_error", "message": message, "status": status}}
 

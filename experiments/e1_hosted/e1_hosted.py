@@ -27,10 +27,11 @@ means waiting 5+ minutes per turn.
 Modes (cheapest first):
   --mock    no network, no keys: simulated usage and native reasons in the
             shapes Prefixwise assumes. Harness smoke test only.
-  --probe   2 real turns per provider; prints where usage and diagnostics
-            actually appear in the response. Run this before a full run:
-            if the providers put diagnostics somewhere Prefixwise does not
-            read, the full run would measure nothing.
+  --probe   5 real turns per provider (first write, hit, two deliberate
+            misses, hit) and prints where usage and diagnostics appear.
+            Run it before a full run: it checks that the provider returns
+            a miss reason on a REAL miss, where Prefixwise reads it. A hit
+            has no miss reason, so null on a hit is expected.
   (default) the full run: --repeats sessions-pairs per provider
             (default 5 -> 100 turns per provider).
 
@@ -61,7 +62,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
 from prefixwise.diagnostics import AgreementScorer, map_native_reason  # noqa: E402
 from prefixwise.classifier import MissCause  # noqa: E402
-from prefixwise.proxy import PrefixwiseProxy, native_reason_from, normalize_usage  # noqa: E402
+from prefixwise.proxy import (PrefixwiseProxy, native_reason_from, native_type_from,  # noqa: E402
+                              normalize_usage)
 
 UPSTREAMS = {"openai": "https://api.openai.com", "anthropic": "https://api.anthropic.com"}
 # Cheapest models that should carry native diagnostics. OpenAI's GPT-5.6
@@ -73,6 +75,9 @@ KEY_ENV = {"openai": "OPENAI_API_KEY", "anthropic": "ANTHROPIC_API_KEY"}
 
 SESSION_A = ["first_write", "none", "volatile_system", "none", "tool_reserialize", "none",
              "tool_catalog_change", "none", "system_edit", "none"]
+# Probe: a miss must happen for a miss reason to exist. Tools come first
+# in the prefix (a full miss), the system prompt second (a partial miss).
+PROBE_SCRIPT = ["first_write", "none", "tool_reserialize", "system_edit", "none"]
 SESSION_B = ["first_write", "none", "param_rendered", "none", "compaction_rewrite", "none",
              "model_switch", "model_switch", "none", "none"]
 
@@ -239,7 +244,7 @@ def run_provider(provider: str, *, model: str, alt_model: str | None, repeats: i
     api = "chat" if provider == "anthropic" else "responses"
     scorer = AgreementScorer()
     results, spent = [], 0
-    scripts = [(0, SESSION_A[:2])] if probe else plan(provider, repeats, alt_model)
+    scripts = [(0, PROBE_SCRIPT)] if probe else plan(provider, repeats, alt_model)
     base_date = date(2026, 11, 6)
     stamp = time.strftime("%H%M%S")
     for idx, script in scripts:
@@ -267,9 +272,12 @@ def run_provider(provider: str, *, model: str, alt_model: str | None, repeats: i
             prompt, cached = normalize_usage(provider, payload.get("usage") or {})
             spent += prompt
             native = native_reason_from(payload)
+            prev_prompt = results[-1]["prompt_tokens"] if results and "prompt_tokens" in results[-1] else 0
             agree_native = scorer.record(MissCause(result["cause"]), native, provider)
             row = {"provider": provider, "session": idx, "turn": turn, "model": sess.model,
                    "injected": injected, "predicted": result["cause"], "native_reason": native,
+                   "native_type": native_type_from(payload),
+                   "real_miss": bool(prev_prompt) and cached < 0.5 * min(prev_prompt, prompt),
                    "native_mapped": (map_native_reason(provider, native).value
                                      if map_native_reason(provider, native) else None),
                    "agree_injected": result["cause"] == injected, "agree_native": agree_native,
@@ -277,13 +285,55 @@ def run_provider(provider: str, *, model: str, alt_model: str | None, repeats: i
                    "raw_usage": payload.get("usage"),
                    "raw_diagnostics": {k: payload.get(k) for k in ("diagnostics", "prompt_cache_diagnostics")
                                        if payload.get(k) is not None},
-                   "response_keys": sorted(payload.keys())}
+                   "response_keys": sorted(payload.keys()),
+                   # Anything cache- or diagnostics-shaped, wherever it is: if a
+                   # provider moves its reason, the probe shows where.
+                   "cache_fields": _cache_fields(payload)}
             results.append(row)
             if probe:
-                print(json.dumps({k: row[k] for k in ("turn", "injected", "predicted", "native_reason",
-                                                      "prompt_tokens", "cached_tokens", "raw_usage",
-                                                      "raw_diagnostics", "response_keys")}, indent=2))
+                print(json.dumps({k: row[k] for k in ("turn", "injected", "predicted", "native_type",
+                                                      "native_reason", "real_miss", "prompt_tokens",
+                                                      "cached_tokens", "raw_diagnostics", "cache_fields",
+                                                      "response_keys")}, indent=2))
     return results, score(results, scorer)
+
+
+def _cache_fields(payload: dict, prefix: str = "") -> dict:
+    out = {}
+    for k, v in payload.items():
+        name = f"{prefix}{k}"
+        if any(w in k.lower() for w in ("cache", "diagnos")):
+            out[name] = v
+        elif isinstance(v, dict) and k in ("usage", "metadata"):
+            out.update(_cache_fields(v, f"{name}."))
+    return out
+
+
+def probe_verdict(rows: list[dict]) -> tuple[bool, list[str]]:
+    """The probe passes when every REAL miss carries a native reason that
+    Prefixwise reads. A hit (or first write) with no reason is expected."""
+    notes, ok = [], True
+    for r in rows:
+        if "error" in r:
+            return False, [f"turn {r['turn']}: HTTP {r['status']}"]
+        label = f"turn {r['turn']} ({r['injected']}, {r['cached_tokens']}/{r['prompt_tokens']} cached)"
+        if r["injected"] in ("first_write", "none"):
+            if r["native_reason"]:
+                notes.append(f"{label}: unexpected miss reason {r['native_reason']!r} on a non-miss turn")
+            continue
+        if not r["real_miss"]:
+            notes.append(f"{label}: injected a change but the provider still served the prefix; not a miss")
+        elif r["native_reason"] is None:
+            ok = False
+            notes.append(f"{label}: REAL miss but no native reason read (type {r['native_type']!r});"
+                         f" cache fields seen: {sorted(r['cache_fields'])}")
+        else:
+            notes.append(f"{label}: native reason {r['native_reason']!r} (type {r['native_type']!r}),"
+                         f" Prefixwise {r['predicted']!r}, agree={r['agree_native']}")
+    if not any(r.get("real_miss") for r in rows if r["injected"] not in ("first_write", "none")):
+        ok = False
+        notes.append("no injected turn produced a real miss, so the diagnostics path was not exercised")
+    return ok, notes
 
 
 def score(results: list[dict], scorer: AgreementScorer) -> dict:
@@ -366,7 +416,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--providers", default="anthropic,openai")
     ap.add_argument("--repeats", type=int, default=5, help="session pairs per provider (10 turns each)")
     ap.add_argument("--mock", action="store_true", help="no network: harness smoke test")
-    ap.add_argument("--probe", action="store_true", help="2 real turns per provider; print response shapes")
+    ap.add_argument("--probe", action="store_true",
+                    help="5 real turns per provider incl. 2 deliberate misses; exit 3 if a real miss has no reason")
     ap.add_argument("--estimate", action="store_true", help="print token estimate for a full run and exit")
     ap.add_argument("--max-input-tokens", type=int, default=None, help="stop before exceeding this budget")
     for p in ("anthropic", "openai"):
@@ -396,7 +447,14 @@ def main(argv: list[str] | None = None) -> int:
     path = write_report(all_results, Path(args.output_dir), mode)
     print(f"Report: {path}\n        {path.with_suffix('.md')}")
     if args.probe:
-        return 0
+        all_ok = True
+        for p, (rows, _) in all_results.items():
+            ok, notes = probe_verdict(rows)
+            all_ok &= ok
+            print(f"\nPROBE {p}: {'OK, a full run will measure native agreement' if ok else 'STOP'}")
+            for n in notes:
+                print(f"  - {n}")
+        return 0 if all_ok else 3
     return 0 if all(rep["pass"] for _, rep in all_results.values()) else 1
 
 
