@@ -228,3 +228,18 @@
   no runtime dependencies, so the image now copies src and runs
   python -m prefixwise. README demotion briefly turned code comments
   into headings; fixed.
+
+## 2026-11-06 PST -- commit b5555ecd952d8d306389be96aca6d7c470d574c4 (branch claude/e1-hosted, PR #9)
+- First live E1-hosted probe (run by Muse on Colab with the user's
+  keys, commit f0d991e): no HTTP errors; Anthropic claude-haiku-5-5
+  turns cached 3,022/3,044 and 8,635/8,663, diagnostics {} both turns;
+  OpenAI gpt-5.6-luna turn 1 no diagnostics key, turn 2
+  prompt_cache_diagnostics {"type": "unavailable"}; injected agreement
+  100% on both. Stopped at the gate (native_reason null on turn 2).
+- Diagnosis: the gate was wrong, not the reader. Both probe turns were
+  cache hits, and a hit has no miss reason. The probe never exercised a
+  miss. OpenAI's "unavailable" on a chained hit is the open question.
+- What changed: probe now injects two real misses and passes only if
+  every real miss carries a native reason Prefixwise reads; native
+  type recorded; cache/diagnostics fields surfaced wherever they are.
+- Tests: 87 passed. Mock probe: OK for both providers.
