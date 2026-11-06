@@ -44,8 +44,10 @@ against current LMCache (its import path breaks; pin unverified).
 
 from __future__ import annotations
 
+import hmac
 import json
 import os
+import sys
 import threading
 from collections import OrderedDict
 import time
@@ -390,6 +392,8 @@ class PrefixwiseProxy:
         # Opt-in request rewrites (see fixes.py). Off unless named here or
         # in PREFIXWISE_FIXES; turning them off restores pass-through.
         self.fixes = parse_fixes(fixes if fixes is not None else os.environ.get("PREFIXWISE_FIXES"))
+        # Set by serve() from --auth-token / PREFIXWISE_AUTH_TOKEN; None = open.
+        self.auth_token: str | None = None
         self.fingerprinter = Fingerprinter(hmac_key=hmac_key)
         self.scorer = AgreementScorer()
         self.upstream_url = (upstream_url or os.environ.get("PREFIXWISE_UPSTREAM_URL") or "").rstrip("/")
@@ -418,6 +422,9 @@ class PrefixwiseProxy:
         mutated; ctx["forward_body"] is what the upstream receives.
         """
         headers = {k.lower(): v for k, v in (headers or {}).items()}
+        for h in ("x-prefixwise-session-id", "x-prefixwise-agent-id", "x-prefixwise-task-id"):
+            if headers.get(h) and len(headers[h]) > MAX_ID_CHARS:
+                raise ClientError(f"{h} is longer than {MAX_ID_CHARS} characters")
         session_id = str(headers.get("x-prefixwise-session-id") or body.get("session_id")
                          or (body.get("metadata") or {}).get("user_id") or "default")
         task_id = headers.get("x-prefixwise-task-id") or body.get("task_id")
@@ -743,6 +750,40 @@ class PrefixwiseProxy:
         return out + [b"data: [DONE]\n", b"\n"]
 
 
+MAX_BODY_BYTES = int(os.environ.get("PREFIXWISE_MAX_BODY_BYTES", str(32 * 1024 * 1024)))
+MAX_ID_CHARS = 256  # session / agent / task ids: labels, not payloads
+
+
+class ClientError(ValueError):
+    """A request the proxy refuses: answered 400, never a dropped connection."""
+
+
+def validate_body(body: dict) -> None:
+    """Shape checks for the fields Prefixwise reads. A malformed request
+    gets a 400 naming the field, instead of crashing a handler thread."""
+    for key in ("messages", "tools"):
+        if key in body and not isinstance(body[key], list):
+            raise ClientError(f"'{key}' must be a list")
+    for m in body.get("messages") or []:
+        if not isinstance(m, dict):
+            raise ClientError("every item in 'messages' must be an object")
+    for t in body.get("tools") or []:
+        if not isinstance(t, dict):
+            raise ClientError("every item in 'tools' must be an object")
+    inp = body.get("input")
+    if inp is not None and not isinstance(inp, (str, list)):
+        raise ClientError("'input' must be a string or a list")
+    if isinstance(inp, list) and not all(isinstance(i, dict) for i in inp):
+        raise ClientError("every item in 'input' must be an object")
+    for key in ("session_id", "agent_id", "task_id"):
+        if key in body and body[key] is not None and len(str(body[key])) > MAX_ID_CHARS:
+            raise ClientError(f"'{key}' is longer than {MAX_ID_CHARS} characters")
+
+
+def _is_loopback(host: str) -> bool:
+    return host in ("127.0.0.1", "::1", "localhost") or host.startswith("127.")
+
+
 class PrefixwiseHTTPServer(ThreadingHTTPServer):
     """Threaded server sized for agent fleets. The stdlib default listen
     backlog is 5, so a burst of parallel requests got connection resets."""
@@ -768,9 +809,23 @@ def make_handler(proxy: PrefixwiseProxy):
             self.end_headers()
             self.wfile.write(data)
 
+        def _authorized(self) -> bool:
+            """With an auth token configured, every request but /health must
+            carry it in X-Prefixwise-Token (constant-time compare)."""
+            token = getattr(proxy, "auth_token", None)
+            if not token:
+                return True
+            given = self.headers.get("X-Prefixwise-Token") or ""
+            if hmac.compare_digest(given.encode(), token.encode()):
+                return True
+            self._json(401, _error(401, "missing or wrong X-Prefixwise-Token"))
+            return False
+
         def do_GET(self):
             if self.path == "/health":
                 return self._json(200, {"ok": True, "mock": proxy.mock})
+            if not self._authorized():
+                return
             if self.path == "/ledger":
                 return self._json(200, json.loads(proxy.ledger.to_json()))
             if self.path.startswith("/requests/"):
@@ -781,19 +836,41 @@ def make_handler(proxy: PrefixwiseProxy):
             return self._json(404, _error(404, "not found"))
 
         def _read_json(self):
-            length = int(self.headers.get("Content-Length", 0) or 0)
+            try:
+                length = int(self.headers.get("Content-Length", 0) or 0)
+            except ValueError:
+                raise ClientError("Content-Length is not a number")
+            if length < 0:
+                raise ClientError("Content-Length is negative")
+            if length > MAX_BODY_BYTES:
+                raise ClientError(f"body larger than {MAX_BODY_BYTES} bytes")
             body = json.loads(self.rfile.read(length) or b"{}")
             if not isinstance(body, dict):
-                raise ValueError("body must be a JSON object")
+                raise ClientError("body must be a JSON object")
+            validate_body(body)
             return body
 
         def do_POST(self):
             if self.path not in ("/v1/chat/completions", "/v1/responses", "/v1/messages", "/tasks"):
                 return self._json(404, _error(404, f"unsupported path {self.path}"))
+            if not self._authorized():
+                return
             try:
                 body = self._read_json()
+            except ClientError as exc:
+                code = 413 if "larger than" in str(exc) else 400
+                return self._json(code, _error(code, str(exc)))
             except ValueError as exc:
                 return self._json(400, _error(400, f"invalid JSON body: {exc}"))
+            try:
+                return self._dispatch(body)
+            except ClientError as exc:
+                return self._json(400, _error(400, str(exc)))
+            except Exception as exc:  # never drop the connection; never echo internals
+                print(f"prefixwise: internal error on {self.path}: {type(exc).__name__}", file=sys.stderr)
+                return self._json(500, _error(500, "internal error in the Prefixwise proxy"))
+
+        def _dispatch(self, body: dict):
             if self.path == "/tasks":
                 return self._task(body)
             provider = "anthropic" if self.path == "/v1/messages" else "openai"
@@ -851,12 +928,21 @@ def make_handler(proxy: PrefixwiseProxy):
 
 def serve(host: str = "127.0.0.1", port: int = 8080, *, ledger_path: str | None = None,
           upstream_url: str | None = None, mock: bool | None = None, quiet: bool = False,
-          fixes: str | list[str] | None = None):
+          fixes: str | list[str] | None = None, auth_token: str | None = None,
+          allow_unauthenticated: bool = False):
     """Run the proxy until interrupted. Settings fall back to PREFIXWISE_* env vars."""
     hmac_key = os.environ.get("PREFIXWISE_HMAC_KEY")
     ledger_path = ledger_path or os.environ.get("PREFIXWISE_LEDGER_PATH", ":memory:")
     proxy = PrefixwiseProxy(ledger_path=ledger_path, upstream_url=upstream_url, mock=mock,
                             hmac_key=hmac_key.encode() if hmac_key else None, fixes=fixes)
+    proxy.auth_token = auth_token or os.environ.get("PREFIXWISE_AUTH_TOKEN") or None
+    exposed = not _is_loopback(host)
+    if exposed and not proxy.auth_token and proxy.api_key and not proxy.mock and not allow_unauthenticated:
+        # Anyone who can reach the port would spend this key.
+        raise SystemExit(
+            f"prefixwise: refusing to listen on {host} with PREFIXWISE_API_KEY set and no auth token: "
+            "anyone who can reach the port could spend your key. Set PREFIXWISE_AUTH_TOKEN (clients send it "
+            "as X-Prefixwise-Token), bind to 127.0.0.1, or pass --allow-unauthenticated.")
     server = PrefixwiseHTTPServer((host, port), make_handler(proxy))
     if not quiet:
         target = "MOCK upstream (synthetic usage, no API calls)" if proxy.mock else proxy.upstream_url
@@ -864,6 +950,10 @@ def serve(host: str = "127.0.0.1", port: int = 8080, *, ledger_path: str | None 
         print(f"  upstream: {target}")
         print(f"  ledger:   {ledger_path}")
         print(f"  fixes:    {', '.join(proxy.fixes) or 'none (pass-through)'}")
+        print(f"  auth:     {'X-Prefixwise-Token required' if proxy.auth_token else 'none'}"
+              + ("  (WARNING: listening beyond localhost without a token)" if exposed and not proxy.auth_token else ""))
+        if not os.environ.get("PREFIXWISE_HMAC_KEY"):
+            print("  note:     set PREFIXWISE_HMAC_KEY so hashes of short prompt blocks cannot be guessed")
         print("  POST /v1/chat/completions  POST /v1/responses  POST /v1/messages  POST /tasks")
         print("  GET  /ledger  GET /requests/<id>  GET /health", flush=True)
     try:

@@ -58,7 +58,7 @@ For real traffic, drop `--mock` and name the upstream; your client's own API key
 prefixwise serve --upstream https://api.openai.com       # OpenAI: /v1/chat/completions, /v1/responses
 prefixwise serve --upstream https://api.anthropic.com    # Anthropic: /v1/messages
 prefixwise serve --upstream http://127.0.0.1:8000        # vLLM / any OpenAI-compatible server
-docker build -t prefixwise . && docker run -p 8080:8080 -v pw:/data prefixwise   # mock in Docker
+docker build -t prefixwise . && docker run -p 127.0.0.1:8080:8080 -v pw:/data prefixwise   # mock in Docker
 ```
 
 **More: [docs/USE_CASES.md](docs/USE_CASES.md)** walks through eight concrete scenarios: a bill that jumped, a CI gate on prompt changes, A/B-testing prompt versions per successful task, Anthropic TTL choice, self-hosted vLLM, and more.
@@ -119,9 +119,18 @@ Avoidable tokens for a waste turn = the part of the previous turn's prompt that 
 
 **Response headers:** `X-Prefixwise-Request-Id` always; `X-Prefixwise-Cause`, `X-Prefixwise-Legit`, `X-Prefixwise-Avoidable-Tokens` on non-streaming responses; `X-Prefixwise-Fixes` when a fix rewrote the request. Streamed requests are classified when the stream ends: read them from `GET /requests/<id>`.
 
-**Environment:** `PREFIXWISE_UPSTREAM_URL`, `PREFIXWISE_API_KEY` (overrides client auth; `x-api-key` for Anthropic), `PREFIXWISE_LEDGER_PATH`, `PREFIXWISE_HMAC_KEY` (HMAC short blocks so their hashes cannot be dictionary-guessed), `PREFIXWISE_MAX_SESSIONS` (default 10,000), `PREFIXWISE_FIXES` (e.g. `canonical_tools`), `PORT`.
+**Environment:** `PREFIXWISE_UPSTREAM_URL`, `PREFIXWISE_API_KEY` (overrides client auth; `x-api-key` for Anthropic), `PREFIXWISE_LEDGER_PATH`, `PREFIXWISE_HMAC_KEY` (HMAC short blocks so their hashes cannot be dictionary-guessed), `PREFIXWISE_MAX_SESSIONS` (default 10,000), `PREFIXWISE_FIXES` (e.g. `canonical_tools`), `PREFIXWISE_AUTH_TOKEN` (require `X-Prefixwise-Token`), `PREFIXWISE_MAX_BODY_BYTES`, `PORT`.
 
 **Fixes the proxy can apply.** `canonical_tools` sorts tools by name and sorts each tool's keys before forwarding, so a tool list that drifts between turns (plugin reload, dict rebuild) stops breaking the cache. It is off by default; with it off, requests pass through unchanged. Prefixwise classifies the request the provider actually received. Fixes that would change what the model reads, like moving a timestamp out of the system prompt, are advice only: `prefixwise fixes` lists them. Whether a fix saves what it predicts is what [E4](experiments/e4/) measures.
+
+## Security
+
+- **What it stores:** the ledger keeps fingerprints of prompt blocks (hashes), token counts, causes, and your session, task and agent labels. It never stores prompt text or API keys. The ledger file is created readable by its owner only. Set `PREFIXWISE_HMAC_KEY` so hashes of short, guessable blocks are keyed.
+- **Where it listens:** `127.0.0.1` by default. To listen beyond localhost (a team server, or Docker with a published port), set `PREFIXWISE_AUTH_TOKEN`; clients then send it as `X-Prefixwise-Token`, and every endpoint but `/health` requires it. With `PREFIXWISE_API_KEY` set, the proxy refuses to listen beyond localhost without a token, because anyone who reached the port could spend your key. Publish Docker ports on `127.0.0.1` (`-p 127.0.0.1:8080:8080`).
+- **Keys:** the client's own auth headers pass through to the upstream untouched and are never logged. `X-Prefixwise-*` headers are never forwarded.
+- **Limits:** request bodies over 32 MiB (`PREFIXWISE_MAX_BODY_BYTES`) get a 413, and malformed requests get a 400 naming the field.
+
+Found a vulnerability? See [SECURITY.md](SECURITY.md).
 
 ## Limits
 

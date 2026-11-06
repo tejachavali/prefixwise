@@ -65,6 +65,27 @@ The second part is the real risk. Models can be sensitive to tool order, and onl
 - **Task success drops with the fix on:** that's a real finding. `canonical_tools` stays "recommended, with a warning", and the README says so. Look at which tasks flipped.
 - **HTTP errors:** fix the harness first, as in E1-hosted rounds 1–3.
 
+## In parallel (Claude): launch gates
+
+Teja asked when Prefixwise can go public for people to try. The gates, in order:
+1. **Legal clearance:** Teja only, blocking.
+2. **E4 live pass:** the "Now" section above.
+3. **Dogfooding:** a day or two in front of a real agent.
+4. **Security review:** done, PR #13. See below.
+5. **Launch polish:** PyPI release, CONTRIBUTING and CHANGELOG, issue templates.
+
+Then a soft launch to a few people who run agents (Omni's founder is a candidate), then wider.
+
+**Security review results (PR #13).** Each finding was confirmed with a proof-of-concept against a live proxy before fixing, and is pinned by a test in `tests/test_security.py`:
+- Malformed JSON shapes crashed a handler, dropping the connection. Now a 400 naming the field.
+- A negative `Content-Length` hung a thread, and request size was unbounded. Now 400, or 413 above 32 MiB.
+- The ledger file was world-readable (644). Now 600. It holds no prompt text; that is verified by a test.
+- **No authentication:** the documented Docker command published on all interfaces, so with `PREFIXWISE_API_KEY` set anyone could spend the key. Fixed:
+  - `PREFIXWISE_AUTH_TOKEN` (clients send `X-Prefixwise-Token`)
+  - the proxy refuses to start exposed with a key and no token
+  - the docs publish Docker on `127.0.0.1`
+- Checked and fine: no client-controlled upstream URL (no SSRF), SQL inputs whitelisted, no request logging, Docker runs non-root.
+
 ## Open questions
 
 - **OpenAI diagnostics:** `unavailable` everywhere. A support note is drafted (Claude's message of 2026-11-06, round 4). Unresolved; low priority.
@@ -89,3 +110,4 @@ The second part is the real risk. Models can be sensitive to tool order, and onl
 - **2026-11-06:** Teja asked that intent always be logged for Muse. This file was created; Claude updates it with every PR and before every request to Muse.
 - **2026-11-06:** PR #11 merged (E4 harness, canonical_tools, WORKLOG). Muse started the E4 live runs.
 - **2026-11-06:** Teja asked for the personal note at the end of the README to be removed (PR #12). It remains in git history; whether to purge it is Teja's call.
+- **2026-11-06:** Claude ran a pre-launch security review: 5 real issues found by proof-of-concept and fixed (PR #13). Next for Claude: launch polish (PyPI trusted publishing, CONTRIBUTING, CHANGELOG). E4 live results still pending from Muse.
