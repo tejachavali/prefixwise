@@ -72,3 +72,24 @@
   response and forwards extra fields upstream; Anthropic usage fields
   and breakpoint detection; tokens_per_successful_task is per request,
   not per task; tool results not split from messages.
+
+## 2026-11-06 PST -- commit 246ee094c8e2c076b657a6148f6cfe0ae7dfe3e0
+- What changed: proxy passes the upstream status and payload through
+  unchanged (verdict in X-Prefixwise-* headers); strips session_id,
+  agent_id, prefixwise_compaction_event before forwarding (session_id
+  kept for vLLM); client auth passes through, PREFIXWISE_API_KEY
+  overrides (x-api-key + anthropic-version for Anthropic); upstream
+  errors returned as-is and not recorded, 502 when unreachable, 400 on
+  bad JSON and stream=true; no prompt_cache_options on chat
+  completions; Anthropic usage normalized (input + cache_read +
+  cache_creation); cache_control detected on tools/system/messages.
+- Tests: PYTHONPATH=src python3 -m pytest tests/ -q -- 42 passed in 3.83s.
+- Proxy smoke test: mock mode on :8089, turn 1 returns a
+  chat.completion with X-Prefixwise-Cause: first_write, turn 2 none
+  with 0 avoidable, /ledger roll-up ok. e1_open.py --mock: 120 turns,
+  agreement 100.0%, Pass YES.
+- Still open: streaming; OpenAI Responses API (needed for
+  comparison_response_id chaining); per-session state not locked under
+  the threaded server; tokens_per_successful_task per request, not per
+  task; tool results not split from messages; TTL/eviction/fork inputs
+  never populated by the proxy.
