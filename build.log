@@ -127,3 +127,19 @@
   decides cached tokens before the first turn is recorded) and is
   ROUTING_MISS or RETRY_REPLAY, as a real cache would. Test now asserts
   the invariant (one first write per session) instead.
+
+## 2026-11-06 PST -- commit c556c73e3f3d93db59c4eef95c7695fc73d41086
+- What changed: prefixwise CLI (serve, report, task, request, explain);
+  explain.py offline miss explanation; ledger WAL + busy timeout,
+  summary/rollup/recent; proxy mock flag, serve() arguments.
+- Tests: PYTHONPATH=src python3 -m pytest tests/ -q -- 60 passed.
+- Smoke test: `prefixwise serve --port 8093` (mock) driven by HTTP,
+  2 tasks x 3 turns (first write, none, volatile system); `task t1
+  --success`, `task t2 --failure` written while the proxy ran;
+  `report` -> 6 requests, 2,000 avoidable (volatile_system), tokens per
+  successful task 12,006; `report --by task_id`, `request <id>` OK;
+  missing ledger exits 1 with a clear message. `explain` on sample
+  files: volatile date -> VOLATILE_SYSTEM, reversed tools ->
+  TOOL_RESERIALIZE, JSONL session growth -> NONE.
+- Failures/fixes: serve banner was buffered (shown only at exit);
+  now flushed.
