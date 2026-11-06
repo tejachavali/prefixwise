@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "prefixwise"
-version = "0.2.0"
+version = "0.3.0"
 description = "Name why your LLM prompt cache missed, price the miss, and measure tokens per successful task. A local proxy and CLI for OpenAI, Anthropic and vLLM."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -38,6 +38,11 @@ dev = ["pytest"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/prefixwise"]
+
+[tool.hatch.build.targets.sdist]
+# Source, tests and what the tests read; not CI config or project logs.
+include = ["src", "tests", "experiments", "examples", "docs", "README.md", "LICENSE", "CHANGELOG.md", "SECURITY.md", "pyproject.toml"]
+exclude = ["experiments/*/results"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
