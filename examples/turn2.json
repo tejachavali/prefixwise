@@ -1,0 +1,49 @@
+{
+  "model": "gpt-5.6",
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "read_file",
+        "description": "Read a file",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "run_tests",
+        "description": "Run the test suite",
+        "parameters": {
+          "type": "object",
+          "properties": {}
+        }
+      }
+    }
+  ],
+  "messages": [
+    {
+      "role": "system",
+      "content": "You are a coding agent working in the user's repository. Current time: 2026-11-06T09:15:41Z."
+    },
+    {
+      "role": "user",
+      "content": "Fix the failing test."
+    },
+    {
+      "role": "assistant",
+      "content": "Running the tests first."
+    },
+    {
+      "role": "user",
+      "content": "Go ahead."
+    }
+  ]
+}

@@ -222,9 +222,21 @@ class Ledger:
                            SUM(CASE WHEN legit = 0 THEN 1 ELSE 0 END)
                     FROM entries GROUP BY {by}
                     ORDER BY SUM(avoidable_tokens) DESC, COUNT(*) DESC""").fetchall()
-        return [{by: k, "requests": n, "prompt_tokens": pt, "cached_tokens": ct,
-                 "avoidable_tokens": at, "waste_requests": w or 0}
-                for k, n, pt, ct, at, w in rows]
+            # Tokens per successful task within each group: tokens on resolved
+            # tasks (failures included) / distinct successful tasks.
+            per_task = {k: (tok, ok) for k, tok, ok in self.conn.execute(
+                f"""SELECT e.{by}, SUM(e.prompt_tokens + COALESCE(e.completion_tokens, 0)),
+                           COUNT(DISTINCT CASE WHEN t.success = 1 THEN t.task_id END)
+                    FROM entries e JOIN tasks t ON e.task_id = t.task_id
+                    GROUP BY e.{by}""").fetchall()}
+        out = []
+        for k, n, pt, ct, at, w in rows:
+            tok, ok = per_task.get(k, (0, 0))
+            out.append({by: k, "requests": n, "prompt_tokens": pt, "cached_tokens": ct,
+                        "avoidable_tokens": at, "waste_requests": w or 0,
+                        "successful_tasks": ok,
+                        "tokens_per_successful_task": (tok / ok) if ok else None})
+        return out
 
     def recent(self, limit: int = 20) -> list[dict]:
         with self._lock:

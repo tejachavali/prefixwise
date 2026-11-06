@@ -83,8 +83,10 @@ def cmd_report(args) -> int:
     print(_table([[r[args.by] if r[args.by] is not None else "(none)", _fmt_int(r["requests"]),
                    _fmt_int(r["prompt_tokens"]), _fmt_pct(r["cached_tokens"] / r["prompt_tokens"])
                    if r["prompt_tokens"] else "-", _fmt_int(r["avoidable_tokens"]),
-                   _fmt_int(r["waste_requests"])] for r in rows],
-                 [args.by, "requests", "prompt", "cached", "avoidable", "waste reqs"]))
+                   _fmt_int(r["waste_requests"]), _fmt_int(r["tokens_per_successful_task"])]
+                  for r in rows],
+                 [args.by, "requests", "prompt", "cached", "avoidable", "waste reqs",
+                  "tokens/success"]))
     return 0
 
 
@@ -141,18 +143,19 @@ def cmd_explain(args) -> int:
             sys.exit("prefixwise: give one session file (JSON / JSONL) or two request files")
     except (OSError, ValueError) as exc:
         sys.exit(f"prefixwise: {exc}")
+    waste = sum(1 for r in results if r.legit is False)
+    fail = 2 if (args.fail_on_waste and waste) else 0
     if args.json:
         print(json.dumps([r.to_dict() for r in results], indent=2))
-        return 0
+        return fail
     if results and results[0].offline:
         print("(offline: no usage given, so this explains what in the request breaks reuse;"
               " TTL, eviction and routing need real usage)\n")
     for label, r in zip(labels, results):
         _print_explanation(label, r)
-    waste = sum(1 for r in results if r.legit is False)
     if len(results) > 1:
         print(f"\n{len(results)} turns, {waste} wasteful")
-    return 0
+    return fail
 
 
 # -- parser -----------------------------------------------------------------------------
@@ -205,6 +208,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("files", nargs="+")
     p.add_argument("--provider", default="auto", choices=["auto", "openai", "anthropic", "vllm"])
     p.add_argument("--json", action="store_true")
+    p.add_argument("--fail-on-waste", action="store_true",
+                   help="exit 2 if any turn is classified as waste (for CI gates on prompt changes)")
     p.set_defaults(func=cmd_explain)
     return ap
 
