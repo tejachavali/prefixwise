@@ -248,10 +248,6 @@ Live run Nov 5-6, 2026 (Colab L4, vLLM 0.33.0, Qwen3-4B): agreement 90.0%, Pass 
 5. **SGLang adapter** (rid, session_id, return_cached_tokens_details).
 6. Hosted fleet roll-up, only if anyone asks.
 
-## Legal note
-
-General information only, not legal advice. For a California employee whose team builds agentic AI cost analytics, Cal. Labor Code §2870 likely does not protect this side project even if built on own time and equipment. Get California employment counsel and written disclosure before production use or incorporating.
-
 ## License
 
 MIT. See LICENSE.
