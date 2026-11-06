@@ -68,7 +68,7 @@
   (Qwen3 emits Hermes-style tool calls). (2) RETRY_REPLAY no longer
   uses POST /reset_prefix_cache (HTTP 404 on vLLM 0.33.0). Retry
   turns now use a fresh upstream session id (prefixwise_upstream_
-  session_id, popped by the proxy before forwarding) plus a fresh
+  session_id, stripped by the proxy before forwarding) plus a fresh
   cache_salt per turn, so the vLLM prefix is cold; the proxy session
   is unchanged, so the classifier still compares against the previous
   turn in the same session. A fresh session_id alone would NOT cold
@@ -78,15 +78,153 @@
   larger GPU (RTX 4090 / A100 class). README.md and
   experiments/e1_open/README.md document all three. results/ added
   to .gitignore (run artifacts, not committed).
-- Tests: PYTHONPATH=src python3 -m pytest tests/ -q -- 31 passed in
-  0.98s (28 existing + 3 new: retry_upstream_ids fresh per turn,
-  retry turns carry fresh upstream sessions in mock, proxy pops the
-  upstream-session override and forwards it as X-Session-ID).
-  pytest was not installed in this VM; installed with pip
-  --break-system-packages (local env only, not part of the repo).
-- Mock run: PYTHONPATH=src python3 experiments/e1_open/e1_open.py
-  --mock -- 100 turns, agreement 100.0%, UNKNOWN rate 0.0%,
+- Merged onto remote main 3e3e774 (packaging v0.2.0, CLI, proxy
+  prepare/finalize rewrite, Session C): the retry fix was ported
+  into the new proxy structure (PREFIXWISE_FIELDS +
+  ctx["upstream_session_id"], forwarded as X-Session-ID and as the
+  vLLM body session_id) and the mock run is now 120 turns.
+- Tests after the merge: PYTHONPATH=src python3 -m pytest tests/ -q
+  -- 78 passed in 12.25s (remote main's suite plus the 3 new retry
+  tests, ported to the new proxy prepare/finalize API).
+- Mock run after the merge: PYTHONPATH=src python3
+  experiments/e1_open/e1_open.py --mock -- 120 turns (Session C
+  added by remote main), agreement 100.0%, UNKNOWN rate 0.0%,
   Pass YES, all 9 causes 100% (retry_replay 10/10). Mock only, not
   live evidence: the live re-run on Colab (Qwen3-4B, fixed flags)
   is still needed to confirm retry_replay passes for real.
 - Not yet run live: the fixed E1-open on Colab/GPU box.
+
+## 2026-11-06 PST -- commit 68e856bfb74b68f344552bd6fa1a34d92d898c03
+- What changed: classifier treats append-only message growth as
+  unchanged (previous turn must be an unchanged prefix); NONE compares
+  cache_read to the reusable prior prefix. avoidable_for_turn: only
+  legit=False turns count, as min(prev, curr) prompt - cache_read.
+  E1-open Session C (x2, append-only growth), 120 turns total.
+- Tests: PYTHONPATH=src python3 -m pytest tests/ -q -- 35 passed in 0.88s.
+  New tests fail on the old classifier (4 failed).
+- Proxy smoke test: normal append turn -> none, 0 avoidable (was
+  history_edit, 1000 avoidable). e1_open.py --mock: 120 turns,
+  agreement 100.0%, UNKNOWN 0.0%, Pass YES. Old classifier on the new
+  harness: 85.0% (fail). Mock only; not evidence about vLLM.
+- Still open: proxy returns its summary instead of the upstream
+  response and forwards extra fields upstream; Anthropic usage fields
+  and breakpoint detection; tokens_per_successful_task is per request,
+  not per task; tool results not split from messages.
+
+## 2026-11-06 PST -- commit 246ee094c8e2c076b657a6148f6cfe0ae7dfe3e0
+- What changed: proxy passes the upstream status and payload through
+  unchanged (verdict in X-Prefixwise-* headers); strips session_id,
+  agent_id, prefixwise_compaction_event before forwarding (session_id
+  kept for vLLM); client auth passes through, PREFIXWISE_API_KEY
+  overrides (x-api-key + anthropic-version for Anthropic); upstream
+  errors returned as-is and not recorded, 502 when unreachable, 400 on
+  bad JSON and stream=true; no prompt_cache_options on chat
+  completions; Anthropic usage normalized (input + cache_read +
+  cache_creation); cache_control detected on tools/system/messages.
+- Tests: PYTHONPATH=src python3 -m pytest tests/ -q -- 42 passed in 3.83s.
+- Proxy smoke test: mock mode on :8089, turn 1 returns a
+  chat.completion with X-Prefixwise-Cause: first_write, turn 2 none
+  with 0 avoidable, /ledger roll-up ok. e1_open.py --mock: 120 turns,
+  agreement 100.0%, Pass YES.
+- Still open: streaming; OpenAI Responses API (needed for
+  comparison_response_id chaining); per-session state not locked under
+  the threaded server; tokens_per_successful_task per request, not per
+  task; tool results not split from messages; TTL/eviction/fork inputs
+  never populated by the proxy.
+
+## 2026-11-06 PST -- commit 3fbb766ff63359f17e3e88c3ea9ee17bcb8c0d89
+- What changed: tokens_per_successful_task is now all prompt +
+  completion tokens on resolved tasks (failures included) divided by
+  successful tasks; new tasks table, task_id / request_id /
+  completion_tokens columns, in-place migration of old ledgers. Proxy:
+  task_id via X-Prefixwise-Task-Id or body field; POST /tasks;
+  GET /requests/<id>; stream=true relayed as SSE (OpenAI include_usage
+  injected and hidden unless requested; Anthropic usage from
+  message_start + message_delta), recorded when the stream ends.
+- Tests: PYTHONPATH=src python3 -m pytest tests/ -q -- 50 passed in 6.88s.
+- Proxy smoke test: mock proxy on :8091 driven by the openai and
+  anthropic Python SDKs: non-stream and stream both providers OK,
+  include_usage passthrough OK, Anthropic final message usage OK,
+  POST /tasks then /ledger: 5 requests x 2,001 tokens / 1 task = 10005.
+  e1_open.py --mock: 120 turns, agreement 100.0%, Pass YES.
+- Failures/fixes: mock Anthropic SSE packed event: and data: into one
+  chunk, so usage was never parsed (only the mock; real upstreams are
+  read with readline). Fixed: one list item per line.
+- Still open: OpenAI Responses API; per-session proxy state not locked;
+  tool results not split from messages; TTL/eviction/fork inputs never
+  populated by the proxy.
+
+## 2026-11-06 PST -- commit c4ccd7a9aed5cdd3dcbe62fde9192c79f8a97fa8
+- What changed: proxy per-session state under one lock; session maps
+  LRU-bounded (PREFIXWISE_MAX_SESSIONS, default 10,000).
+- Tests: PYTHONPATH=src python3 -m pytest tests/ -q -- 52 passed, 5
+  consecutive runs. New: 100 concurrent requests / 5 sessions -> exactly
+  5 first writes, 100 ledger rows.
+- Failures/fixes: first version of the concurrency test asserted 95
+  NONE; a turn racing its session's first write sees no cache (mock
+  decides cached tokens before the first turn is recorded) and is
+  ROUTING_MISS or RETRY_REPLAY, as a real cache would. Test now asserts
+  the invariant (one first write per session) instead.
+
+## 2026-11-06 PST -- commit c556c73e3f3d93db59c4eef95c7695fc73d41086
+- What changed: prefixwise CLI (serve, report, task, request, explain);
+  explain.py offline miss explanation; ledger WAL + busy timeout,
+  summary/rollup/recent; proxy mock flag, serve() arguments.
+- Tests: PYTHONPATH=src python3 -m pytest tests/ -q -- 60 passed.
+- Smoke test: `prefixwise serve --port 8093` (mock) driven by HTTP,
+  2 tasks x 3 turns (first write, none, volatile system); `task t1
+  --success`, `task t2 --failure` written while the proxy ran;
+  `report` -> 6 requests, 2,000 avoidable (volatile_system), tokens per
+  successful task 12,006; `report --by task_id`, `request <id>` OK;
+  missing ledger exits 1 with a clear message. `explain` on sample
+  files: volatile date -> VOLATILE_SYSTEM, reversed tools ->
+  TOOL_RESERIALIZE, JSONL session growth -> NONE.
+- Failures/fixes: serve banner was buffered (shown only at exit);
+  now flushed.
+
+## 2026-11-06 PST -- commit 1165e5bd0e4e54fd5c545f6b0fbd8c0b33de7c00
+- What changed: OpenAI Responses API (/v1/responses), streaming
+  included; comparison_response_id chaining; previous_response_id turns
+  stitched onto the stored prior snapshot (unseen parent -> UNKNOWN);
+  Responses usage normalised.
+- Tests: PYTHONPATH=src python3 -m pytest tests/ -q -- 63 passed.
+- Smoke test: openai SDK against `prefixwise serve --mock`:
+  responses.create -> first_write; create with previous_response_id ->
+  none; responses.stream with previous_response_id -> text and final
+  usage OK; ledger none x2, first_write x1.
+- Failures/fixes: mock Responses stream lacked output_item.added /
+  content_part.added / *.done events, which the SDK requires; mock now
+  emits the full sequence (relay path was unaffected).
+
+## 2026-11-06 PST -- commit cf5dede77b17e935a94b5d90bf1d3886d26161de
+- What changed: tool results split into their own block group (all
+  three APIs); TTL from header / Anthropic cache_control / OpenAI
+  prompt_cache_retention; fork header; classifier timing rules made
+  honest (hit wins; ROUTING_MISS only within a known or 5-min window;
+  else UNKNOWN); EVICTED before RETRY_REPLAY; FORK_BOUNDARY reachable;
+  PrefixwiseHTTPServer with listen backlog 256.
+- Tests: PYTHONPATH=src python3 -m pytest tests/ -q -- 71 passed, 3
+  consecutive runs. e1_open.py --mock: 120 turns, 100.0%, Pass YES.
+- Failures/fixes: concurrency test flaked; stress script reproduced a
+  ConnectionResetError at run 12/40 -- stdlib listen backlog of 5.
+  Backlog raised to 256: 40/40 clean. A first TTL test passed for the
+  wrong reason (a ttl change also edits the system block); rewritten
+  to use its own 1 h session.
+
+## 2026-11-06 PST -- commit af021de39e374335d49ca66cec27c4736f8ed14c (v0.2.0)
+- What changed: packaging (v0.2.0), Dockerfile, GitHub Actions CI,
+  explain --fail-on-waste, per-group tokens per successful task,
+  docs/USE_CASES.md, examples/, README restructured product-first.
+- Tests: 75 passed (source tree, 3.13); 75 passed against the installed
+  wheel on Python 3.11; editable install on 3.12 ran every CI step
+  (tests, E1 mock, CLI smoke) locally.
+- Docker: image built and run in mock mode: serve banner, POST 200,
+  task + report via docker exec, ledger persisted across restart.
+- Examples: explain turn1/turn2 -> VOLATILE_SYSTEM; session.jsonl ->
+  first_write, none, tool_result_mutation, tool_reserialize (exit 2);
+  examples/openai_agent.py against serve --mock -> 2 tasks, report OK.
+- Failures/fixes: first Dockerfile used pip install, which needs PyPI
+  for hatchling (blocked by this sandbox's TLS proxy); the package has
+  no runtime dependencies, so the image now copies src and runs
+  python -m prefixwise. README demotion briefly turned code comments
+  into headings; fixed.

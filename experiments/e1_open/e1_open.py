@@ -1,6 +1,6 @@
 """E1-open: validate the Prefixwise classifier without API credits.
 
-Runs 100 turns against a vLLM OpenAI-compatible server serving an open
+Runs 120 turns against a vLLM OpenAI-compatible server serving an open
 Hugging Face model (default Qwen/Qwen3-8B). Each turn has a KNOWN
 injected cause, so the injected cause is the ground truth: the
 classifier is scored against what the harness deliberately changed,
@@ -20,7 +20,14 @@ Session B (x5, coding questions):
   5 NONE, 6 RETRY_REPLAY, 7 RETRY_REPLAY, 8 MODEL_SWITCH,
   9 MODEL_SWITCH, 10 NONE
 
-That is 100 turns: FIRST_WRITE 10, NONE 20, VOLATILE_SYSTEM 10,
+Session C (x2, append-only growth, the shape of real agent traffic):
+  1 FIRST_WRITE, 2-10 NONE. Each turn appends the previous assistant
+  reply and a new user question, so every turn differs from the last
+  in messages; the previous turn is an unchanged prefix. Sessions A
+  and B repeat identical requests for NONE, which cannot catch a
+  classifier that mistakes growth for HISTORY_EDIT; Session C does.
+
+That is 120 turns: FIRST_WRITE 12, NONE 38, VOLATILE_SYSTEM 10,
 TOOL_RESERIALIZE 10, TOOL_CATALOG_CHANGE 10, SYSTEM_EDIT 10,
 COMPACTION_REWRITE 10, RETRY_REPLAY 10, MODEL_SWITCH 10.
 
@@ -126,6 +133,9 @@ SESSION_A = ["first_write", "none", "volatile_system", "volatile_system",
 SESSION_B = ["first_write", "none", "compaction_rewrite", "compaction_rewrite",
              "none", "retry_replay", "retry_replay", "model_switch",
              "model_switch", "none"]
+# Append-only growth: every turn adds an exchange; nothing earlier changes.
+SESSION_C = ["first_write"] + ["none"] * 9
+SESSIONS = [SESSION_A] * 5 + [SESSION_B] * 5 + [SESSION_C] * 2
 
 
 def simulate_cached_tokens(injected: str, prompt_tokens: int = PROMPT_TOKENS_MOCK) -> int:
@@ -154,12 +164,16 @@ def simulate_cached_tokens(injected: str, prompt_tokens: int = PROMPT_TOKENS_MOC
 
 
 def build_body(*, session_id: str, model: str, injected: str, turn: int,
-               base_date: date, question: str = QUESTIONS[0]) -> dict:
+               base_date: date, question: str = QUESTIONS[0], grow: bool = False) -> dict:
     """Build the request body for one turn, mutating only the injected block.
 
     The user question is fixed for a whole session: if it changed every
     turn, every turn would differ in messages and NONE / RETRY_REPLAY
     turns could never be identical to the previous turn.
+
+    With grow=True (Session C), turn N carries N-1 prior exchanges
+    (user question, assistant reply) before the current question, so
+    each turn appends to the previous one without changing it.
     """
     # Date: only VOLATILE_SYSTEM turns change the date. Turn 3 uses
     # base_date + 1 day, turn 4 returns to base_date; both are volatile
@@ -181,6 +195,14 @@ def build_body(*, session_id: str, model: str, injected: str, turn: int,
         {"role": "system", "content": system},
         {"role": "user", "content": question},
     ]
+    if grow:
+        history: list[dict] = []
+        for i in range(1, turn):
+            history.append({"role": "user", "content": f"{question} (follow-up {i})" if i > 1 else question})
+            history.append({"role": "assistant", "content": f"Answer {i}: prefix reuse depends on identical leading tokens."})
+        current = f"{question} (follow-up {turn})" if turn > 1 else question
+        messages = [{"role": "system", "content": system}, *history,
+                    {"role": "user", "content": current}]
     if injected == "compaction_rewrite":
         # Each compaction produces a different summary, so turn 4's
         # history differs from turn 3's and is still a rewrite.
@@ -197,7 +219,7 @@ def build_body(*, session_id: str, model: str, injected: str, turn: int,
         "max_tokens": 16,
         "temperature": 0,
     }
-    if injected in ("none", "retry_replay") and turn in (5, 6, 7):
+    if not grow and injected in ("none", "retry_replay") and turn in (5, 6, 7):
         # Session B, turns 5-7: these follow a compaction, so the
         # identical request to repeat is the compacted history from
         # turn 4, not the pre-compaction baseline. Without this the
@@ -309,16 +331,17 @@ def run(*, vllm_url: str, model: str, model_alias: str, mock: bool,
     state = {"injected": "first_write"}
 
     if mock:
-        def _mock_forward(provider, body, request_id, session_id):
-            return ({"prompt_tokens": PROMPT_TOKENS_MOCK,
-                     "cached_tokens": simulate_cached_tokens(state["injected"])},
-                    f"resp-{request_id[:8]}")
+        def _mock_forward(provider, body, request_id, session_id, client_headers, api="chat"):
+            return 200, {"id": f"resp-{request_id[:8]}",
+                         "usage": {"prompt_tokens": PROMPT_TOKENS_MOCK,
+                                   "prompt_tokens_details": {
+                                       "cached_tokens": simulate_cached_tokens(state["injected"])}}}
         proxy._forward = _mock_forward  # type: ignore[method-assign]
 
     results: list[dict] = []
     turn_no = 0
     base_date = date(2026, 11, 5)
-    for session_idx, script in enumerate([SESSION_A] * 5 + [SESSION_B] * 5):
+    for session_idx, script in enumerate(SESSIONS):
         session_id = f"e1-open-s{session_idx}"
         for turn_idx, injected in enumerate(script, start=1):
             turn_no += 1
@@ -331,7 +354,8 @@ def run(*, vllm_url: str, model: str, model_alias: str, mock: bool,
             state["injected"] = injected
             body = build_body(session_id=session_id, model=model_for_turn,
                               injected=injected, turn=turn_idx, base_date=base_date,
-                              question=QUESTIONS[session_idx % len(QUESTIONS)])
+                              question=QUESTIONS[session_idx % len(QUESTIONS)],
+                              grow=script is SESSION_C)
             # RETRY_REPLAY: fresh upstream session + fresh cache_salt,
             # proxy session unchanged (see retry_upstream_ids).
             # No /reset_prefix_cache call: it 404s on vLLM 0.33.0.
@@ -341,17 +365,16 @@ def run(*, vllm_url: str, model: str, model_alias: str, mock: bool,
                 body["prefixwise_upstream_session_id"] = retry_upstream_session_id
                 body["cache_salt"] = retry_salt
             upstream_error = False
-            try:
-                result, _entry = proxy.handle("vllm", dict(body))
+            result, _entry = proxy.handle("vllm", dict(body))
+            if result["status"] < 400:
                 predicted = result["cause"]
-                usage = result["usage"]
-                cached = int(usage.get("cached_tokens", 0) or 0)
-                prompt_tokens = int(usage.get("prompt_tokens", 0) or 0)
-            except Exception as exc:  # upstream rejected the model alias, etc.
+                cached, prompt_tokens = result["cached_tokens"], result["prompt_tokens"]
+            else:  # upstream rejected the model alias, etc.
                 upstream_error = True
                 predicted = _classify_direct(proxy, session_id, body)
                 cached, prompt_tokens = 0, PROMPT_TOKENS_MOCK
-                print(f"turn {turn_no}: upstream error ({exc}), classified in-process as {predicted}")
+                print(f"turn {turn_no}: upstream error {result['status']} "
+                      f"({json.dumps(result['response'])[:200]}), classified in-process as {predicted}")
             results.append({
                 "turn": turn_no, "session_id": session_id, "injected": injected,
                 "predicted": predicted, "cached_tokens": cached,

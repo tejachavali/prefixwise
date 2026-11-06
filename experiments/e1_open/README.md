@@ -4,7 +4,7 @@ Validate the Prefixwise classifier without Anthropic or OpenAI API credits, usin
 
 ## What it proves
 
-100 turns, each with a KNOWN injected cause. The classifier is scored against what the harness deliberately changed, not against a provider's native reason (open models have none).
+120 turns, each with a KNOWN injected cause. Two of the twelve sessions grow by appending an exchange every turn, the shape of real agent traffic, so a classifier that mistakes growth for HISTORY_EDIT fails. The classifier is scored against what the harness deliberately changed, not against a provider's native reason (open models have none).
 
 Sessions of 10 turns, chained so each turn is scored against the previous turn in the same session:
 
@@ -67,7 +67,7 @@ Tool choice (live run, same run): vLLM 0.33.0 rejected tool-carrying requests wi
 
 No API keys are needed. A Hugging Face token (`HF_TOKEN`) is only needed for gated models; Qwen3-8B is not gated. Llama 3.3 is gated: accept the license on Hugging Face and set `HF_TOKEN` before starting the server.
 
-Each turn generates at most 16 tokens (`max_tokens=16, temperature=0`), so the 100-turn run is mostly prefill, not generation.
+Each turn generates at most 16 tokens (`max_tokens=16, temperature=0`), so the 120-turn run is mostly prefill, not generation.
 
 ## Run it on Colab
 

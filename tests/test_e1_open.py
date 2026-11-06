@@ -105,10 +105,11 @@ def test_retry_turns_carry_fresh_upstream_session(tmp_path):
     assert is_pass(report)
 
 
-def test_proxy_pops_upstream_session_override():
-    # The harness-only flag must never reach the upstream: the proxy
-    # pops it and uses it only as the X-Session-ID for forwarding,
-    # while its own snapshot chain keeps the original session.
+def test_proxy_strips_upstream_session_override():
+    # The harness-only flag must never reach the upstream: prepare()
+    # strips it from the forwarded body and uses it only as the
+    # X-Session-ID for forwarding, while the proxy's own snapshot
+    # chain keeps the original session.
     import sys
     from pathlib import Path
 
@@ -117,10 +118,12 @@ def test_proxy_pops_upstream_session_override():
 
     seen: dict = {}
 
-    def _capture(provider, body, request_id, session_id):
+    def _capture(provider, body, request_id, session_id, client_headers, api="chat"):
         seen["body"] = dict(body)
         seen["session_id"] = session_id
-        return {"prompt_tokens": 2000, "cached_tokens": 0}, "resp-1"
+        return 200, {"id": "resp-1",
+                     "usage": {"prompt_tokens": 2000,
+                               "prompt_tokens_details": {"cached_tokens": 0}}}
 
     proxy = PrefixwiseProxy()
     proxy._forward = _capture  # type: ignore[method-assign]
@@ -128,20 +131,22 @@ def test_proxy_pops_upstream_session_override():
             "messages": [{"role": "user", "content": "hi"}],
             "prefixwise_upstream_session_id": "s1-retry-6",
             "cache_salt": "s1-retry-6"}
-    proxy.handle("vllm", dict(body))
+    result, _entry = proxy.handle("vllm", dict(body))
+    assert result["status"] == 200
     assert "prefixwise_upstream_session_id" not in seen["body"]
     assert seen["session_id"] == "s1-retry-6"  # upstream sees the fresh session
+    assert seen["body"]["session_id"] == "s1-retry-6"  # vLLM body session too
     assert "s1" in proxy.last_snapshot  # proxy chain keeps the original session
 
 
-def test_mock_run_passes_100_turns(tmp_path):
+def test_mock_run_passes_120_turns(tmp_path):
     from e1_open import run
 
     results, report = run(vllm_url="http://127.0.0.1:8000", model="Qwen/Qwen3-8B",
                           model_alias="Qwen/Qwen3-8B-alias", mock=True,
                           output_dir=tmp_path)
-    assert len(results) == 100
-    assert report["total_turns"] == 100
+    assert len(results) == 120
+    assert report["total_turns"] == 120
     assert report["agreement"] == 1.0
     assert report["unknown_rate"] == 0.0
     assert is_pass(report)
@@ -152,3 +157,23 @@ def test_mock_run_passes_100_turns(tmp_path):
             "retry_replay"} <= causes
     # Results are JSON-serialisable for the report writer.
     json.dumps(results)
+
+
+def test_build_body_grow_appends_without_changing_prior_turn():
+    from datetime import date
+
+    d = date(2026, 11, 5)
+    t3 = build_body(session_id="s", model="m", injected="none", turn=3, base_date=d, grow=True)
+    t4 = build_body(session_id="s", model="m", injected="none", turn=4, base_date=d, grow=True)
+    assert len(t4["messages"]) == len(t3["messages"]) + 2
+    assert t4["messages"][:len(t3["messages"])] == t3["messages"]
+
+
+def test_mock_append_session_scores_none():
+    from e1_open import run
+
+    results, _ = run(vllm_url="http://127.0.0.1:8000", model="m", model_alias="m-alias",
+                     mock=True, output_dir=Path("/nonexistent"))
+    growth = [r for r in results if r["session_id"] in ("e1-open-s10", "e1-open-s11")]
+    assert len(growth) == 20
+    assert all(r["predicted"] == r["injected"] for r in growth)
