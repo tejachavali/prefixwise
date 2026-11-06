@@ -319,3 +319,17 @@
   balance).
 - What changed: OpenAI max_output_tokens 256; run record; README.
 - Tests: 93 passed.
+
+## 2026-11-06 PST -- commit 4a5780bfe8f2c667a4f0bd322876fa7eb8f4220d (E4 harness + canonical_tools)
+- What changed: fixes.py (canonical_tools toggle, FIX_ADVICE); proxy
+  applies fixes before forwarding, classifies the forwarded request,
+  records fixes (ledger column, migration), X-Prefixwise-Fixes header;
+  `serve --fix`, `prefixwise fixes`; experiments/e4 harness with a
+  recorded tool-order-drift session file.
+- Tests: 104 passed.
+- Mock E4: 60 paired requests, 29 with drift; predicted 91,399,
+  realised 91,184 (99.8%); success 100% / 100% (mock); Pass YES.
+- Smoke: serve --fix canonical_tools: reordered tools -> none with
+  X-Prefixwise-Fixes; without it -> tool_reserialize; `prefixwise
+  fixes` ranks tool_reserialize with the toggle; unknown fix rejected.
+- Not yet run live (vLLM on Colab, then Anthropic).

@@ -5,6 +5,7 @@
     prefixwise task       record a task outcome (success / failure)
     prefixwise request    show one request's verdict by request id
     prefixwise explain    offline: why does the cache miss between requests?
+    prefixwise fixes      which fixes would save the most, from your own ledger
 """
 
 from __future__ import annotations
@@ -55,8 +56,50 @@ def cmd_serve(args) -> int:
     from .proxy import serve
 
     ledger = args.ledger or os.environ.get("PREFIXWISE_LEDGER_PATH") or DEFAULT_LEDGER
-    serve(host=args.host, port=args.port, ledger_path=ledger,
-          upstream_url=args.upstream, mock=True if args.mock else None)
+    try:
+        serve(host=args.host, port=args.port, ledger_path=ledger,
+              upstream_url=args.upstream, mock=True if args.mock else None,
+              fixes=args.fix or None)
+    except ValueError as exc:  # unknown --fix name
+        sys.exit(f"prefixwise: {exc}")
+    return 0
+
+
+def cmd_fixes(args) -> int:
+    from .fixes import FIX_ADVICE
+
+    led = _open_existing_ledger(args)
+    summary = led.summary()
+    rows = {r["cause"]: r for r in led.rollup("cause")}
+    with led._lock:
+        fixed_requests = dict(led.conn.execute(
+            "SELECT fixes, COUNT(*) FROM entries WHERE fixes IS NOT NULL GROUP BY fixes").fetchall())
+    recs = []
+    for cause, advice in FIX_ADVICE.items():
+        r = rows.get(cause)
+        if not r or not r["avoidable_tokens"]:
+            continue
+        recs.append({"cause": cause, "requests": r["requests"], "predicted_savings_tokens": r["avoidable_tokens"],
+                     "share_of_prompt_tokens": (r["avoidable_tokens"] / summary["prompt_tokens"])
+                     if summary["prompt_tokens"] else None,
+                     "fix": advice["fix"], "proxy_toggle": advice["toggle"],
+                     "status": "recommended (predicted; prove it with experiments/e4)"})
+    recs.sort(key=lambda x: -x["predicted_savings_tokens"])
+    if args.json:
+        print(json.dumps({"recommendations": recs, "requests_rewritten_by_fixes": fixed_requests}, indent=2))
+        return 0
+    if not recs:
+        print("No avoidable waste with a known fix in this ledger.")
+    for i, r in enumerate(recs, 1):
+        toggle = f"   proxy can apply it: prefixwise serve --fix {r['proxy_toggle']}" if r["proxy_toggle"] else ""
+        print(f"{i}. {r['cause']}: {_fmt_int(r['predicted_savings_tokens'])} avoidable tokens "
+              f"({_fmt_pct(r['share_of_prompt_tokens'])} of prompt tokens) over {r['requests']} "
+              f"request{'s' if r['requests'] != 1 else ''}")
+        print(f"   fix: {r['fix']}")
+        if toggle:
+            print(toggle)
+    if fixed_requests:
+        print("\nAlready active: " + ", ".join(f"{k} rewrote {v} requests" for k, v in fixed_requests.items()))
     return 0
 
 
@@ -176,6 +219,9 @@ def build_parser() -> argparse.ArgumentParser:
                                       "(default: $PREFIXWISE_UPSTREAM_URL; none = mock mode). "
                                       "API key: $PREFIXWISE_API_KEY, or the client's own auth header.")
     p.add_argument("--mock", action="store_true", help="synthetic responses, no upstream calls")
+    p.add_argument("--fix", action="append", metavar="NAME",
+                   help="apply a fix to every request before forwarding (repeatable). "
+                        "Available: canonical_tools. Default: $PREFIXWISE_FIXES or none")
     ledger_opt(p)
     p.set_defaults(func=cmd_serve)
 
@@ -186,6 +232,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--json", action="store_true")
     ledger_opt(p)
     p.set_defaults(func=cmd_report)
+
+    p = sub.add_parser("fixes", help="fixes ranked by the tokens they would save, from your ledger")
+    p.add_argument("--json", action="store_true")
+    ledger_opt(p)
+    p.set_defaults(func=cmd_fixes)
 
     p = sub.add_parser("task", help="record a task outcome")
     p.add_argument("task_id")

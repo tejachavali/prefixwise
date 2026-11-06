@@ -57,6 +57,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from .classifier import Classification, MissCause, RequestSnapshot, classify
 from .diagnostics import AgreementScorer, anthropic_diagnostics, openai_comparison_options
 from .fingerprint import Fingerprinter
+from .fixes import apply_fixes, parse_fixes
 from .ledger import Ledger, LedgerEntry, avoidable_for_turn
 
 
@@ -384,8 +385,11 @@ class StreamAccumulator:
 class PrefixwiseProxy:
     def __init__(self, ledger_path: str = ":memory:", hmac_key: bytes | None = None,
                  upstream_url: str | None = None, api_key: str | None = None,
-                 mock: bool | None = None):
+                 mock: bool | None = None, fixes: str | list[str] | tuple[str, ...] | None = None):
         self.ledger = Ledger(ledger_path)
+        # Opt-in request rewrites (see fixes.py). Off unless named here or
+        # in PREFIXWISE_FIXES; turning them off restores pass-through.
+        self.fixes = parse_fixes(fixes if fixes is not None else os.environ.get("PREFIXWISE_FIXES"))
         self.fingerprinter = Fingerprinter(hmac_key=hmac_key)
         self.scorer = AgreementScorer()
         self.upstream_url = (upstream_url or os.environ.get("PREFIXWISE_UPSTREAM_URL") or "").rstrip("/")
@@ -436,6 +440,7 @@ class PrefixwiseProxy:
         # no beta header). OpenAI: prompt_cache_options.comparison_response_id,
         # Responses API only (it does not exist on /v1/chat/completions). A
         # client that sets its own comparison id keeps it.
+        forward_body, fixes_applied = apply_fixes(forward_body, self.fixes)
         with self._lock:
             previous_id = self.last_response_id.get(session_id)
         if provider == "anthropic":
@@ -459,6 +464,7 @@ class PrefixwiseProxy:
             "compaction_event": bool(body.get("prefixwise_compaction_event", False))
             or headers.get("x-prefixwise-compaction-event") in ("1", "true"),
             "stream": bool(body.get("stream")),
+            "fixes_applied": fixes_applied,
             "fork_of": headers.get("x-prefixwise-fork-of"),
             "ttl_seconds": cache_ttl_seconds(provider, body, headers),
         }
@@ -471,7 +477,9 @@ class PrefixwiseProxy:
         native_reason = native_reason_from(payload)
         response_id = payload.get("id")
 
-        fps = self.fingerprinter.fingerprint_blocks(extract_blocks(body, provider))
+        # Fingerprint what the provider actually received: with a fix on,
+        # that is the rewritten request, not the client's original.
+        fps = self.fingerprinter.fingerprint_blocks(extract_blocks(ctx["forward_body"], provider))
         with self._lock:
             return self._finalize_locked(ctx, status, payload, usage, prompt_tokens, cached,
                                          native_reason, response_id, fps)
@@ -540,12 +548,14 @@ class PrefixwiseProxy:
             avoidable_cost=None, legit=result.legit, native_reason=native_reason,
             task_id=ctx["task_id"], request_id=ctx["request_id"],
             completion_tokens=completion_tokens_of(provider, usage),
+            fixes=",".join(ctx.get("fixes_applied") or []) or None,
         )
         self.ledger.record(entry)
         return {"request_id": ctx["request_id"], "status": status, "cause": result.cause.value,
                 "legit": result.legit, "native_reason": native_reason, "usage": usage,
                 "prompt_tokens": prompt_tokens, "cached_tokens": cached,
-                "avoidable_tokens": entry.avoidable_tokens, "response": payload}, entry
+                "avoidable_tokens": entry.avoidable_tokens, "fixes_applied": ctx.get("fixes_applied") or [],
+                "response": payload}, entry
 
     # -- non-streaming ---------------------------------------------------------------
 
@@ -798,6 +808,8 @@ def make_handler(proxy: PrefixwiseProxy):
                 extra.update({"X-Prefixwise-Cause": result["cause"],
                               "X-Prefixwise-Legit": str(result["legit"]).lower(),
                               "X-Prefixwise-Avoidable-Tokens": str(result["avoidable_tokens"])})
+                if result.get("fixes_applied"):
+                    extra["X-Prefixwise-Fixes"] = ",".join(result["fixes_applied"])
             return self._json(result["status"], result["response"], extra)
 
         def _task(self, body: dict):
@@ -838,18 +850,20 @@ def make_handler(proxy: PrefixwiseProxy):
 
 
 def serve(host: str = "127.0.0.1", port: int = 8080, *, ledger_path: str | None = None,
-          upstream_url: str | None = None, mock: bool | None = None, quiet: bool = False):
+          upstream_url: str | None = None, mock: bool | None = None, quiet: bool = False,
+          fixes: str | list[str] | None = None):
     """Run the proxy until interrupted. Settings fall back to PREFIXWISE_* env vars."""
     hmac_key = os.environ.get("PREFIXWISE_HMAC_KEY")
     ledger_path = ledger_path or os.environ.get("PREFIXWISE_LEDGER_PATH", ":memory:")
     proxy = PrefixwiseProxy(ledger_path=ledger_path, upstream_url=upstream_url, mock=mock,
-                            hmac_key=hmac_key.encode() if hmac_key else None)
+                            hmac_key=hmac_key.encode() if hmac_key else None, fixes=fixes)
     server = PrefixwiseHTTPServer((host, port), make_handler(proxy))
     if not quiet:
         target = "MOCK upstream (synthetic usage, no API calls)" if proxy.mock else proxy.upstream_url
         print(f"Prefixwise proxy on http://{host}:{server.server_address[1]}")
         print(f"  upstream: {target}")
         print(f"  ledger:   {ledger_path}")
+        print(f"  fixes:    {', '.join(proxy.fixes) or 'none (pass-through)'}")
         print("  POST /v1/chat/completions  POST /v1/responses  POST /v1/messages  POST /tasks")
         print("  GET  /ledger  GET /requests/<id>  GET /health", flush=True)
     try:
