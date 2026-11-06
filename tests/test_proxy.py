@@ -360,3 +360,101 @@ def test_session_state_is_bounded():
     for k in "abcd":
         m[k] = 1
     assert list(m) == ["b", "c", "d"]
+
+
+def responses_payload(rid, input_tokens, cached, diag=None):
+    p = {"id": rid, "object": "response", "status": "completed", "output": [],
+         "usage": {"input_tokens": input_tokens, "input_tokens_details": {"cached_tokens": cached},
+                   "output_tokens": 3}}
+    if diag:
+        p["prompt_cache_diagnostics"] = diag
+    return p
+
+
+class ScriptedUpstream(FakeUpstream):
+    """Replies with the next payload from a list, one per request."""
+
+    def __init__(self, payloads):
+        super().__init__(payload=None)
+        self.queue = list(payloads)
+        orig = self.server.RequestHandlerClass.do_POST
+        outer = self
+
+        def do_post(handler):
+            outer.payload = outer.queue.pop(0)
+            return orig(handler)
+        self.server.RequestHandlerClass.do_POST = do_post
+
+
+def test_responses_forwarding_chaining_and_usage():
+    up = ScriptedUpstream([responses_payload("resp_1", 2000, 0),
+                           responses_payload("resp_2", 2100, 1900,
+                                             {"type": "cache_hit", "reason": None})])
+    proxy, server, port = run_proxy(upstream_url=up.url, api_key="sk")
+    try:
+        body = {"model": "gpt-5.6", "instructions": "You are helpful.", "input": "hi",
+                "session_id": "r1"}
+        _, resp, h1 = post(port, "/v1/responses", body)
+        assert resp["id"] == "resp_1" and h1["X-Prefixwise-Cause"] == "first_write"
+        assert up.requests[0]["path"] == "/v1/responses"
+        assert "session_id" not in up.requests[0]["body"]
+        assert "prompt_cache_options" not in up.requests[0]["body"]  # nothing to compare yet
+        body2 = {**body, "input": [{"role": "user", "content": "hi"},
+                                   {"role": "assistant", "content": "hello"},
+                                   {"role": "user", "content": "next"}]}
+        _, _, h2 = post(port, "/v1/responses", body2)
+        assert up.requests[1]["body"]["prompt_cache_options"] == {"comparison_response_id": "resp_1"}
+        assert h2["X-Prefixwise-Cause"] == "none"
+        row = proxy.ledger.get_request(h2["X-Prefixwise-Request-Id"])
+        assert (row["prompt_tokens"], row["cached_tokens"], row["completion_tokens"]) == (2100, 1900, 3)
+    finally:
+        server.shutdown()
+        up.server.shutdown()
+
+
+def test_responses_previous_response_id_is_stitched_not_history_edit():
+    up = ScriptedUpstream([responses_payload("resp_a", 2000, 0),
+                           responses_payload("resp_b", 2050, 1950),
+                           responses_payload("resp_c", 2100, 0),
+                           responses_payload("resp_d", 2100, 0, {"type": "cache_miss",
+                                                                 "reason": "input_changed"})])
+    proxy, server, port = run_proxy(upstream_url=up.url)
+    try:
+        base = {"model": "gpt-5.6", "instructions": "You are helpful.", "session_id": "r2"}
+        post(port, "/v1/responses", {**base, "input": "first question"})
+        # Server-held history: only the new item is sent.
+        _, _, h = post(port, "/v1/responses", {**base, "previous_response_id": "resp_a",
+                                                "input": "follow-up"})
+        assert h["X-Prefixwise-Cause"] == "none"
+        # Instructions are not carried over by previous_response_id; changing them is an edit.
+        _, _, h = post(port, "/v1/responses", {**base, "instructions": "You are terse.",
+                                                "previous_response_id": "resp_b", "input": "more"})
+        assert h["X-Prefixwise-Cause"] == "system_edit"
+        # A parent this proxy never saw: say so, do not guess HISTORY_EDIT.
+        _, _, h = post(port, "/v1/responses", {**base, "previous_response_id": "resp_elsewhere",
+                                                "input": "x"})
+        assert h["X-Prefixwise-Cause"] == "unknown"
+        row = proxy.ledger.get_request(h["X-Prefixwise-Request-Id"])
+        assert row["native_reason"] == "input_changed"
+    finally:
+        server.shutdown()
+        up.server.shutdown()
+
+
+def test_responses_stream_usage_from_completed_event():
+    done = responses_payload("resp_s", 2000, 1500)
+    events = sse(("response.created", {"type": "response.created",
+                                       "response": {**done, "status": "in_progress", "usage": None}}),
+                 ("response.output_text.delta", {"type": "response.output_text.delta", "delta": "hi"}),
+                 ("response.completed", {"type": "response.completed", "response": done}))
+    up = FakeUpstream(stream_lines=events)
+    proxy, server, port = run_proxy(upstream_url=up.url)
+    try:
+        _, raw, h = stream(port, "/v1/responses", {"model": "gpt-5.6", "input": "hi", "stream": True})
+        assert "stream_options" not in up.requests[0]["body"]  # Responses streams always carry usage
+        assert raw.count(b"event: ") == 3
+        row = proxy.ledger.get_request(h["X-Prefixwise-Request-Id"])
+        assert (row["prompt_tokens"], row["cached_tokens"], row["completion_tokens"]) == (2000, 1500, 3)
+    finally:
+        server.shutdown()
+        up.server.shutdown()

@@ -143,3 +143,17 @@
   TOOL_RESERIALIZE, JSONL session growth -> NONE.
 - Failures/fixes: serve banner was buffered (shown only at exit);
   now flushed.
+
+## 2026-11-06 PST -- commit 1165e5bd0e4e54fd5c545f6b0fbd8c0b33de7c00
+- What changed: OpenAI Responses API (/v1/responses), streaming
+  included; comparison_response_id chaining; previous_response_id turns
+  stitched onto the stored prior snapshot (unseen parent -> UNKNOWN);
+  Responses usage normalised.
+- Tests: PYTHONPATH=src python3 -m pytest tests/ -q -- 63 passed.
+- Smoke test: openai SDK against `prefixwise serve --mock`:
+  responses.create -> first_write; create with previous_response_id ->
+  none; responses.stream with previous_response_id -> text and final
+  usage OK; ledger none x2, first_write x1.
+- Failures/fixes: mock Responses stream lacked output_item.added /
+  content_part.added / *.done events, which the SDK requires; mock now
+  emits the full sequence (relay path was unaffected).
