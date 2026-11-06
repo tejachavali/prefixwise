@@ -44,6 +44,26 @@ def avoidable_tokens(prompt_tokens: int, cached_tokens: int, *,
     return max(0, prompt_tokens - cached_tokens - first_write_tokens - legitimate_change_tokens)
 
 
+def avoidable_for_turn(legit: bool | None, prompt_tokens: int, cached_tokens: int,
+                       prev_prompt_tokens: int | None) -> int:
+    """Avoidable tokens for one classified turn.
+
+    Only waste counts (legit is False). Legitimate changes (model
+    switch, catalog change, compaction, first write) still cost tokens
+    but are not waste; undetermined legitimacy (None: NONE, routing,
+    unknown, ...) is not counted either, never a guess.
+
+    For waste, avoidable is the prior prefix that could have been
+    reused but was not: min(prev, curr) prompt tokens minus cache_read.
+    Tokens appended after the prior prefix are new content, never
+    avoidable.
+    """
+    if legit is not False:
+        return 0
+    reusable = min(prev_prompt_tokens, prompt_tokens) if prev_prompt_tokens else prompt_tokens
+    return max(0, reusable - cached_tokens)
+
+
 def reuse_adjusted_reads(write_multiplier: float, read_multiplier: float) -> float:
     """Model (not a verified fact): reads needed for a fix to pay.
 

@@ -55,3 +55,20 @@
     turns 5-7 only.
 - Not yet run: live E1-open on a real GPU (needs Teja to run it on
   Colab or a GPU box; see experiments/e1_open/README.md).
+
+## 2026-11-06 PST -- commit 68e856bfb74b68f344552bd6fa1a34d92d898c03
+- What changed: classifier treats append-only message growth as
+  unchanged (previous turn must be an unchanged prefix); NONE compares
+  cache_read to the reusable prior prefix. avoidable_for_turn: only
+  legit=False turns count, as min(prev, curr) prompt - cache_read.
+  E1-open Session C (x2, append-only growth), 120 turns total.
+- Tests: PYTHONPATH=src python3 -m pytest tests/ -q -- 35 passed in 0.88s.
+  New tests fail on the old classifier (4 failed).
+- Proxy smoke test: normal append turn -> none, 0 avoidable (was
+  history_edit, 1000 avoidable). e1_open.py --mock: 120 turns,
+  agreement 100.0%, UNKNOWN 0.0%, Pass YES. Old classifier on the new
+  harness: 85.0% (fail). Mock only; not evidence about vLLM.
+- Still open: proxy returns its summary instead of the upstream
+  response and forwards extra fields upstream; Anthropic usage fields
+  and breakpoint detection; tokens_per_successful_task is per request,
+  not per task; tool results not split from messages.

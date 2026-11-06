@@ -40,7 +40,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from .classifier import RequestSnapshot, classify
 from .diagnostics import AgreementScorer, anthropic_diagnostics, openai_comparison_options
 from .fingerprint import Fingerprinter
-from .ledger import Ledger, LedgerEntry, avoidable_tokens
+from .ledger import Ledger, LedgerEntry, avoidable_for_turn
 
 
 def extract_blocks(body: dict, provider: str) -> list[tuple[str, object]]:
@@ -131,13 +131,12 @@ class PrefixwiseProxy:
         if response_id:
             self.last_response_id[session_id] = response_id
 
-        # A first write is not waste: it is the baseline the prefix is built on.
-        first_write = prompt_tokens if result.cause.value == "first_write" else 0
         entry = LedgerEntry(
             session_id=session_id, agent_id=str(body.get("agent_id", "proxy")),
             provider=provider, model=model, cause=result.cause.value,
             prompt_tokens=prompt_tokens, cached_tokens=cached,
-            avoidable_tokens=avoidable_tokens(prompt_tokens, cached, first_write_tokens=first_write),
+            avoidable_tokens=avoidable_for_turn(result.legit, prompt_tokens, cached,
+                                                prev.prompt_tokens if prev else None),
             avoidable_cost=None, legit=result.legit, native_reason=native_reason,
         )
         self.ledger.record(entry)
