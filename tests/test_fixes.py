@@ -61,3 +61,23 @@ def test_fixes_command_ranks_by_predicted_savings(tmp_path, capsys):
     assert recs[0]["predicted_savings_tokens"] > 0
     main(["fixes", "--ledger", path])
     assert "prefixwise serve --fix canonical_tools" in capsys.readouterr().out
+
+
+def test_canonical_tools_is_proven_with_evidence(tmp_path, capsys):
+    """E4 live 2026-11-06 passed; the status must cite the committed run."""
+    from pathlib import Path
+
+    from prefixwise.fixes import FIX_STATUS
+
+    status = FIX_STATUS["canonical_tools"]
+    assert status["status"] == "proven"
+    run = status["evidence"].split()[-1]
+    assert (Path(__file__).resolve().parents[1] / run).exists()
+    path = str(tmp_path / "l.db")
+    proxy = PrefixwiseProxy(ledger_path=path, mock=True)
+    msgs = [{"role": "user", "content": "q"}]
+    proxy.handle("openai", {"model": "m", "session_id": "s", "tools": [A, B], "messages": msgs})
+    proxy.handle("openai", {"model": "m", "session_id": "s", "tools": [B, A], "messages": msgs})
+    main(["fixes", "--ledger", path, "--json"])
+    rec = json.loads(capsys.readouterr().out)["recommendations"][0]
+    assert rec["status"] == "proven" and "experiments/e4/runs/" in rec["evidence"]

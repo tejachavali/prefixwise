@@ -28,6 +28,16 @@ import json
 
 AVAILABLE_FIXES = ("canonical_tools",)
 
+# Evidence per fix. Change only with a committed E4 run behind it.
+FIX_STATUS = {
+    "canonical_tools": {
+        "status": "proven",
+        "evidence": "E4 live 2026-11-06: 99.9% of predicted savings realised on Anthropic (Haiku 5.5), "
+                    "97.5% on vLLM (Qwen3-4B); task success flat (0/60 and 1/60 turns changed). "
+                    "experiments/e4/runs/2026-11-06-live.md",
+    },
+}
+
 
 def _tool_name(tool: object) -> str | None:
     if not isinstance(tool, dict):

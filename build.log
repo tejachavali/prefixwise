@@ -344,3 +344,12 @@
   published beyond localhost. All re-run after the fix: 400/400/400,
   400 and 413 in 0.00s, 0600, 401/401/200, refusal message.
 - Tests: 116 passed (12 new in tests/test_security.py).
+
+## 2026-11-06 PST -- commit 11e8455ccddc2e21ac8d360421b5d3af24626a9b (E4 live results)
+- E4 live (Muse, Colab, main d78a285): vLLM Qwen3-4B Pass, 97.5% of
+  predicted savings realised (13,872 / 14,229), success 76.7% -> 75.0%
+  (1 turn); Anthropic Haiku 5.5 Pass, 99.9% (104,616 / 104,732),
+  success 100% -> 100%. Anthropic console not yet posted for the run.
+- What changed: canonical_tools marked proven (FIX_STATUS, shown by
+  `prefixwise fixes`); run record; README/CHANGELOG/WORKLOG.
+- Tests: 117 passed.
