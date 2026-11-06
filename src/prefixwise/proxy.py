@@ -60,6 +60,7 @@ from .classifier import Classification, MissCause, RequestSnapshot, classify
 from .diagnostics import AgreementScorer, anthropic_diagnostics, openai_comparison_options
 from .fingerprint import Fingerprinter
 from .fixes import apply_fixes, parse_fixes
+from .pricing import PriceTable
 from .ledger import Ledger, LedgerEntry, avoidable_for_turn
 
 
@@ -387,13 +388,16 @@ class StreamAccumulator:
 class PrefixwiseProxy:
     def __init__(self, ledger_path: str = ":memory:", hmac_key: bytes | None = None,
                  upstream_url: str | None = None, api_key: str | None = None,
-                 mock: bool | None = None, fixes: str | list[str] | tuple[str, ...] | None = None):
+                 mock: bool | None = None, fixes: str | list[str] | tuple[str, ...] | None = None,
+                 prices: str | None = None):
         self.ledger = Ledger(ledger_path)
         # Opt-in request rewrites (see fixes.py). Off unless named here or
         # in PREFIXWISE_FIXES; turning them off restores pass-through.
         self.fixes = parse_fixes(fixes if fixes is not None else os.environ.get("PREFIXWISE_FIXES"))
         # Set by serve() from --auth-token / PREFIXWISE_AUTH_TOKEN; None = open.
         self.auth_token: str | None = None
+        # Dated price table: built-in verified rates + PREFIXWISE_PRICES / prices file.
+        self.prices = PriceTable.load(prices)
         self.fingerprinter = Fingerprinter(hmac_key=hmac_key)
         self.scorer = AgreementScorer()
         self.upstream_url = (upstream_url or os.environ.get("PREFIXWISE_UPSTREAM_URL") or "").rstrip("/")
@@ -553,15 +557,21 @@ class PrefixwiseProxy:
             avoidable_tokens=avoidable_for_turn(result.legit, prompt_tokens, cached,
                                                 prev.prompt_tokens if prev else None),
             avoidable_cost=None, legit=result.legit, native_reason=native_reason,
+            cost=self.prices.request_cost(str(payload.get("model") or ctx["model"]), provider, usage),
             task_id=ctx["task_id"], request_id=ctx["request_id"],
             completion_tokens=completion_tokens_of(provider, usage),
             fixes=",".join(ctx.get("fixes_applied") or []) or None,
         )
+        priced_model = str(payload.get("model") or ctx["model"])
+        entry.avoidable_cost = self.prices.avoidable_cost(priced_model, entry.avoidable_tokens, prompt_tokens)
+        if entry.cost is not None:
+            entry.price_as_of = self.prices.as_of
         self.ledger.record(entry)
         return {"request_id": ctx["request_id"], "status": status, "cause": result.cause.value,
                 "legit": result.legit, "native_reason": native_reason, "usage": usage,
                 "prompt_tokens": prompt_tokens, "cached_tokens": cached,
                 "avoidable_tokens": entry.avoidable_tokens, "fixes_applied": ctx.get("fixes_applied") or [],
+                "cost": entry.cost, "avoidable_cost": entry.avoidable_cost,
                 "response": payload}, entry
 
     # -- non-streaming ---------------------------------------------------------------
@@ -929,12 +939,13 @@ def make_handler(proxy: PrefixwiseProxy):
 def serve(host: str = "127.0.0.1", port: int = 8080, *, ledger_path: str | None = None,
           upstream_url: str | None = None, mock: bool | None = None, quiet: bool = False,
           fixes: str | list[str] | None = None, auth_token: str | None = None,
-          allow_unauthenticated: bool = False):
+          allow_unauthenticated: bool = False, prices: str | None = None):
     """Run the proxy until interrupted. Settings fall back to PREFIXWISE_* env vars."""
     hmac_key = os.environ.get("PREFIXWISE_HMAC_KEY")
     ledger_path = ledger_path or os.environ.get("PREFIXWISE_LEDGER_PATH", ":memory:")
     proxy = PrefixwiseProxy(ledger_path=ledger_path, upstream_url=upstream_url, mock=mock,
-                            hmac_key=hmac_key.encode() if hmac_key else None, fixes=fixes)
+                            hmac_key=hmac_key.encode() if hmac_key else None, fixes=fixes,
+                            prices=prices)
     proxy.auth_token = auth_token or os.environ.get("PREFIXWISE_AUTH_TOKEN") or None
     exposed = not _is_loopback(host)
     if exposed and not proxy.auth_token and proxy.api_key and not proxy.mock and not allow_unauthenticated:
@@ -950,6 +961,8 @@ def serve(host: str = "127.0.0.1", port: int = 8080, *, ledger_path: str | None 
         print(f"  upstream: {target}")
         print(f"  ledger:   {ledger_path}")
         print(f"  fixes:    {', '.join(proxy.fixes) or 'none (pass-through)'}")
+        print(f"  prices:   {len(proxy.prices.models)} models, table of {proxy.prices.as_of}"
+              f" ({' + '.join(proxy.prices.sources)})")
         print(f"  auth:     {'X-Prefixwise-Token required' if proxy.auth_token else 'none'}"
               + ("  (WARNING: listening beyond localhost without a token)" if exposed and not proxy.auth_token else ""))
         if not os.environ.get("PREFIXWISE_HMAC_KEY"):

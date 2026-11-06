@@ -6,6 +6,7 @@
     prefixwise request    show one request's verdict by request id
     prefixwise explain    offline: why does the cache miss between requests?
     prefixwise fixes      which fixes would save the most, from your own ledger
+    prefixwise prices     the dated price table used for dollar costs
 """
 
 from __future__ import annotations
@@ -38,6 +39,12 @@ def _fmt_int(n) -> str:
     return "-" if n is None else f"{int(n):,}"
 
 
+def _fmt_usd(x) -> str:
+    if x is None:
+        return "-"
+    return f"${x:,.2f}" if abs(x) >= 1 else f"${x:,.4f}"
+
+
 def _fmt_pct(x) -> str:
     return "-" if x is None else f"{x:.1%}"
 
@@ -59,7 +66,8 @@ def cmd_serve(args) -> int:
     try:
         serve(host=args.host, port=args.port, ledger_path=ledger,
               upstream_url=args.upstream, mock=True if args.mock else None,
-              fixes=args.fix or None, allow_unauthenticated=args.allow_unauthenticated)
+              fixes=args.fix or None, allow_unauthenticated=args.allow_unauthenticated,
+              prices=args.prices)
     except ValueError as exc:  # unknown --fix name
         sys.exit(f"prefixwise: {exc}")
     return 0
@@ -80,6 +88,8 @@ def cmd_fixes(args) -> int:
         if not r or not r["avoidable_tokens"]:
             continue
         recs.append({"cause": cause, "requests": r["requests"], "predicted_savings_tokens": r["avoidable_tokens"],
+                     "predicted_savings_usd": r["avoidable_cost"],
+                     "unpriced_requests": r["requests"] - r["priced_requests"],
                      "share_of_prompt_tokens": (r["avoidable_tokens"] / summary["prompt_tokens"])
                      if summary["prompt_tokens"] else None,
                      "fix": advice["fix"], "proxy_toggle": advice["toggle"],
@@ -97,6 +107,9 @@ def cmd_fixes(args) -> int:
         print(f"{i}. {r['cause']}: {_fmt_int(r['predicted_savings_tokens'])} avoidable tokens "
               f"({_fmt_pct(r['share_of_prompt_tokens'])} of prompt tokens) over {r['requests']} "
               f"request{'s' if r['requests'] != 1 else ''}")
+        if r["predicted_savings_usd"] is not None:
+            unpriced = f" ({r['unpriced_requests']} requests unpriced)" if r["unpriced_requests"] else ""
+            print(f"   worth: {_fmt_usd(r['predicted_savings_usd'])}{unpriced}")
         print(f"   fix: {r['fix']}")
         if toggle:
             print(toggle)
@@ -124,17 +137,53 @@ def cmd_report(args) -> int:
     tpst = summary["tokens_per_successful_task"]
     print(f"Tasks               {t['successful']} succeeded / {t['resolved']} resolved")
     print(f"Tokens per successful task  {_fmt_int(tpst) if tpst is not None else '- (no task outcomes recorded)'}")
+    priced, n = summary["priced_requests"], summary["requests"]
+    if priced:
+        coverage = "" if priced == n else f"   ({priced:,} of {n:,} requests priced; see `prefixwise prices`)"
+        print(f"Cost                {_fmt_usd(summary['cost'])}{coverage}")
+        print(f"Avoidable cost      {_fmt_usd(summary['avoidable_cost'])}")
+        cpst = summary["cost_per_successful_task"]
+        print(f"Cost per successful task  {_fmt_usd(cpst) if cpst is not None else '- (needs task outcomes, all requests priced)'}")
+    elif n:
+        print("Cost                - (no request's model is in the price table; see `prefixwise prices`)")
     if not rows:
         return 0
     print()
     print(_table([[r[args.by] if r[args.by] is not None else "(none)", _fmt_int(r["requests"]),
                    _fmt_int(r["prompt_tokens"]), _fmt_pct(r["cached_tokens"] / r["prompt_tokens"])
                    if r["prompt_tokens"] else "-", _fmt_int(r["avoidable_tokens"]),
-                   _fmt_int(r["waste_requests"]), _fmt_int(r["tokens_per_successful_task"])]
+                   _fmt_int(r["waste_requests"]), _fmt_int(r["tokens_per_successful_task"]),
+                   _fmt_usd(r["cost"]) if r["priced_requests"] else "-",
+                   _fmt_usd(r["avoidable_cost"]) if r["priced_requests"] else "-"]
                   for r in rows],
                  [args.by, "requests", "prompt", "cached", "avoidable", "waste reqs",
-                  "tokens/success"]))
+                  "tokens/success", "cost", "avoidable $"]))
     return 0
+
+
+def cmd_prices(args) -> int:
+    from .pricing import PriceTable
+
+    try:
+        table = PriceTable.load(args.prices)
+    except (OSError, ValueError) as exc:
+        sys.exit(f"prefixwise: {exc}")
+    if args.json:
+        print(json.dumps({"as_of": table.as_of, "sources": table.sources, "models": table.models}, indent=2))
+        return 0
+    print(f"Price table as of {table.as_of} (USD per 1M tokens), from: {' + '.join(table.sources)}")
+    rows = [[name, r.get("provider", "-"), _rate(r.get("input")), _rate(r.get("cache_read")),
+             _rate(r.get("cache_write_5m", r.get("cache_write"))), _rate(r.get("cache_write_1h")),
+             _rate(r.get("output")), "yes" if r.get("long_prompt") else ""]
+            for name, r in sorted(table.models.items())]
+    print(_table(rows, ["model", "provider", "input", "cache read", "write 5m", "write 1h", "output", "tiered"]))
+    print("\nModels not listed are unpriced: their cost shows as '-', never estimated. Add rates with\n"
+          "PREFIXWISE_PRICES=/path/prices.json (same format as the built-in table; see `--json`).")
+    return 0
+
+
+def _rate(v) -> str:
+    return "-" if v is None else (v if isinstance(v, str) else f"{v:g}")
 
 
 def cmd_task(args) -> int:
@@ -223,6 +272,9 @@ def build_parser() -> argparse.ArgumentParser:
                                       "(default: $PREFIXWISE_UPSTREAM_URL; none = mock mode). "
                                       "API key: $PREFIXWISE_API_KEY, or the client's own auth header.")
     p.add_argument("--mock", action="store_true", help="synthetic responses, no upstream calls")
+    p.add_argument("--prices", metavar="FILE",
+                   help="extra or overriding rates (JSON, same format as `prefixwise prices --json`); "
+                        "default: $PREFIXWISE_PRICES")
     p.add_argument("--allow-unauthenticated", action="store_true",
                    help="listen beyond localhost with PREFIXWISE_API_KEY set but no PREFIXWISE_AUTH_TOKEN "
                         "(anyone who reaches the port can spend the key)")
@@ -239,6 +291,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--json", action="store_true")
     ledger_opt(p)
     p.set_defaults(func=cmd_report)
+
+    p = sub.add_parser("prices", help="the dated price table used for dollar costs")
+    p.add_argument("--prices", metavar="FILE", help="also load this rates file (default: $PREFIXWISE_PRICES)")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=cmd_prices)
 
     p = sub.add_parser("fixes", help="fixes ranked by the tokens they would save, from your ledger")
     p.add_argument("--json", action="store_true")

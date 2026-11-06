@@ -71,6 +71,12 @@ The ledger holds no prompt text, so these are safe to share. Don't share `dogfoo
 - **A wasteful cause that dominates:** check its advice, and consider a proxy toggle for it (the next E4 candidate).
 - **All clean:** the report becomes the README's real example, and then launch.
 
+### C. Optional, any time: OpenAI's official prices (about 5 minutes, browser)
+Claude's environment can't reach OpenAI's pricing pages, so OpenAI models are unpriced.
+- Open https://developers.openai.com/api/docs/pricing (or https://openai.com/api/pricing).
+- Report, exactly as the page shows them, with the URL and any "last updated" date: input, cached input, output, and any cache-write price for `gpt-5.6`, `gpt-5.6-luna`, `gpt-5.6-sol` and `gpt-5.6-terra` (the IDs Muse confirmed on 2026-11-06).
+- Don't use aggregator sites. Claude adds them to the built-in table only if they come from OpenAI's own page.
+
 **Not blocking:** the next fix to prove after dogfooding is probably moving volatile values out of the system prompt. That needs an app change rather than a proxy toggle, so its E4 compares two versions of a recorded session.
 
 ## In parallel (Claude): launch gates
@@ -92,6 +98,36 @@ Then a soft launch to a few people who run agents (Omni's founder is a candidate
   - the proxy refuses to start exposed with a key and no token
   - the docs publish Docker on `127.0.0.1`
 - Checked and fine: no client-controlled upstream URL (no SSRF), SQL inputs whitelisted, no request logging, Docker runs non-root.
+
+## Roadmap (agreed with Teja, 2026-11-06)
+
+**Done:**
+- E1-open: vLLM, 100%.
+- E1-hosted: Anthropic, 37/37 against its own diagnosis.
+- E4: `canonical_tools` proven.
+- Proxy, CLI, streaming, Responses API, security hardening, CI, Docker; v0.3.0 ready.
+
+**Now: launch.**
+1. Dogfooding (Muse, "Now" B).
+2. PyPI release: Teja's setup, then Claude tags `v0.3.0`.
+3. A real README example from the dogfood report.
+4. Soft launch to a few people who run agents, then wider.
+
+**Next: product, in this order.**
+1. **Dollar costs** *(done, PR #17; OpenAI rates waiting on Muse task C)*: a dated price table per model, verified from the providers' own pricing pages, so `avoidable_cost` and request cost are filled in. Unknown rates stay null, never guessed. Users can supply their own rates file.
+2. **Framework integrations:** LangGraph, the OpenAI Agents SDK and the Claude Agent SDK set the session, task and compaction headers automatically.
+3. **Finer-grained diagnosis:** locate where *inside* a block a change happened. This fixes the "edit at the end of a long prompt" limit.
+4. **A second proven fix:** `volatile_system`, timestamps out of the system prompt. It's an app change, so its E4 compares two versions of a recorded session.
+5. **Gemini support.** It has no native miss diagnostics, so Prefixwise adds the most there.
+
+**Later, when users ask:**
+- E5 compaction (snapshot before compaction, price the rewrite once, compact at task boundaries).
+- E2/E3 engine join (vLLM and LMCache cache events by request ID; enables `evicted`).
+- Shared state across multiple proxy instances.
+- An SGLang adapter.
+- A hosted team roll-up.
+
+**Waiting on others:** OpenAI native diagnostics (`unavailable`).
 
 ## Open questions
 
@@ -122,3 +158,5 @@ Then a soft launch to a few people who run agents (Omni's founder is a candidate
 - **2026-11-06:** Teja dropped the legal-clearance gate from the launch plan (Teja's call).
 - **2026-11-06:** Muse ran E4 live. Pass on vLLM (97.5% of predicted realised, 1/60 task flip) and Anthropic (99.9%, 0/60). `canonical_tools` marked proven (PR #15). Next: Teja dogfoods on a real agent.
 - **2026-11-06:** Teja asked Muse to do the PyPI setup and dogfooding on Teja's behalf. Claude pushes the v0.3.0 tag once Muse confirms the setup.
+- **2026-11-06:** Roadmap written down (section above). Claude started dollar costs while Muse dogfoods.
+- **2026-11-06:** Claude: dollar costs (PR #17). Anthropic rates are verified from platform.claude.com, the official page (fetched by a Claude helper). OpenAI's pricing pages are unreachable from Claude's environment, so that's Muse task C.
