@@ -57,3 +57,41 @@ def test_probe_verdict_rules():
     # Without any real miss the probe proves nothing.
     ok, notes = probe_verdict([hit])
     assert not ok and "not exercised" in notes[-1]
+
+
+def test_error_ends_the_session_so_labels_cannot_drift():
+    import e1_hosted
+
+    calls = {"n": 0}
+    orig = e1_hosted.mock_forward_factory
+
+    def failing_factory(provider, state):
+        fwd = orig(provider, state)
+
+        def forward(*a, **kw):
+            calls["n"] += 1
+            if state["injected"] == "model_switch":
+                return 400, {"error": {"message": "tool_choice not supported"}}
+            return fwd(*a, **kw)
+        return forward
+
+    e1_hosted.mock_forward_factory = failing_factory
+    try:
+        rows, rep = e1_hosted.run_provider("anthropic", model="m", alt_model="alt", repeats=1, mock=True,
+                                           max_input_tokens=None)
+    finally:
+        e1_hosted.mock_forward_factory = orig
+    session_b = [r for r in rows if r["session"] == 1]
+    assert [r["turn"] for r in session_b][-1] == 7 and "error" in session_b[-1]  # nothing after the error
+    assert all(r["agree_injected"] for r in rows if "error" not in r)
+
+
+def test_anthropic_param_change_uses_a_tool_choice_every_model_accepts():
+    from datetime import date
+
+    from e1_hosted import SessionState
+
+    s = SessionState("anthropic", "m", "x", date(2026, 11, 6))
+    s.apply("param_rendered", 3, None, "m")
+    s.next_user_turn()
+    assert s.body()["tool_choice"] == {"type": "none"}

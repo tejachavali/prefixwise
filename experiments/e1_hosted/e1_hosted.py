@@ -172,7 +172,9 @@ class SessionState:
             body = {"model": self.model, "max_tokens": 16,
                     "system": [{"type": "text", "text": self.system_text(), "cache_control": cc}],
                     "tools": self.tools, "messages": msgs}
-            body["tool_choice"] = {"type": "any"} if self.tool_choice_any else {"type": "auto"}
+            # auto -> none: every Claude model accepts both. ("any" broke the
+            # model switch: Sonnet 5.5 rejects it with a 400, live 2026-11-06.)
+            body["tool_choice"] = {"type": "none"} if self.tool_choice_any else {"type": "auto"}
             return body
         body = {"model": self.model, "instructions": self.system_text(), "tools": self.tools,
                 "input": copy.deepcopy(self.history), "max_output_tokens": 16,
@@ -246,7 +248,8 @@ def make_proxy(provider: str, mock: bool) -> PrefixwiseProxy:
 
 
 def run_provider(provider: str, *, model: str, alt_model: str | None, repeats: int, mock: bool,
-                 max_input_tokens: int | None, probe: bool = False) -> tuple[list[dict], dict]:
+                 max_input_tokens: int | None, probe: bool = False,
+                 turn_delay: float = 0.0) -> tuple[list[dict], dict]:
     proxy = make_proxy(provider, mock)
     state = {"injected": "first_write", "tokens": 0}
     if mock:
@@ -260,6 +263,10 @@ def run_provider(provider: str, *, model: str, alt_model: str | None, repeats: i
     for idx, script in scripts:
         sess = SessionState(provider, model, f"{provider}-{stamp}-s{idx}", base_date)
         for turn, injected in enumerate(script, start=1):
+            if turn > 1 and turn_delay and not mock:
+                # OpenAI returns "unavailable" while the baseline's diagnostic
+                # record is not ready; give it time before chaining to it.
+                time.sleep(turn_delay)
             extra = sess.apply(injected, turn, alt_model, model)
             sess.next_user_turn()
             body = sess.body()
@@ -278,7 +285,10 @@ def run_provider(provider: str, *, model: str, alt_model: str | None, repeats: i
                                 "error": payload, "status": result["status"]})
                 if result["status"] in (401, 403, 404):
                     return results, score(results, scorer)  # key, access or model problem: stop spending
-                continue
+                # The provider never saw this turn's change, so every later
+                # label in this session would be wrong: end the session here.
+                print(f"   ending session {idx} after the error; its remaining turns are not run")
+                break
             prompt, cached = normalize_usage(provider, payload.get("usage") or {})
             spent += prompt
             native = native_reason_from(payload)
@@ -298,6 +308,9 @@ def run_provider(provider: str, *, model: str, alt_model: str | None, repeats: i
                    "raw_diagnostics": {k: payload.get(k) for k in ("diagnostics", "prompt_cache_diagnostics")
                                        if payload.get(k) is not None},
                    "response_keys": sorted(payload.keys()),
+                   "status_field": payload.get("status"),
+                   "error_field": payload.get("error"),
+                   "incomplete_details": payload.get("incomplete_details"),
                    # Anything cache- or diagnostics-shaped, wherever it is: if a
                    # provider moves its reason, the probe shows where.
                    "cache_fields": _cache_fields(payload)}
@@ -305,7 +318,8 @@ def run_provider(provider: str, *, model: str, alt_model: str | None, repeats: i
             if probe:
                 print(json.dumps({k: row[k] for k in ("turn", "injected", "predicted", "native_type",
                                                       "native_reason", "real_miss", "prompt_tokens",
-                                                      "cached_tokens", "raw_usage", "raw_diagnostics",
+                                                      "cached_tokens", "raw_usage", "status_field",
+                                                      "error_field", "incomplete_details", "raw_diagnostics",
                                                       "cache_fields",
                                                       "response_keys")}, indent=2))
     return results, score(results, scorer)
@@ -334,7 +348,10 @@ def probe_verdict(rows: list[dict]) -> tuple[bool, list[str]]:
             if r["native_reason"]:
                 notes.append(f"{label}: unexpected miss reason {r['native_reason']!r} on a non-miss turn")
             continue
-        if not r["real_miss"]:
+        if not r["prompt_tokens"]:
+            notes.append(f"{label}: provider returned no usage (status {r.get('status_field')!r},"
+                         f" error {r.get('error_field')!r}); not scored")
+        elif not r["real_miss"]:
             notes.append(f"{label}: injected a change but the provider still served the prefix; not a miss")
         elif r["native_reason"] is None:
             ok = False
@@ -442,6 +459,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--openai-cache-options", default=None,
                     help='extra prompt_cache_options as JSON, e.g. \'{"mode": "explicit"}\'; '
                          "the proxy still chains comparison_response_id")
+    ap.add_argument("--turn-delay", type=float, default=0.0,
+                    help="seconds to wait between turns (OpenAI diagnostics need a ready baseline)")
     ap.add_argument("--output-dir", default=str(Path(__file__).resolve().parent / "results"))
     args = ap.parse_args(argv)
     providers = [p.strip() for p in args.providers.split(",") if p.strip()]
@@ -457,7 +476,8 @@ def main(argv: list[str] | None = None) -> int:
         model, alt = models[p]
         print(f"== {p} ({mode}): model {model}" + (f", alt {alt}" if alt else ", no MODEL_SWITCH"))
         rows, rep = run_provider(p, model=model, alt_model=alt, repeats=args.repeats, mock=args.mock,
-                                 max_input_tokens=args.max_input_tokens, probe=args.probe)
+                                 max_input_tokens=args.max_input_tokens, probe=args.probe,
+                                 turn_delay=args.turn_delay)
         all_results[p] = (rows, rep)
         fmt = lambda x: "-" if x is None else f"{x:.1%}"  # noqa: E731
         print(f"   turns {rep['turns']} errors {rep['errors']} | native agreement {fmt(rep['agreement_native'])}"
