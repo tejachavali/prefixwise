@@ -94,6 +94,8 @@ The client gets the upstream response and status unchanged, so the proxy is a dr
 
 The OpenAI Responses API (`POST /v1/responses`) is supported, streaming included. The proxy chains `prompt_cache_options.comparison_response_id` to the session's previous response, so OpenAI's own miss reason is recorded beside Prefixwise's. Turns sent with `previous_response_id` (only the new input items) are stitched onto the stored prior turn, so server-held history is compared correctly; a `previous_response_id` the proxy never saw is reported as UNKNOWN rather than guessed.
 
+Optional request headers that sharpen the verdict: `X-Prefixwise-Fork-Of: <parent session>` on a forked session's first turn (FORK_BOUNDARY instead of FIRST_WRITE), `X-Prefixwise-Compaction-Event: 1` on the turn after your harness compacted context (COMPACTION_REWRITE instead of HISTORY_EDIT), and `X-Prefixwise-Cache-Ttl: <seconds>` when you know the cache lifetime. Without the TTL header, Anthropic's is read from `cache_control` (5 min, or 1 h with `ttl: "1h"`) and OpenAI's from `prompt_cache_retention: "24h"`; otherwise it is unknown, and a cold cache after a long gap is reported as UNKNOWN rather than guessed.
+
 ### Tokens per successful task
 
 The headline metric is all tokens (prompt + completion) spent on finished tasks, failed ones included, divided by the number of successful tasks. Tag each request with a task, via the `X-Prefixwise-Task-Id` header or a `task_id` body field (stripped before forwarding), then record the outcome when the task ends:

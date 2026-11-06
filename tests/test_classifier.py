@@ -95,7 +95,7 @@ def test_append_with_cold_cache_is_not_history_edit():
                            prompt_tokens=2000)
     curr = RequestSnapshot(model="m", provider="vllm",
                            blocks=FP.fingerprint_blocks(_conv(u1, {"role": "assistant", "content": "x"})),
-                           prompt_tokens=2100, cached_tokens=0)
+                           prompt_tokens=2100, cached_tokens=0, gap_seconds=5)
     assert classify(prev, curr).cause is MissCause.ROUTING_MISS
 
 
@@ -115,3 +115,53 @@ def test_truncated_history_is_history_edit():
     prev = RequestSnapshot(model="m", blocks=FP.fingerprint_blocks(_conv(u1, a1)))
     curr = RequestSnapshot(model="m", blocks=FP.fingerprint_blocks(_conv(u1)))
     assert classify(prev, curr).cause is MissCause.HISTORY_EDIT
+
+
+
+def _pair(gap=None, ttl=None, cached=0, **curr_kw):
+    prev = snap(prompt_tokens=2000)
+    curr = snap(prompt_tokens=2000, cached_tokens=cached, gap_seconds=gap, ttl_seconds=ttl, **curr_kw)
+    return classify(prev, curr)
+
+
+def test_ttl_expired_only_when_cache_read_low():
+    assert _pair(gap=900, ttl=300).cause is MissCause.TTL_EXPIRED
+    assert _pair(gap=900, ttl=300, cached=1900).cause is MissCause.NONE  # cache survived
+
+
+def test_routing_miss_needs_a_short_gap():
+    assert _pair(gap=90).cause is MissCause.ROUTING_MISS  # past the 60 s retry window
+    assert _pair(gap=200, ttl=3600).cause is MissCause.ROUTING_MISS
+    c = _pair(gap=1200)  # 20 min, TTL unknown: expiry or routing, do not guess
+    assert c.cause is MissCause.UNKNOWN and "unknown TTL" in c.evidence
+    assert _pair(gap=None).cause is MissCause.UNKNOWN
+
+
+def test_evicted_only_when_cache_read_low():
+    assert _pair(gap=30, evicted_block_hashes=["h1"]).cause is MissCause.EVICTED
+    assert _pair(gap=30, cached=1900, evicted_block_hashes=["h1"]).cause is MissCause.NONE
+
+
+def test_fork_boundary_on_first_turn_only():
+    first = snap(fork_parent_session_id="parent")
+    c = classify(None, first)
+    assert c.cause is MissCause.FORK_BOUNDARY and c.legit is True
+    later = snap(fork_parent_session_id="parent", prompt_tokens=2000, cached_tokens=1900)
+    assert classify(snap(prompt_tokens=2000), later).cause is MissCause.NONE
+
+
+def _with_tool_results(*results, compaction=False):
+    blocks = [("system", "You are helpful."), ("messages", {"role": "user", "content": "run it"})]
+    blocks += [("tool_results", {"role": "tool", "tool_call_id": f"c{i}", "content": r})
+               for i, r in enumerate(results)]
+    return RequestSnapshot(model="m", blocks=FP.fingerprint_blocks(blocks), compaction_event=compaction)
+
+
+def test_tool_result_mutation_and_clearing():
+    prev = _with_tool_results("output A", "output B")
+    assert classify(prev, _with_tool_results("output A", "output B", "output C")).cause \
+        is not MissCause.TOOL_RESULT_MUTATION  # appending a result is growth
+    c = classify(prev, _with_tool_results("output A (re-run)", "output B"))
+    assert c.cause is MissCause.TOOL_RESULT_MUTATION and c.legit is False
+    c = classify(prev, _with_tool_results("[cleared]", "output B", compaction=True))
+    assert c.cause is MissCause.COMPACTION_REWRITE and c.legit is True

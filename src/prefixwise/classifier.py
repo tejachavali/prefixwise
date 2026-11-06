@@ -58,6 +58,10 @@ ANTHROPIC_MIN_PREFIX = {
     "512": 512, "2048": 2048, "4096": 4096, "1024": 1024,
 }
 OPENAI_MIN_PREFIX = 1024
+# No provider keeps a cache entry for less than ~5 minutes (Anthropic default
+# 5 min; OpenAI in-memory 5-10 min). A cold cache within this gap of the
+# last turn is not explained by expiry.
+MIN_PROVIDER_TTL_SECONDS = 300
 GEMINI_MIN_PREFIX = 4096  # Gemini 3.x; 2,048 on 2.5. ai.google.dev, Nov 2026.
 
 
@@ -128,11 +132,11 @@ def classify(prev: RequestSnapshot | None, curr: RequestSnapshot,
              *, native_reason: str | None = None) -> Classification:
     """Classify one turn against the previous turn in the same session."""
     if prev is None:
+        if curr.fork_parent_session_id:
+            return Classification(MissCause.FORK_BOUNDARY, True,
+                                  f"first turn of a session forked from {curr.fork_parent_session_id}",
+                                  native_reason=native_reason)
         return Classification(MissCause.FIRST_WRITE, True, "no prior request in session",
-                              native_reason=native_reason)
-    if curr.fork_parent_session_id:
-        return Classification(MissCause.FORK_BOUNDARY, True,
-                              "new session whose prefix equals a parent session prefix",
                               native_reason=native_reason)
     if prev.model != curr.model:
         return Classification(MissCause.MODEL_SWITCH, True,
@@ -169,8 +173,13 @@ def classify(prev: RequestSnapshot | None, curr: RequestSnapshot,
                 "previous message blocks rewritten (not a prefix of this turn) without a compaction event"
             return Classification(cause, legit, ev, secondary, native_reason)
         if role == "tool_results":
+            if curr.compaction_event:
+                # Context editing that clears old tool results is a compaction.
+                return Classification(MissCause.COMPACTION_REWRITE, True,
+                                      "earlier tool results cleared or rewritten with a compaction event",
+                                      secondary, native_reason)
             return Classification(MissCause.TOOL_RESULT_MUTATION, False,
-                                  "a tool-result block changed in place, same tool",
+                                  "an earlier tool result changed or was removed without a compaction event",
                                   secondary, native_reason)
         # user role divergence with no other cause: fall through to param/TTL checks.
         secondary.append(MissCause.HISTORY_EDIT)
@@ -199,6 +208,23 @@ def classify(prev: RequestSnapshot | None, curr: RequestSnapshot,
         return Classification(MissCause.BREAKPOINT_MISPLACED, False,
                               "breakpoint sits after a volatile block", secondary, native_reason)
 
+    # Append-only turn: compare cache_read to the reusable prior prefix,
+    # not to this turn's prompt, which includes the newly appended tail.
+    # A real hit wins over every timing rule below: if the cache served
+    # the prefix, it did not expire and was not evicted.
+    reusable = min(prev.prompt_tokens, curr.prompt_tokens) if prev.prompt_tokens else curr.prompt_tokens
+    if curr.prompt_tokens > 0 and curr.cached_tokens >= reusable * 0.5:
+        return Classification(MissCause.NONE, None,
+                              "append-only turn; cache_read at least half of the prior prefix",
+                              secondary, native_reason)
+
+    # From here the prefix was reusable but cache_read was low.
+    # Engine eviction events are direct evidence; they outrank inference.
+    if curr.evicted_block_hashes:
+        return Classification(MissCause.EVICTED, None,
+                              "BlockRemoved events for this session's blocks between the two turns",
+                              secondary, native_reason)
+
     # Identical replay within a short window is a retry, not a cache miss.
     if prev.blocks and curr.blocks and \
        [b.raw for b in prev.blocks] == [b.raw for b in curr.blocks] and \
@@ -206,29 +232,27 @@ def classify(prev: RequestSnapshot | None, curr: RequestSnapshot,
         return Classification(MissCause.RETRY_REPLAY, False,
                               "identical request within the retry window", secondary, native_reason)
 
-    if curr.evicted_block_hashes:
-        return Classification(MissCause.EVICTED, None,
-                              "BlockRemoved events for this session's blocks between the two turns",
-                              secondary, native_reason)
-
-    if curr.ttl_seconds is not None and curr.gap_seconds is not None and curr.gap_seconds > curr.ttl_seconds:
+    gap, ttl = curr.gap_seconds, curr.ttl_seconds
+    if ttl is not None and gap is not None and gap > ttl:
         return Classification(MissCause.TTL_EXPIRED, True,
-                              f"gap {curr.gap_seconds}s since last turn exceeds applied TTL {curr.ttl_seconds}s",
+                              f"gap {gap:.0f}s since last turn exceeds the cache TTL {ttl:.0f}s",
                               secondary, native_reason)
 
-    # Append-only turn: compare cache_read to the reusable prior prefix,
-    # not to this turn's prompt, which includes the newly appended tail.
-    reusable = min(prev.prompt_tokens, curr.prompt_tokens) if prev.prompt_tokens else curr.prompt_tokens
-    if curr.prompt_tokens > 0 and curr.cached_tokens >= reusable * 0.5:
-        return Classification(MissCause.NONE, None,
-                              "append-only turn; cache_read at least half of the prior prefix",
-                              secondary, native_reason)
-    if curr.cached_tokens == 0 and curr.prompt_tokens > 0:
+    if curr.cached_tokens == 0 and curr.prompt_tokens > 0 and gap is not None and \
+       (gap <= (ttl if ttl is not None else MIN_PROVIDER_TTL_SECONDS)):
+        window = f"TTL {ttl:.0f}s" if ttl is not None else f"shortest provider TTL {MIN_PROVIDER_TTL_SECONDS}s"
         return Classification(MissCause.ROUTING_MISS, None,
-                              "blocks and params equal, gap within TTL, no eviction evidence, cache_read low",
+                              f"blocks and params equal, gap {gap:.0f}s within {window}, "
+                              "no eviction evidence, nothing read from cache",
+                              secondary, native_reason)
+    if curr.prompt_tokens > 0 and gap is not None and ttl is None:
+        return Classification(MissCause.UNKNOWN, None,
+                              f"prefix reusable but cache_read low after a {gap:.0f}s gap with unknown TTL:"
+                              " expiry or routing, not distinguishable",
                               secondary, native_reason)
     return Classification(MissCause.UNKNOWN, None,
-                          "diverged, no rule matched, or usage absent", secondary, native_reason)
+                          "prefix reusable but cache_read low; no timing or usage evidence to name a cause",
+                          secondary, native_reason)
 
 
 def classify_first_divergence(changed_role: str | None, *, model_changed: bool = False,
