@@ -229,6 +229,37 @@
   python -m prefixwise. README demotion briefly turned code comments
   into headings; fixed.
 
+## 2026-11-06 PST -- commit b5555ecd952d8d306389be96aca6d7c470d574c4 (branch claude/e1-hosted, PR #9)
+- First live E1-hosted probe (run by Muse on Colab with the user's
+  keys, commit f0d991e): no HTTP errors; Anthropic claude-haiku-5-5
+  turns cached 3,022/3,044 and 8,635/8,663, diagnostics {} both turns;
+  OpenAI gpt-5.6-luna turn 1 no diagnostics key, turn 2
+  prompt_cache_diagnostics {"type": "unavailable"}; injected agreement
+  100% on both. Stopped at the gate (native_reason null on turn 2).
+- Diagnosis: the gate was wrong, not the reader. Both probe turns were
+  cache hits, and a hit has no miss reason. The probe never exercised a
+  miss. OpenAI's "unavailable" on a chained hit is the open question.
+- What changed: probe now injects two real misses and passes only if
+  every real miss carries a native reason Prefixwise reads; native
+  type recorded; cache/diagnostics fields surfaced wherever they are.
+- Tests: 87 passed. Mock probe: OK for both providers.
+
+## 2026-11-06 PST -- commit bba0937 (branch claude/e1-hosted, PR #9)
+- Second live E1-hosted probe (run by Muse on Colab with the user keys, commit bba0937, 87 tests passed): both providers STOP, returncode 3, no HTTP errors. Anthropic claude-haiku-5-5: 5 turns, native agreement - (0 turns), injected 100.0%, UNKNOWN 0.0%, 43,445 input tokens; OpenAI gpt-5.6-luna: 5 turns, native agreement - (0 turns), injected 80.0%, UNKNOWN 0.0%, 23,650 input tokens.
+- Anthropic turns 3-4 were real misses (tool_reserialize, system_edit; 0 cached) with raw_diagnostics cache_miss_reason tools_changed / system_changed, but native_type and native_reason still null, so the gate STOPs.
+- OpenAI turns 3-4: turn 3 injected tool_reserialize but the provider still served the prefix (not a miss); turn 4 system_edit was a real miss but native type unavailable, native_reason null; prompt_cache_diagnostics {"type": "unavailable"} on turns 2-4.
+- No full runs were attempted (both probes STOP). Probe outputs: raw files in the Colab VM (Muse commit 34afe5d, not pushed: no GitHub login there); condensed verbatim record in experiments/e1_hosted/runs/2026-11-06-probes.md.
+
+## 2026-11-06 PST -- commit d17cbfebc4a12fb7f3b1c3b95cca1304a2d9198a (branch claude/e1-hosted, PR #9)
+- What changed: native reader handles Anthropic's live shape
+  diagnostics.cache_miss_reason.type; absent usage -> UNKNOWN (was
+  BELOW_MIN_PREFIX, could also have been RETRY_REPLAY); comparison id
+  merged into client prompt_cache_options; harness real-miss fix,
+  raw_usage printed, OpenAI diagnosis flags.
+- Tests: 91 passed (2 runs). Mock probe OK both providers with
+  Anthropic's real shape. E1-open mock: 120 turns, 100%, Pass YES.
+- Open: OpenAI returned prompt_cache_diagnostics {"type":
+  "unavailable"} on every chained turn (gpt-5.6-luna, mode implicit).
 ## 2026-11-06 05:42 PST -- commit fd4c003 (live E1-open re-run, no code change)
 - Setup: Colab free L4 GPU (NVIDIA L4, 23034 MiB, High-RAM), vLLM 0.33.0,
   model Qwen/Qwen3-4B (alias Qwen/Qwen3-4B-alias), commit fd4c003
@@ -263,3 +294,16 @@
 - Failures/fixes: none in this run. No harness or classifier change
   was made, per the run instruction. One pip dependency-resolver
   warning in the install cell; install completed and vLLM ran.
+
+## 2026-11-06 PST -- commit 3b1ccec411bcf20ee401aad8c9bad230663d3142 (branch claude/e1-hosted, PR #9)
+- E1-hosted round 3 (Muse, Colab, commit 7cb90ed): Anthropic
+  claude-haiku-5-5 Pass YES -- native agreement 100.0% over 30 turns,
+  UNKNOWN 0.0%, 95 turns (5 HTTP 400 on model_switch: tool_choice "any"
+  unsupported on claude-sonnet-5-5), 832,840 input tokens (796,472
+  cached). OpenAI probes (luna no cache key, gpt-5.6, sol): STOP, every
+  chained turn "unavailable"; dashboard "Diagnosed responses 0".
+  OpenAI spend for the day /bin/bash.08; Anthropic console not yet posted.
+- What changed: harness tool_choice none, stop session on error,
+  --turn-delay, status/error/incomplete_details recorded; run records;
+  README Limits now states live-verified scope.
+- Tests: 93 passed.

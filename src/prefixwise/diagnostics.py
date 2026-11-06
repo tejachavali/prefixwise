@@ -71,6 +71,47 @@ def openai_comparison_options(comparison_response_id: str | None) -> dict:
     return {"prompt_cache_options": {"comparison_response_id": comparison_response_id}}
 
 
+# Provider reasons are coarse; Prefixwise causes refine them. A Prefixwise
+# cause agrees with a native reason when it is one of the causes that
+# reason covers: Anthropic's system_changed covers both a wording edit and
+# a date-only change; OpenAI's input_changed covers any change to the
+# prompt input (instructions, history, tool output, compaction). Each set
+# lists only causes that are a kind of that reason, never a different
+# block, so agreement still requires naming the right place.
+_CONTENT_CHANGES = {MissCause.HISTORY_EDIT, MissCause.COMPACTION_REWRITE, MissCause.TOOL_RESULT_MUTATION}
+_SYSTEM_CHANGES = {MissCause.SYSTEM_EDIT, MissCause.VOLATILE_SYSTEM}
+_TOOL_CHANGES = {MissCause.TOOL_RESERIALIZE, MissCause.TOOL_CATALOG_CHANGE}
+
+NATIVE_COVERS = {
+    "anthropic": {
+        "model_changed": {MissCause.MODEL_SWITCH},
+        "system_changed": _SYSTEM_CHANGES,
+        "tools_changed": _TOOL_CHANGES,
+        "messages_changed": _CONTENT_CHANGES,
+        "previous_message_not_found": {MissCause.UNKNOWN},
+        "unavailable": {MissCause.PARAM_RENDERED},
+    },
+    "openai": {
+        "model_changed": {MissCause.MODEL_SWITCH},
+        "prompt_cache_key_changed": {MissCause.ROUTING_MISS, MissCause.UNKNOWN},
+        "service_tier_changed": {MissCause.ROUTING_MISS, MissCause.PARAM_RENDERED},
+        "tools_changed": _TOOL_CHANGES,
+        "text_format_changed": {MissCause.PARAM_RENDERED},
+        "reasoning_effort_changed": {MissCause.PARAM_RENDERED},
+        "verbosity_changed": {MissCause.PARAM_RENDERED},
+        "context_compacted": {MissCause.COMPACTION_REWRITE},
+        "input_changed": _CONTENT_CHANGES | _SYSTEM_CHANGES,
+    },
+}
+
+
+def native_covers(provider: str, reason: str | None) -> set[MissCause] | None:
+    """The Prefixwise causes a native reason covers, or None if unmapped."""
+    if reason is None:
+        return None
+    return NATIVE_COVERS.get(provider, {}).get(reason)
+
+
 def map_native_reason(provider: str, reason: str | None) -> MissCause | None:
     if reason is None:
         return None
@@ -105,17 +146,11 @@ class AgreementScorer:
                 self.unknown_misses += 1
         if native_reason is None:
             return None
-        mapped = map_native_reason(provider, native_reason)
-        if mapped is None:
+        covered = native_covers(provider, native_reason)
+        if covered is None:
             return None
         self.total_with_native += 1
-        # tools_changed / messages_changed are ambiguous: either reserialize
-        # or catalog change, either history edit or compaction, both agree.
-        ambiguous = {
-            (MissCause.TOOL_RESERIALIZE, MissCause.TOOL_CATALOG_CHANGE),
-            (MissCause.HISTORY_EDIT, MissCause.COMPACTION_REWRITE),
-        }
-        agreed = cause == mapped or (cause, mapped) in ambiguous or (mapped, cause) in ambiguous
+        agreed = cause in covered
         if agreed:
             self.agreed += 1
         return agreed

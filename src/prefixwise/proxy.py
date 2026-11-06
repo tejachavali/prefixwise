@@ -67,6 +67,41 @@ def extract_blocks(body: dict, provider: str) -> list[tuple[str, object]]:
     Caching 201, verified Nov 2026); Anthropic is tools, system,
     messages. This is the v2 order, not the v1 assumption.
     """
+    blocks = [(role, _strip_cache_markers(value)) for role, value in _extract_blocks_raw(body, provider)]
+    if provider == "anthropic":
+        blocks = [(role, _anthropic_text_blocks(role, value)) for role, value in blocks]
+    return blocks
+
+
+def _anthropic_text_blocks(role: str, value: object) -> object:
+    """Anthropic treats string content as one text block: "x" and
+    [{"type": "text", "text": "x"}] render the same prompt. Clients switch
+    between the two (a message gets list form while it carries the moving
+    cache breakpoint, then reverts to a string), so fingerprint one form."""
+    if role == "system" and isinstance(value, str):
+        return [{"type": "text", "text": value}]
+    if isinstance(value, dict) and isinstance(value.get("content"), str):
+        return {**value, "content": [{"type": "text", "text": value["content"]}]}
+    return value
+
+
+def _strip_cache_markers(value: object) -> object:
+    """Drop cache_control markers before fingerprinting.
+
+    A breakpoint says where the provider should cache, not what the prompt
+    is. The standard Anthropic pattern moves the breakpoint to the newest
+    message every turn; fingerprinting the marker made every ordinary turn
+    look like HISTORY_EDIT. Breakpoint presence is checked separately
+    (has_cache_breakpoint) on the untouched body.
+    """
+    if isinstance(value, dict):
+        return {k: _strip_cache_markers(v) for k, v in value.items() if k != "cache_control"}
+    if isinstance(value, list):
+        return [_strip_cache_markers(v) for v in value]
+    return value
+
+
+def _extract_blocks_raw(body: dict, provider: str) -> list[tuple[str, object]]:
     if provider != "anthropic" and is_responses_body(body):
         return _extract_responses_blocks(body)
     blocks: list[tuple[str, object]] = []
@@ -217,15 +252,43 @@ def has_cache_breakpoint(body: dict) -> bool:
                for k in ("tools", "system", "messages"))
 
 
-def native_reason_from(payload: dict) -> str | None:
-    """Provider miss reason. OpenAI puts prompt_cache_diagnostics on the
-    response object; also checked: a top-level diagnostics object and,
-    for older shapes, inside usage."""
+def _diagnostic_objects(payload: dict):
     usage = payload.get("usage") or {}
     for diag in (payload.get("prompt_cache_diagnostics"), payload.get("diagnostics"),
                  usage.get("prompt_cache_diagnostics")):
-        if isinstance(diag, dict) and diag.get("reason"):
+        if isinstance(diag, dict):
+            yield diag
+
+
+def native_reason_from(payload: dict) -> str | None:
+    """The provider's own cache-miss reason, or None (a hit has none).
+
+    Anthropic (observed live 2026-11-06): {"diagnostics": {"cache_miss_reason":
+    {"type": "tools_changed", "cache_missed_input_tokens": N}}}, and
+    "diagnostics": null on a hit. OpenAI (documented): {"prompt_cache_diagnostics":
+    {"type": "cache_miss", "reason": "..."}}. Both shapes are read.
+    """
+    for diag in _diagnostic_objects(payload):
+        miss = diag.get("cache_miss_reason")
+        if isinstance(miss, dict) and miss.get("type"):
+            return str(miss["type"])
+        if isinstance(miss, str) and miss:
+            return miss
+        if diag.get("reason"):
             return str(diag["reason"])
+    return None
+
+
+def native_type_from(payload: dict) -> str | None:
+    """The provider's verdict type (OpenAI: cache_hit, cache_miss,
+    comparison_response_not_found, unavailable). Anthropic reports no type;
+    a cache_miss_reason means cache_miss. Distinct from the reason: a hit
+    has a type but no reason, and "unavailable" means no verdict at all."""
+    for diag in _diagnostic_objects(payload):
+        if diag.get("cache_miss_reason"):
+            return "cache_miss"
+        if diag.get("type"):
+            return str(diag["type"])
     return None
 
 
@@ -377,8 +440,12 @@ class PrefixwiseProxy:
             previous_id = self.last_response_id.get(session_id)
         if provider == "anthropic":
             forward_body.update(anthropic_diagnostics(previous_id))
-        elif api == "responses" and previous_id and "prompt_cache_options" not in body:
-            forward_body.update(openai_comparison_options(previous_id))
+        elif api == "responses" and previous_id:
+            # Merge into the client's own prompt_cache_options; a comparison
+            # id the client chose wins.
+            opts = dict(body.get("prompt_cache_options") or {})
+            opts.setdefault("comparison_response_id", previous_id)
+            forward_body["prompt_cache_options"] = opts
         return {
             "provider": provider, "api": api, "body": body, "headers": headers,
             "forward_body": forward_body, "session_id": session_id,
