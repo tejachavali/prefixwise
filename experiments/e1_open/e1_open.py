@@ -37,9 +37,23 @@ previous turn, so the first divergence is the injected one):
   id, so if the upstream rejects the alias the harness falls back to
   an in-process classification of the same request (marked
   upstream_error=True in the report) instead of dropping the turn.
-- RETRY_REPLAY: identical request, after POST /reset_prefix_cache
-  to the vLLM server (best effort; if the reset fails the turn is
-  scored honestly as whatever the classifier says, usually NONE).
+- RETRY_REPLAY: identical request, sent as a fresh upstream
+  session with a fresh cache_salt, so the vLLM prefix is cold
+  (cached_tokens == 0) and the classifier can fire RETRY_REPLAY
+  (identical blocks, gap < 60 s, cached 0). The proxy session
+  stays the original session, so the turn is still compared
+  against the previous turn in the same session. Why both:
+  POST /reset_prefix_cache returns HTTP 404 on vLLM 0.33.0
+  (live run Nov 5-6, 2026, retry_replay 0/10, scored as NONE),
+  so it is no longer used. A fresh session_id alone would NOT
+  be enough: session_id is event metadata on KV events, not a
+  cache partition. cache_salt is the documented mechanism
+  (vLLM Automatic Prefix Caching docs): it is mixed into the
+  first block's hash, so only requests with the same salt can
+  reuse cached blocks. A fresh salt per retry turn therefore
+  guarantees a cold prefix. The salt is not part of the app
+  request blocks, so the fingerprint/classifier see an identical
+  request, exactly as a real retry looks to the app layer.
 - NONE: identical request, expect a cache hit.
 
 Pass criteria (same as E1-hosted, adapted): agreement >= 95%,
@@ -65,7 +79,6 @@ import argparse
 import json
 import sys
 import time
-import urllib.request
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -275,19 +288,16 @@ def _classify_direct(proxy: PrefixwiseProxy, session_id: str, body: dict,
     return result.cause.value
 
 
-def _reset_prefix_cache(vllm_url: str) -> bool:
-    """Best-effort vLLM prefix-cache reset, so a RETRY_REPLAY turn
-    actually sees cached_tokens == 0. Returns False if the endpoint
-    does not exist; the turn is then scored honestly as whatever
-    the classifier says."""
-    try:
-        req = urllib.request.Request(vllm_url.rstrip("/") + "/reset_prefix_cache",
-                                     method="POST", data=b"{}",
-                                     headers={"Content-Type": "application/json"})
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            return resp.status == 200
-    except Exception:
-        return False
+def retry_upstream_ids(session_id: str, turn_no: int) -> tuple[str, str]:
+    """Fresh upstream identity for a RETRY_REPLAY turn.
+
+    Returns (upstream_session_id, cache_salt): a new session id and
+    a new salt per retry turn, so the vLLM prefix is cold. The
+    proxy session is unchanged; only the identity sent upstream
+    changes. See the RETRY_REPLAY note in the module docstring.
+    """
+    fresh = f"{session_id}-retry-{turn_no}"
+    return fresh, fresh
 
 
 def run(*, vllm_url: str, model: str, model_alias: str, mock: bool,
@@ -318,12 +328,18 @@ def run(*, vllm_url: str, model: str, model_alias: str, mock: bool,
             # Turn 9 in session B switches back to the original model.
             if injected == "model_switch" and turn_idx == 9:
                 model_for_turn = model
-            if injected == "retry_replay" and not mock:
-                _reset_prefix_cache(vllm_url)
             state["injected"] = injected
             body = build_body(session_id=session_id, model=model_for_turn,
                               injected=injected, turn=turn_idx, base_date=base_date,
                               question=QUESTIONS[session_idx % len(QUESTIONS)])
+            # RETRY_REPLAY: fresh upstream session + fresh cache_salt,
+            # proxy session unchanged (see retry_upstream_ids).
+            # No /reset_prefix_cache call: it 404s on vLLM 0.33.0.
+            retry_upstream_session_id = None
+            if injected == "retry_replay":
+                retry_upstream_session_id, retry_salt = retry_upstream_ids(session_id, turn_no)
+                body["prefixwise_upstream_session_id"] = retry_upstream_session_id
+                body["cache_salt"] = retry_salt
             upstream_error = False
             try:
                 result, _entry = proxy.handle("vllm", dict(body))
@@ -343,6 +359,7 @@ def run(*, vllm_url: str, model: str, model_alias: str, mock: bool,
                 "agreement": predicted == injected,
                 "unknown": predicted == "unknown",
                 "upstream_error": upstream_error,
+                "upstream_session_id": retry_upstream_session_id,
             })
     report = score_results(results)
     return results, report

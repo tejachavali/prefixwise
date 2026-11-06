@@ -14,6 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "experiments" / "e1
 from e1_open import (  # noqa: E402
     build_body,
     is_pass,
+    retry_upstream_ids,
     score_results,
     simulate_cached_tokens,
 )
@@ -72,6 +73,65 @@ def test_build_body_mutates_only_the_injected_block():
     assert base["tools"] == volatile["tools"]
     assert base["messages"][1] == volatile["messages"][1]
     assert base["messages"][0]["content"] != volatile["messages"][0]["content"]
+
+
+def test_retry_upstream_ids_are_fresh_per_turn():
+    # A fresh upstream session + fresh cache_salt per retry turn, so
+    # the vLLM prefix is cold. Different turns get different ids;
+    # the same turn is deterministic.
+    s1, salt1 = retry_upstream_ids("e1-open-s5", 6)
+    s2, salt2 = retry_upstream_ids("e1-open-s5", 7)
+    assert s1 != s2 and salt1 != salt2
+    assert retry_upstream_ids("e1-open-s5", 6) == (s1, salt1)
+    assert "e1-open-s5" in s1  # still traceable to the proxy session
+
+
+def test_retry_turns_carry_fresh_upstream_session(tmp_path):
+    from e1_open import run
+
+    results, report = run(vllm_url="http://127.0.0.1:8000", model="Qwen/Qwen3-4B",
+                          model_alias="Qwen/Qwen3-4B-alias", mock=True,
+                          output_dir=tmp_path)
+    retries = [r for r in results if r["injected"] == "retry_replay"]
+    assert len(retries) == 10
+    # Every retry turn got its own fresh upstream session id, distinct
+    # from the proxy session id and from every other retry turn.
+    upstream = [r["upstream_session_id"] for r in retries]
+    assert all(u is not None and u.startswith("e1-open-") for u in upstream)
+    assert len(set(upstream)) == 10
+    assert all(u != r["session_id"] for u, r in zip(upstream, retries))
+    # And they still score as retry_replay in mock mode.
+    assert all(r["predicted"] == "retry_replay" for r in retries)
+    assert is_pass(report)
+
+
+def test_proxy_pops_upstream_session_override():
+    # The harness-only flag must never reach the upstream: the proxy
+    # pops it and uses it only as the X-Session-ID for forwarding,
+    # while its own snapshot chain keeps the original session.
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+    from prefixwise.proxy import PrefixwiseProxy
+
+    seen: dict = {}
+
+    def _capture(provider, body, request_id, session_id):
+        seen["body"] = dict(body)
+        seen["session_id"] = session_id
+        return {"prompt_tokens": 2000, "cached_tokens": 0}, "resp-1"
+
+    proxy = PrefixwiseProxy()
+    proxy._forward = _capture  # type: ignore[method-assign]
+    body = {"model": "m", "session_id": "s1",
+            "messages": [{"role": "user", "content": "hi"}],
+            "prefixwise_upstream_session_id": "s1-retry-6",
+            "cache_salt": "s1-retry-6"}
+    proxy.handle("vllm", dict(body))
+    assert "prefixwise_upstream_session_id" not in seen["body"]
+    assert seen["session_id"] == "s1-retry-6"  # upstream sees the fresh session
+    assert "s1" in proxy.last_snapshot  # proxy chain keeps the original session
 
 
 def test_mock_run_passes_100_turns(tmp_path):

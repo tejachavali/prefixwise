@@ -102,10 +102,12 @@ PYTHONPATH=src python3 experiments/e1_open/e1_open.py \
   --vllm-url http://127.0.0.1:8000 --model Qwen/Qwen3-8B \
   --model-alias Qwen/Qwen3-8B-alias
 
-# Or on Colab (L4 GPU): open experiments/e1_open/colab_e1_open.ipynb
+# Or on Colab (L4 GPU, Qwen3-4B default): open experiments/e1_open/colab_e1_open.ipynb
 ```
 
 100 turns, 9 injected causes (FIRST_WRITE, NONE, VOLATILE_SYSTEM, TOOL_RESERIALIZE, TOOL_CATALOG_CHANGE, SYSTEM_EDIT, COMPACTION_REWRITE, RETRY_REPLAY, MODEL_SWITCH). Pass: agreement >= 95%, UNKNOWN <= 10% of misses. Mock mode scores 100% by construction (simulated cached_tokens); only the live run is evidence about vLLM.
+
+Live run Nov 5-6, 2026 (Colab L4, vLLM 0.33.0, Qwen3-4B): agreement 90.0%, Pass NO, only retry_replay failed (0/10). Two fixes since: the server now starts with `--enable-auto-tool-choice --tool-call-parser hermes` (vLLM 0.33.0 rejected tool-carrying requests with HTTP 400 without them), and retry turns use a fresh upstream session + fresh `cache_salt` instead of POST `/reset_prefix_cache` (HTTP 404 on vLLM 0.33.0). Qwen3-8B failed to start on a Colab L4 in that run, so 4B is the Colab default; 8B needs a larger GPU.
 
 ## Build order (E1 first)
 

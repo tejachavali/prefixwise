@@ -10,3 +10,4 @@ venv/
 *.db
 *.sqlite
 .env
+experiments/e1_open/results/

@@ -96,6 +96,18 @@ class PrefixwiseProxy:
         # event fired before this turn, so the classifier can tell
         # COMPACTION_REWRITE from HISTORY_EDIT.
         compaction_event = bool(body.pop("prefixwise_compaction_event", False))
+        # E1-open retry turns: a harness-only upstream session id,
+        # popped before forwarding. The proxy's own session (used for
+        # the snapshot chain and gap_seconds) stays the original
+        # session_id, so the classifier still compares this turn
+        # against the previous turn in the same session; only the
+        # X-Session-ID sent upstream changes, so the engine sees the
+        # retry as a new session. See e1_open.py: the retry turn also
+        # carries a fresh cache_salt, which is what actually makes
+        # the vLLM prefix cold (session_id alone is event metadata,
+        # not a cache partition; cache_salt is mixed into the first
+        # block's hash, docs.vllm.ai Automatic Prefix Caching).
+        upstream_session_id = body.pop("prefixwise_upstream_session_id", None)
         now = time.time()
         gap_seconds = (now - self.last_seen[session_id]) if session_id in self.last_seen else None
         self.last_seen[session_id] = now
@@ -110,7 +122,8 @@ class PrefixwiseProxy:
         elif provider == "openai":
             body.update(openai_comparison_options(self.last_response_id.get(session_id)))
 
-        usage, response_id = self._forward(provider, body, request_id, session_id)
+        usage, response_id = self._forward(provider, body, request_id,
+                                          str(upstream_session_id) if upstream_session_id else session_id)
         prompt_tokens = int(usage.get("prompt_tokens", 0) or 0)
         cached = int(usage.get("cached_tokens", 0) or usage.get("prompt_tokens_details", {}).get("cached_tokens", 0) or 0)
         # Native reason, when the upstream returned one.

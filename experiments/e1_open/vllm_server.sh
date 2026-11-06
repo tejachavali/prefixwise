@@ -7,11 +7,18 @@
 #   MODEL=meta-llama/Llama-3.3-70B-Instruct ./experiments/e1_open/vllm_server.sh
 #
 # GPU requirements (approximate, FP16/BF16 weights, no quantization):
-#   Qwen3-8B            1x 24 GB GPU (Colab L4, RTX 4090) -- default
-#   Qwen3-4B            1x 16 GB GPU (Colab T4) -- fallback, set MODEL=Qwen/Qwen3-4B
+#   Qwen3-8B            1x 24 GB GPU (RTX 4090) -- default on a GPU box
+#   Qwen3-4B            1x 16 GB GPU (Colab T4) -- Colab default (see below)
 #   Qwen3-32B           ~40 GB+ (1x A100 80GB, or 2x L4)
 #   Llama-3.3-70B       2x H100 80GB, or 1x GPU with --quantization fp8
 #                       (add VLLM_ARGS="--quantization fp8 --max-model-len 8192")
+#
+# Colab note (live run Nov 5-6, 2026, vLLM 0.33.0, L4): Qwen3-8B
+# failed to start ("RuntimeError: Engine core initialization failed",
+# server never ready in 10 min). Qwen3-4B worked on the same L4.
+# So on Colab use MODEL=Qwen/Qwen3-4B; 8B needs a larger GPU
+# (RTX 4090 / A100 class) than a Colab L4 in practice, despite the
+# 24 GB nominal fit.
 #
 # The server must be >= v0.30.0 (Sep 22, 2026): that release stamps
 # session_id onto every BlockStored KV event (PR #51381). Check with:
@@ -51,11 +58,22 @@ python3 -c "import vllm; print('vLLM', vllm.__version__)" || {
   exit 1
 }
 
+# --enable-auto-tool-choice --tool-call-parser hermes (added Nov 2026):
+# vLLM 0.33.0 rejects requests that carry tools with HTTP 400
+# "`auto` tool choice requires --enable-auto-tool-choice and
+# --tool-call-parser to be set". The proxy forwards tool definitions
+# without an explicit tool_choice, so vLLM defaults to `auto` and
+# refuses the request unless the server enables it. Qwen3 emits
+# Hermes-style tool calls, so the hermes parser is the right one
+# for Qwen models; for a non-Qwen model, change the parser to the
+# one that matches that model's tool-call format.
 exec vllm serve "$MODEL" \
   --host "$HOST" \
   --port "$PORT" \
   --served-model-name "$MODEL" "$MODEL_ALIAS" \
   --enable-prefix-caching \
   --enable-prompt-tokens-details \
+  --enable-auto-tool-choice \
+  --tool-call-parser hermes \
   --kv-events-config '{"enable_prefix_cache_events": true, "publisher": "zmq", "topic": "cache-events", "endpoint": "tcp://127.0.0.1:5557"}' \
   $VLLM_ARGS
