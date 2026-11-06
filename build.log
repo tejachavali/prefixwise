@@ -55,3 +55,38 @@
     turns 5-7 only.
 - Not yet run: live E1-open on a real GPU (needs Teja to run it on
   Colab or a GPU box; see experiments/e1_open/README.md).
+
+## 2026-11-05 22:45 PST -- commit 874a602
+- Live run findings (Colab L4, vLLM 0.33.0, Qwen3-4B, Nov 5-6, 2026):
+  agreement 90.0%, Pass NO, only retry_replay failed (0/10). Qwen3-8B
+  failed to start on the Colab L4 ("RuntimeError: Engine core
+  initialization failed", server never ready in 10 min). vLLM 0.33.0
+  also rejected tool-carrying requests with HTTP 400 ("`auto` tool
+  choice requires --enable-auto-tool-choice and --tool-call-parser").
+- What changed: (1) vllm_server.sh and colab_e1_open.ipynb now start
+  vLLM with --enable-auto-tool-choice --tool-call-parser hermes
+  (Qwen3 emits Hermes-style tool calls). (2) RETRY_REPLAY no longer
+  uses POST /reset_prefix_cache (HTTP 404 on vLLM 0.33.0). Retry
+  turns now use a fresh upstream session id (prefixwise_upstream_
+  session_id, popped by the proxy before forwarding) plus a fresh
+  cache_salt per turn, so the vLLM prefix is cold; the proxy session
+  is unchanged, so the classifier still compares against the previous
+  turn in the same session. A fresh session_id alone would NOT cold
+  the cache: session_id is KV-event metadata, not a cache partition;
+  cache_salt is the documented vLLM mechanism (mixed into the first
+  block's hash). (3) Colab default is now Qwen/Qwen3-4B; 8B needs a
+  larger GPU (RTX 4090 / A100 class). README.md and
+  experiments/e1_open/README.md document all three. results/ added
+  to .gitignore (run artifacts, not committed).
+- Tests: PYTHONPATH=src python3 -m pytest tests/ -q -- 31 passed in
+  0.98s (28 existing + 3 new: retry_upstream_ids fresh per turn,
+  retry turns carry fresh upstream sessions in mock, proxy pops the
+  upstream-session override and forwards it as X-Session-ID).
+  pytest was not installed in this VM; installed with pip
+  --break-system-packages (local env only, not part of the repo).
+- Mock run: PYTHONPATH=src python3 experiments/e1_open/e1_open.py
+  --mock -- 100 turns, agreement 100.0%, UNKNOWN rate 0.0%,
+  Pass YES, all 9 causes 100% (retry_replay 10/10). Mock only, not
+  live evidence: the live re-run on Colab (Qwen3-4B, fixed flags)
+  is still needed to confirm retry_replay passes for real.
+- Not yet run live: the fixed E1-open on Colab/GPU box.
