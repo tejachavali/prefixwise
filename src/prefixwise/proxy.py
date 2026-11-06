@@ -84,12 +84,21 @@ class PrefixwiseProxy:
         self.mock = not self.upstream_url or os.environ.get("PREFIXWISE_MOCK_UPSTREAM") == "1"
         self.last_snapshot: dict[str, RequestSnapshot] = {}
         self.last_response_id: dict[str, str | None] = {}
+        self.last_seen: dict[str, float] = {}
 
     def handle(self, provider: str, body: dict) -> tuple[dict, LedgerEntry]:
         session_id = body.get("session_id") or body.get("metadata", {}).get("user_id") or "default"
         session_id = str(session_id)
         request_id = str(uuid.uuid4())
         model = str(body.get("model", "unknown"))
+        # E1-open: a harness-only flag, popped before forwarding so the
+        # upstream never sees it. Marks that a PreCompact/compaction
+        # event fired before this turn, so the classifier can tell
+        # COMPACTION_REWRITE from HISTORY_EDIT.
+        compaction_event = bool(body.pop("prefixwise_compaction_event", False))
+        now = time.time()
+        gap_seconds = (now - self.last_seen[session_id]) if session_id in self.last_seen else None
+        self.last_seen[session_id] = now
         blocks = extract_blocks(body, provider)
         fps = self.fingerprinter.fingerprint_blocks(blocks)
         prev = self.last_snapshot.get(session_id)
@@ -110,6 +119,7 @@ class PrefixwiseProxy:
 
         curr = RequestSnapshot(model=model, provider=provider, blocks=fps,
                                prompt_tokens=prompt_tokens, cached_tokens=cached,
+                               gap_seconds=gap_seconds, compaction_event=compaction_event,
                                params={k: body.get(k) for k in
                                        ("tool_choice", "thinking", "reasoning", "output_format",
                                         "text_format", "verbosity") if body.get(k) is not None},

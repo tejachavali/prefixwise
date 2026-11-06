@@ -1,0 +1,54 @@
+# Prefixwise build log
+# Append only, do not overwrite history. One entry per build/push:
+# timestamp, commit SHA, what changed, test command and result,
+# proxy smoke test result, failures/fixes.
+
+## 2026-11-05 20:14 PST -- commit d3b25ef8672aa4af3db7d4552dd6e74ce2c1dde0
+- What changed: Prefixwise v2, E1-ready core. Repo created (public, MIT).
+  src/prefixwise/fingerprint.py (raw+canonical+masked hashes, HMAC for short blocks),
+  classifier.py (19-cause v2 taxonomy), diagnostics.py (Anthropic/OpenAI
+  native diagnostics chaining, no beta header), ledger.py (SQLite, tokens
+  per successful task), proxy.py (stdlib OpenAI-compatible proxy, mock mode).
+- Tests: PYTHONPATH=src python3 -m pytest tests/ -q -- 22 passed in 0.64s.
+- Proxy smoke test: mock mode, /health ok, first turn first_write, second
+  turn none, ledger endpoint returns roll-up. Fix found by smoke test:
+  a first write is recorded with 0 avoidable tokens (baseline, not waste).
+- Failures/fixes: SQLite threading in proxy, volatile masking of
+  alphanumeric ids, tool reserialization detection (all fixed in this commit).
+
+## 2026-11-05 20:26 PST -- commit e49029b (full SHA in git log -1)
+- What changed: E1-open harness (experiments/e1_open/). e1_open.py runs
+  100 turns against a vLLM OpenAI-compatible server (Qwen/Qwen3-8B
+  default) with KNOWN injected causes as ground truth, scores classifier
+  agreement and UNKNOWN rate (pass: agreement >=95%, UNKNOWN <=10%),
+  writes JSON + markdown reports to experiments/e1_open/results/.
+  vllm_server.sh starts vLLM >= v0.30.0 with --enable-prefix-caching,
+  --enable-prompt-tokens-details, --kv-events-config, and a served-model
+  alias for MODEL_SWITCH turns. colab_e1_open.ipynb runs it on Colab
+  (L4, Qwen3-8B; Qwen3-4B fallback for T4). experiments/e1_open/README.md
+  documents live, mock, and Colab runs. tests/test_e1_open.py adds
+  scoring unit tests (mock vLLM responses, no GPU).
+  Proxy change (src/prefixwise/proxy.py): track gap_seconds per session
+  and accept prefixwise_compaction_event (popped before forwarding),
+  so RETRY_REPLAY and COMPACTION_REWRITE can fire through the proxy.
+  Main README: new E1-open section.
+- Tests: PYTHONPATH=src python3 -m pytest tests/ -q -- 28 passed in 0.81s
+  (22 existing + 6 new E1-open tests).
+- Proxy smoke test: e1_open.py --mock (real proxy/classifier/ledger,
+  simulated vLLM cached_tokens) -- 100 turns, agreement 100.0%,
+  UNKNOWN rate 0.0%, Pass YES, all 9 causes 100%. This is a harness
+  smoke test only, not evidence about vLLM.
+- Failures/fixes:
+  * test_build_body missing base_date argument -- fixed in the test.
+  * Turn builder first chained identical turns wrong: user question
+    changed every turn, and turns restoring a change (tool order back,
+    tool restored, system wording back, post-compaction NONE/RETRY)
+    were identical to the previous turn. Fixed: question fixed per
+    session; turn-aware mutations (turn 5 reversed / turn 6 restored,
+    turn 7 tool removed / turn 8 restored, turn 9 system edited /
+    turn 10 restored, turns 5-7 repeat the turn-4 compacted history).
+    Mock agreement went from 95.0% (NONE 15/20, turn-10 NONE scored
+    HISTORY_EDIT) to 100.0% after fixing the turn-10 override to
+    turns 5-7 only.
+- Not yet run: live E1-open on a real GPU (needs Teja to run it on
+  Colab or a GPU box; see experiments/e1_open/README.md).

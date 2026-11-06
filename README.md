@@ -88,9 +88,28 @@ curl -s http://127.0.0.1:8080/ledger
 
 With a real upstream, set `PREFIXWISE_UPSTREAM_URL` (e.g. `https://api.openai.com`) and `PREFIXWISE_API_KEY`. The proxy forwards with `X-Request-Id` and `X-Session-ID` for the engine join.
 
+## E1-open: classifier validation without API credits
+
+E1-open validates the classifier on open Hugging Face models served by vLLM, with controlled injected causes as ground truth. No Anthropic or OpenAI API credits needed. See `experiments/e1_open/README.md`.
+
+```bash
+# Mock mode (no GPU, no server): scoring path smoke test only
+PYTHONPATH=src python3 experiments/e1_open/e1_open.py --mock
+
+# Live, on a GPU box (vLLM >= 0.30.0; Qwen3-8B fits on one 24 GB GPU)
+MODEL=Qwen/Qwen3-8B bash experiments/e1_open/vllm_server.sh
+PYTHONPATH=src python3 experiments/e1_open/e1_open.py \
+  --vllm-url http://127.0.0.1:8000 --model Qwen/Qwen3-8B \
+  --model-alias Qwen/Qwen3-8B-alias
+
+# Or on Colab (L4 GPU): open experiments/e1_open/colab_e1_open.ipynb
+```
+
+100 turns, 9 injected causes (FIRST_WRITE, NONE, VOLATILE_SYSTEM, TOOL_RESERIALIZE, TOOL_CATALOG_CHANGE, SYSTEM_EDIT, COMPACTION_REWRITE, RETRY_REPLAY, MODEL_SWITCH). Pass: agreement >= 95%, UNKNOWN <= 10% of misses. Mock mode scores 100% by construction (simulated cached_tokens); only the live run is evidence about vLLM.
+
 ## Build order (E1 first)
 
-1. **E1 (next):** 100 consecutive turns on Anthropic and OpenAI with native diagnostics chained; Prefixwise's first-diverged block agrees with the native reason >= 95% of the time; UNKNOWN <= 10% of misses on real coding-agent traffic. Needs API credits.
+1. **E1-open (next):** 100 turns on vLLM + Qwen3-8B with injected causes as ground truth; agreement >= 95%, UNKNOWN <= 10%. No API credits. Then **E1-hosted:** 100 consecutive turns on Anthropic and OpenAI with native diagnostics chained; Prefixwise's first-diverged block agrees with the native reason >= 95% of the time; UNKNOWN <= 10% of misses on real coding-agent traffic. Needs API credits and is still the provider-facing proof.
 2. **E2/E3:** vLLM >= v0.30.0 + LMCache on one GPU box, ids set by the proxy; >= 95% of requests join on ids within 5 s; lookup-hash lines join on request id for >= 99% of requests.
 3. **E4:** one toggle (canonical tools or volatile-to-tail) on a recorded agent session replayed live; realised cache_read >= 50% of predicted over 50 requests; task success flat.
 4. **E5:** PreCompact snapshot on one harness; rewrite priced exactly once; compaction frequency reduced to task boundaries without a drop in a 10-task pass rate.
