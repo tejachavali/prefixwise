@@ -157,3 +157,18 @@
 - Failures/fixes: mock Responses stream lacked output_item.added /
   content_part.added / *.done events, which the SDK requires; mock now
   emits the full sequence (relay path was unaffected).
+
+## 2026-11-06 PST -- commit cf5dede77b17e935a94b5d90bf1d3886d26161de
+- What changed: tool results split into their own block group (all
+  three APIs); TTL from header / Anthropic cache_control / OpenAI
+  prompt_cache_retention; fork header; classifier timing rules made
+  honest (hit wins; ROUTING_MISS only within a known or 5-min window;
+  else UNKNOWN); EVICTED before RETRY_REPLAY; FORK_BOUNDARY reachable;
+  PrefixwiseHTTPServer with listen backlog 256.
+- Tests: PYTHONPATH=src python3 -m pytest tests/ -q -- 71 passed, 3
+  consecutive runs. e1_open.py --mock: 120 turns, 100.0%, Pass YES.
+- Failures/fixes: concurrency test flaked; stress script reproduced a
+  ConnectionResetError at run 12/40 -- stdlib listen backlog of 5.
+  Backlog raised to 256: 40/40 clean. A first TTL test passed for the
+  wrong reason (a ttl change also edits the system block); rewritten
+  to use its own 1 h session.
