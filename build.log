@@ -243,3 +243,9 @@
   every real miss carries a native reason Prefixwise reads; native
   type recorded; cache/diagnostics fields surfaced wherever they are.
 - Tests: 87 passed. Mock probe: OK for both providers.
+
+## 2026-11-06 PST -- commit bba0937 (branch claude/e1-hosted, PR #9)
+- Second live E1-hosted probe (run by Muse on Colab with the user keys, commit bba0937, 87 tests passed): both providers STOP, returncode 3, no HTTP errors. Anthropic claude-haiku-5-5: 5 turns, native agreement - (0 turns), injected 100.0%, UNKNOWN 0.0%, 43,445 input tokens; OpenAI gpt-5.6-luna: 5 turns, native agreement - (0 turns), injected 80.0%, UNKNOWN 0.0%, 23,650 input tokens.
+- Anthropic turns 3-4 were real misses (tool_reserialize, system_edit; 0 cached) with raw_diagnostics cache_miss_reason tools_changed / system_changed, but native_type and native_reason still null, so the gate STOPs.
+- OpenAI turns 3-4: turn 3 injected tool_reserialize but the provider still served the prefix (not a miss); turn 4 system_edit was a real miss but native type unavailable, native_reason null; prompt_cache_diagnostics {"type": "unavailable"} on turns 2-4.
+- No full runs were attempted (both probes STOP). Probe outputs: raw files in the Colab VM (Muse commit 34afe5d, not pushed: no GitHub login there); condensed verbatim record in experiments/e1_hosted/runs/2026-11-06-probes.md.
