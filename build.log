@@ -294,3 +294,16 @@
 - Failures/fixes: none in this run. No harness or classifier change
   was made, per the run instruction. One pip dependency-resolver
   warning in the install cell; install completed and vLLM ran.
+
+## 2026-11-06 PST -- commit 3b1ccec411bcf20ee401aad8c9bad230663d3142 (branch claude/e1-hosted, PR #9)
+- E1-hosted round 3 (Muse, Colab, commit 7cb90ed): Anthropic
+  claude-haiku-5-5 Pass YES -- native agreement 100.0% over 30 turns,
+  UNKNOWN 0.0%, 95 turns (5 HTTP 400 on model_switch: tool_choice "any"
+  unsupported on claude-sonnet-5-5), 832,840 input tokens (796,472
+  cached). OpenAI probes (luna no cache key, gpt-5.6, sol): STOP, every
+  chained turn "unavailable"; dashboard "Diagnosed responses 0".
+  OpenAI spend for the day /bin/bash.08; Anthropic console not yet posted.
+- What changed: harness tool_choice none, stop session on error,
+  --turn-delay, status/error/incomplete_details recorded; run records;
+  README Limits now states live-verified scope.
+- Tests: 93 passed.
