@@ -74,14 +74,14 @@ def test_build_body_mutates_only_the_injected_block():
     assert base["messages"][0]["content"] != volatile["messages"][0]["content"]
 
 
-def test_mock_run_passes_100_turns(tmp_path):
+def test_mock_run_passes_120_turns(tmp_path):
     from e1_open import run
 
     results, report = run(vllm_url="http://127.0.0.1:8000", model="Qwen/Qwen3-8B",
                           model_alias="Qwen/Qwen3-8B-alias", mock=True,
                           output_dir=tmp_path)
-    assert len(results) == 100
-    assert report["total_turns"] == 100
+    assert len(results) == 120
+    assert report["total_turns"] == 120
     assert report["agreement"] == 1.0
     assert report["unknown_rate"] == 0.0
     assert is_pass(report)
@@ -92,3 +92,23 @@ def test_mock_run_passes_100_turns(tmp_path):
             "retry_replay"} <= causes
     # Results are JSON-serialisable for the report writer.
     json.dumps(results)
+
+
+def test_build_body_grow_appends_without_changing_prior_turn():
+    from datetime import date
+
+    d = date(2026, 11, 5)
+    t3 = build_body(session_id="s", model="m", injected="none", turn=3, base_date=d, grow=True)
+    t4 = build_body(session_id="s", model="m", injected="none", turn=4, base_date=d, grow=True)
+    assert len(t4["messages"]) == len(t3["messages"]) + 2
+    assert t4["messages"][:len(t3["messages"])] == t3["messages"]
+
+
+def test_mock_append_session_scores_none():
+    from e1_open import run
+
+    results, _ = run(vllm_url="http://127.0.0.1:8000", model="m", model_alias="m-alias",
+                     mock=True, output_dir=Path("/nonexistent"))
+    growth = [r for r in results if r["session_id"] in ("e1-open-s10", "e1-open-s11")]
+    assert len(growth) == 20
+    assert all(r["predicted"] == r["injected"] for r in growth)

@@ -71,3 +71,47 @@ def test_unknown_when_no_evidence():
     curr = snap(prompt_tokens=2000, cached_tokens=0)
     # Blocks equal, no param change, no TTL, no eviction: routing or unknown.
     assert classify(prev, curr).cause in (MissCause.ROUTING_MISS, MissCause.UNKNOWN)
+
+
+def _conv(*msgs, system="You are helpful."):
+    return [("system", system)] + [("messages", m) for m in msgs]
+
+
+def test_append_only_growth_is_not_history_edit():
+    u1 = {"role": "user", "content": "hi"}
+    a1 = {"role": "assistant", "content": "hello"}
+    u2 = {"role": "user", "content": "next question"}
+    prev = RequestSnapshot(model="m", provider="vllm", blocks=FP.fingerprint_blocks(_conv(u1)),
+                           prompt_tokens=2000, cached_tokens=0)
+    curr = RequestSnapshot(model="m", provider="vllm", blocks=FP.fingerprint_blocks(_conv(u1, a1, u2)),
+                           prompt_tokens=2400, cached_tokens=1900)
+    assert classify(prev, curr).cause is MissCause.NONE
+
+
+def test_append_with_cold_cache_is_not_history_edit():
+    # Growth with cache_read 0 is a routing/unknown question, never HISTORY_EDIT.
+    u1 = {"role": "user", "content": "hi"}
+    prev = RequestSnapshot(model="m", provider="vllm", blocks=FP.fingerprint_blocks(_conv(u1)),
+                           prompt_tokens=2000)
+    curr = RequestSnapshot(model="m", provider="vllm",
+                           blocks=FP.fingerprint_blocks(_conv(u1, {"role": "assistant", "content": "x"})),
+                           prompt_tokens=2100, cached_tokens=0)
+    assert classify(prev, curr).cause is MissCause.ROUTING_MISS
+
+
+def test_edit_inside_prior_prefix_is_history_edit():
+    u1 = {"role": "user", "content": "hi"}
+    a1 = {"role": "assistant", "content": "hello"}
+    prev = RequestSnapshot(model="m", blocks=FP.fingerprint_blocks(_conv(u1, a1)))
+    edited = {"role": "assistant", "content": "hello, edited"}
+    curr = RequestSnapshot(model="m", blocks=FP.fingerprint_blocks(
+        _conv(u1, edited, {"role": "user", "content": "more"})))
+    assert classify(prev, curr).cause is MissCause.HISTORY_EDIT
+
+
+def test_truncated_history_is_history_edit():
+    u1 = {"role": "user", "content": "hi"}
+    a1 = {"role": "assistant", "content": "hello"}
+    prev = RequestSnapshot(model="m", blocks=FP.fingerprint_blocks(_conv(u1, a1)))
+    curr = RequestSnapshot(model="m", blocks=FP.fingerprint_blocks(_conv(u1)))
+    assert classify(prev, curr).cause is MissCause.HISTORY_EDIT
