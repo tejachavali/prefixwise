@@ -116,3 +116,26 @@ def test_missing_ledger_is_a_clear_error(tmp_path):
     with pytest.raises(SystemExit) as exc:
         main(["report", "--ledger", str(tmp_path / "none.db")])
     assert "no ledger" in str(exc.value)
+
+
+def test_explain_fail_on_waste(tmp_path, capsys):
+    a = write(tmp_path / "a.json", BASE)
+    b = write(tmp_path / "b.json", variant(tools=lambda t: t[::-1]))
+    assert main(["explain", a, b, "--fail-on-waste"]) == 2
+    assert main(["explain", a, a, "--fail-on-waste"]) == 0  # identical: nothing wasted
+
+
+def test_report_tokens_per_successful_task_by_agent(tmp_path, capsys):
+    led = Ledger(str(tmp_path / "ab.db"))
+    def rec(agent, task, tokens):
+        led.record(LedgerEntry(session_id=task, agent_id=agent, provider="openai", model="m",
+                               cause="none", prompt_tokens=tokens, cached_tokens=0,
+                               avoidable_tokens=0, avoidable_cost=None, task_id=task))
+    rec("prompt-v1", "a1", 5000); rec("prompt-v1", "a2", 5000)
+    rec("prompt-v2", "b1", 3000); rec("prompt-v2", "b2", 3000)
+    for t, ok in (("a1", True), ("a2", True), ("b1", True), ("b2", False)):
+        led.set_task_outcome(t, ok)
+    main(["report", "--ledger", str(tmp_path / "ab.db"), "--by", "agent_id", "--json"])
+    rows = {r["agent_id"]: r for r in json.loads(capsys.readouterr().out)["rows"]}
+    assert rows["prompt-v1"]["tokens_per_successful_task"] == 5000.0
+    assert rows["prompt-v2"]["tokens_per_successful_task"] == 6000.0  # cheaper calls, worse per success
