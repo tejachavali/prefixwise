@@ -16,7 +16,10 @@
 - Failures/fixes: SQLite threading in proxy, volatile masking of
   alphanumeric ids, tool reserialization detection (all fixed in this commit).
 
-## 2026-11-05 20:26 PST -- commit e49029b (full SHA in git log -1)
+## 2026-11-05 20:26 PST -- commit f1da9c4cf5c37afedfb1b24b56e020655d731c3e
+- Note: this entry was written before the commit was amended to fill
+  in its SHA; the SHA above is the amended (final) E1-open commit.
+  This log-only fix is a separate commit, so the SHA above stays correct.
 - What changed: E1-open harness (experiments/e1_open/). e1_open.py runs
   100 turns against a vLLM OpenAI-compatible server (Qwen/Qwen3-8B
   default) with KNOWN injected causes as ground truth, scores classifier
