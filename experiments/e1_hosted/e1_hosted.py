@@ -112,6 +112,10 @@ def tool_defs(provider: str) -> list[dict]:
     return out
 
 
+# OpenAI request knobs for diagnosing "unavailable" verdicts (set from flags).
+OPENAI_OPTS: dict = {"cache_key": True, "cache_options": None}
+
+
 class SessionState:
     """The request a harness would send, mutated in place turn by turn."""
 
@@ -170,10 +174,14 @@ class SessionState:
                     "tools": self.tools, "messages": msgs}
             body["tool_choice"] = {"type": "any"} if self.tool_choice_any else {"type": "auto"}
             return body
-        return {"model": self.model, "instructions": self.system_text(), "tools": self.tools,
+        body = {"model": self.model, "instructions": self.system_text(), "tools": self.tools,
                 "input": copy.deepcopy(self.history), "max_output_tokens": 16,
-                "text": {"verbosity": self.verbosity},
-                "prompt_cache_key": f"prefixwise-e1-{self.session_id}"}
+                "text": {"verbosity": self.verbosity}}
+        if OPENAI_OPTS["cache_key"]:
+            body["prompt_cache_key"] = f"prefixwise-e1-{self.session_id}"
+        if OPENAI_OPTS["cache_options"]:
+            body["prompt_cache_options"] = dict(OPENAI_OPTS["cache_options"])
+        return body
 
     def est_input_tokens(self) -> int:
         return len(json.dumps(self.body())) // EST_CHARS_PER_TOKEN
@@ -211,11 +219,13 @@ def mock_forward_factory(provider: str, state: dict):
         diag = None if injected == "first_write" else {"type": "cache_hit" if hit else "cache_miss",
                                                       "reason": reason}
         if provider == "anthropic":
+            # Real shape, observed live 2026-11-06: null on a hit, a nested
+            # cache_miss_reason on a miss.
             payload = {"id": f"msg_{request_id[:8]}",
                        "usage": {"input_tokens": tokens - cached, "cache_read_input_tokens": cached,
-                                 "cache_creation_input_tokens": 0, "output_tokens": 1}}
-            if diag:
-                payload["diagnostics"] = diag
+                                 "cache_creation_input_tokens": 0, "output_tokens": 1},
+                       "diagnostics": ({"cache_miss_reason": {"type": reason, "cache_missed_input_tokens": tokens}}
+                                       if reason else None)}
         else:
             payload = {"id": f"resp_{request_id[:8]}",
                        "usage": {"input_tokens": tokens, "input_tokens_details": {"cached_tokens": cached},
@@ -277,7 +287,9 @@ def run_provider(provider: str, *, model: str, alt_model: str | None, repeats: i
             row = {"provider": provider, "session": idx, "turn": turn, "model": sess.model,
                    "injected": injected, "predicted": result["cause"], "native_reason": native,
                    "native_type": native_type_from(payload),
-                   "real_miss": bool(prev_prompt) and cached < 0.5 * min(prev_prompt, prompt),
+                   # Previous usage absent (0)? Judge against this turn's own prompt.
+                   "real_miss": prompt > 0 and cached < 0.5 * (min(prev_prompt, prompt) if prev_prompt
+                                                                else prompt),
                    "native_mapped": (map_native_reason(provider, native).value
                                      if map_native_reason(provider, native) else None),
                    "agree_injected": result["cause"] == injected, "agree_native": agree_native,
@@ -293,7 +305,8 @@ def run_provider(provider: str, *, model: str, alt_model: str | None, repeats: i
             if probe:
                 print(json.dumps({k: row[k] for k in ("turn", "injected", "predicted", "native_type",
                                                       "native_reason", "real_miss", "prompt_tokens",
-                                                      "cached_tokens", "raw_diagnostics", "cache_fields",
+                                                      "cached_tokens", "raw_usage", "raw_diagnostics",
+                                                      "cache_fields",
                                                       "response_keys")}, indent=2))
     return results, score(results, scorer)
 
@@ -424,9 +437,16 @@ def main(argv: list[str] | None = None) -> int:
         ap.add_argument(f"--{p}-model", default=DEFAULT_MODELS[p][0])
         ap.add_argument(f"--{p}-alt-model", default=DEFAULT_MODELS[p][1],
                         help="second model for MODEL_SWITCH turns (omit to skip them)")
+    ap.add_argument("--openai-no-cache-key", action="store_true",
+                    help="do not send prompt_cache_key (diagnosing OpenAI 'unavailable')")
+    ap.add_argument("--openai-cache-options", default=None,
+                    help='extra prompt_cache_options as JSON, e.g. \'{"mode": "explicit"}\'; '
+                         "the proxy still chains comparison_response_id")
     ap.add_argument("--output-dir", default=str(Path(__file__).resolve().parent / "results"))
     args = ap.parse_args(argv)
     providers = [p.strip() for p in args.providers.split(",") if p.strip()]
+    OPENAI_OPTS["cache_key"] = not args.openai_no_cache_key
+    OPENAI_OPTS["cache_options"] = json.loads(args.openai_cache_options) if args.openai_cache_options else None
     models = {p: (getattr(args, f"{p}_model"), getattr(args, f"{p}_alt_model")) for p in providers}
     if args.estimate:
         print(json.dumps(estimate(providers, args.repeats, models), indent=2))

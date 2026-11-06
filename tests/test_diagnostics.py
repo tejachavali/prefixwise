@@ -47,3 +47,23 @@ def test_native_agreement_accepts_refinements_not_wrong_places():
     assert s.record(C.HISTORY_EDIT, "unavailable", "anthropic") is False
     assert s.record(C.ROUTING_MISS, "model_changed", "openai") is False
     assert s.record(C.NONE, "not_a_real_reason", "openai") is None  # unmapped: not scored
+
+
+def test_reads_anthropic_live_shape():
+    """Exact objects from the 2026-11-06 live probe (claude-haiku-5-5)."""
+    from prefixwise.proxy import native_reason_from, native_type_from
+
+    miss = {"id": "msg_x", "diagnostics": {"cache_miss_reason": {"type": "tools_changed",
+                                                                 "cache_missed_input_tokens": 9986}}}
+    hit = {"id": "msg_y", "diagnostics": None}
+    assert native_reason_from(miss) == "tools_changed" and native_type_from(miss) == "cache_miss"
+    assert native_reason_from(hit) is None and native_type_from(hit) is None
+
+
+def test_reads_openai_shapes_and_unavailable():
+    from prefixwise.proxy import native_reason_from, native_type_from
+
+    unavailable = {"prompt_cache_diagnostics": {"type": "unavailable"}}  # observed live 2026-11-06
+    assert native_reason_from(unavailable) is None and native_type_from(unavailable) == "unavailable"
+    miss = {"prompt_cache_diagnostics": {"type": "cache_miss", "reason": "tools_changed"}}  # documented
+    assert native_reason_from(miss) == "tools_changed"

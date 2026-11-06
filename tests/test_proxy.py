@@ -539,3 +539,17 @@ def test_moving_anthropic_breakpoint_is_not_a_history_edit():
     finally:
         server.shutdown()
         up.server.shutdown()
+
+
+def test_comparison_id_merged_into_client_cache_options():
+    up = ScriptedUpstream([responses_payload("resp_1", 2000, 0), responses_payload("resp_2", 2000, 1900)])
+    proxy, server, port = run_proxy(upstream_url=up.url)
+    try:
+        body = {"model": "m", "input": "hi", "session_id": "o", "prompt_cache_options": {"mode": "explicit"}}
+        post(port, "/v1/responses", body)
+        post(port, "/v1/responses", body)
+        assert up.requests[1]["body"]["prompt_cache_options"] == {"mode": "explicit",
+                                                                  "comparison_response_id": "resp_1"}
+    finally:
+        server.shutdown()
+        up.server.shutdown()

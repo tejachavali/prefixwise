@@ -252,26 +252,42 @@ def has_cache_breakpoint(body: dict) -> bool:
                for k in ("tools", "system", "messages"))
 
 
-def native_reason_from(payload: dict) -> str | None:
-    """Provider miss reason. OpenAI puts prompt_cache_diagnostics on the
-    response object; also checked: a top-level diagnostics object and,
-    for older shapes, inside usage."""
+def _diagnostic_objects(payload: dict):
     usage = payload.get("usage") or {}
     for diag in (payload.get("prompt_cache_diagnostics"), payload.get("diagnostics"),
                  usage.get("prompt_cache_diagnostics")):
-        if isinstance(diag, dict) and diag.get("reason"):
+        if isinstance(diag, dict):
+            yield diag
+
+
+def native_reason_from(payload: dict) -> str | None:
+    """The provider's own cache-miss reason, or None (a hit has none).
+
+    Anthropic (observed live 2026-11-06): {"diagnostics": {"cache_miss_reason":
+    {"type": "tools_changed", "cache_missed_input_tokens": N}}}, and
+    "diagnostics": null on a hit. OpenAI (documented): {"prompt_cache_diagnostics":
+    {"type": "cache_miss", "reason": "..."}}. Both shapes are read.
+    """
+    for diag in _diagnostic_objects(payload):
+        miss = diag.get("cache_miss_reason")
+        if isinstance(miss, dict) and miss.get("type"):
+            return str(miss["type"])
+        if isinstance(miss, str) and miss:
+            return miss
+        if diag.get("reason"):
             return str(diag["reason"])
     return None
 
 
 def native_type_from(payload: dict) -> str | None:
-    """The provider's diagnostic verdict type, when it gives one (OpenAI:
-    cache_hit, cache_miss, comparison_response_not_found, unavailable).
-    Distinct from the reason: a hit has a type but no reason."""
-    usage = payload.get("usage") or {}
-    for diag in (payload.get("prompt_cache_diagnostics"), payload.get("diagnostics"),
-                 usage.get("prompt_cache_diagnostics")):
-        if isinstance(diag, dict) and diag.get("type"):
+    """The provider's verdict type (OpenAI: cache_hit, cache_miss,
+    comparison_response_not_found, unavailable). Anthropic reports no type;
+    a cache_miss_reason means cache_miss. Distinct from the reason: a hit
+    has a type but no reason, and "unavailable" means no verdict at all."""
+    for diag in _diagnostic_objects(payload):
+        if diag.get("cache_miss_reason"):
+            return "cache_miss"
+        if diag.get("type"):
             return str(diag["type"])
     return None
 
@@ -424,8 +440,12 @@ class PrefixwiseProxy:
             previous_id = self.last_response_id.get(session_id)
         if provider == "anthropic":
             forward_body.update(anthropic_diagnostics(previous_id))
-        elif api == "responses" and previous_id and "prompt_cache_options" not in body:
-            forward_body.update(openai_comparison_options(previous_id))
+        elif api == "responses" and previous_id:
+            # Merge into the client's own prompt_cache_options; a comparison
+            # id the client chose wins.
+            opts = dict(body.get("prompt_cache_options") or {})
+            opts.setdefault("comparison_response_id", previous_id)
+            forward_body["prompt_cache_options"] = opts
         return {
             "provider": provider, "api": api, "body": body, "headers": headers,
             "forward_body": forward_body, "session_id": session_id,

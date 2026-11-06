@@ -195,7 +195,9 @@ def classify(prev: RequestSnapshot | None, curr: RequestSnapshot,
     min_prefix = curr.min_prefix_tokens
     if min_prefix is None:
         min_prefix = {"openai": OPENAI_MIN_PREFIX, "gemini": GEMINI_MIN_PREFIX}.get(curr.provider, None)
-    if min_prefix is not None and curr.prompt_tokens < min_prefix:
+    # 0 prompt tokens means usage was absent, not a short prompt: fall
+    # through to UNKNOWN rather than claim BELOW_MIN_PREFIX.
+    if min_prefix is not None and 0 < curr.prompt_tokens < min_prefix:
         return Classification(MissCause.BELOW_MIN_PREFIX, None,
                               f"cacheable prefix {curr.prompt_tokens} below provider minimum {min_prefix}",
                               secondary, native_reason)
@@ -207,6 +209,14 @@ def classify(prev: RequestSnapshot | None, curr: RequestSnapshot,
     if curr.breakpoint_after_volatile:
         return Classification(MissCause.BREAKPOINT_MISPLACED, False,
                               "breakpoint sits after a volatile block", secondary, native_reason)
+
+    # Every rule below reads usage. Usage absent (0 prompt tokens, seen live
+    # on OpenAI 2026-11-06) is no evidence of a hit, a retry or a routing
+    # miss: say UNKNOWN rather than guess from a zero.
+    if curr.prompt_tokens <= 0:
+        return Classification(MissCause.UNKNOWN, None,
+                              "blocks unchanged but the provider returned no usage; cannot tell hit from miss",
+                              secondary, native_reason)
 
     # Append-only turn: compare cache_read to the reusable prior prefix,
     # not to this turn's prompt, which includes the newly appended tail.

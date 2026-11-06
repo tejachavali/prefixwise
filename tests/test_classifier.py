@@ -178,3 +178,10 @@ def test_anthropic_string_and_text_block_content_fingerprint_the_same():
     assert [x.raw for x in fa] == [x.raw for x in fb]
     # OpenAI keeps the distinction (no such equivalence is documented there).
     assert extract_blocks(a, "openai") != extract_blocks(b, "openai")
+
+
+def test_absent_usage_is_unknown_not_below_min_prefix():
+    # Live probe 2026-11-06: an OpenAI turn came back with 0 prompt tokens.
+    prev = snap(prompt_tokens=5857)
+    curr = snap(prompt_tokens=0, cached_tokens=0, gap_seconds=2)
+    assert classify(prev, curr).cause is MissCause.UNKNOWN
