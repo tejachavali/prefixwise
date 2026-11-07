@@ -99,6 +99,7 @@ Avoidable tokens for a waste turn = the part of the previous turn's prompt that 
 |---|---|
 | `prefixwise serve [--upstream URL] [--mock] [--fix canonical_tools] [--host H] [--port P] [--ledger FILE]` | Run the proxy. Ledger defaults to `./prefixwise.db`. `--fix` applies an opt-in, reversible rewrite to every request (see below). |
 | `prefixwise prices [--json]` | The dated price table behind dollar costs, and where each rate came from. |
+| `prefixwise prune --older-than 30d` | Delete ledger entries older than that (retention). Add `--include-undated` to also drop rows written before 0.3.1. |
 | `prefixwise fixes [--json]` | The fixes that would save the most, ranked by the avoidable tokens your own ledger attributes to each cause. |
 | `prefixwise report [--by cause\|session_id\|agent_id\|model\|provider\|task_id] [--json]` | Totals and a breakdown, most avoidable first. |
 | `prefixwise task ID --success\|--failure` | Record a task outcome (safe while the proxy runs). |
@@ -120,7 +121,7 @@ Avoidable tokens for a waste turn = the part of the previous turn's prompt that 
 
 **Response headers:** `X-Prefixwise-Request-Id` always; `X-Prefixwise-Cause`, `X-Prefixwise-Legit`, `X-Prefixwise-Avoidable-Tokens` on non-streaming responses; `X-Prefixwise-Fixes` when a fix rewrote the request. Streamed requests are classified when the stream ends: read them from `GET /requests/<id>`.
 
-**Environment:** `PREFIXWISE_UPSTREAM_URL`, `PREFIXWISE_API_KEY` (overrides client auth; `x-api-key` for Anthropic), `PREFIXWISE_LEDGER_PATH`, `PREFIXWISE_HMAC_KEY` (HMAC short blocks so their hashes cannot be dictionary-guessed), `PREFIXWISE_MAX_SESSIONS` (default 10,000), `PREFIXWISE_FIXES` (e.g. `canonical_tools`), `PREFIXWISE_AUTH_TOKEN` (require `X-Prefixwise-Token`), `PREFIXWISE_MAX_BODY_BYTES`, `PREFIXWISE_PRICES` (your own rates file), `PORT`.
+**Environment:** `PREFIXWISE_UPSTREAM_URL`, `PREFIXWISE_API_KEY` (overrides client auth; `x-api-key` for Anthropic), `PREFIXWISE_LEDGER_PATH`, `PREFIXWISE_HMAC_KEY` (HMAC short blocks so their hashes cannot be dictionary-guessed), `PREFIXWISE_MAX_SESSIONS` (default 10,000), `PREFIXWISE_FIXES` (e.g. `canonical_tools`), `PREFIXWISE_AUTH_TOKEN` (require `X-Prefixwise-Token`), `PREFIXWISE_MAX_BODY_BYTES`, `PREFIXWISE_PRICES` (your own rates file), `PREFIXWISE_CLIENT_TIMEOUT` (default 120 s), `PREFIXWISE_DRAIN_SECONDS` (default 8), `PORT`.
 
 **Dollar costs.** Each request is priced from the provider's own usage breakdown (uncached input, cache reads, cache writes by TTL, output), using a dated price table: `prefixwise prices` shows it. *Avoidable cost* is the avoidable tokens times (input price − cache-read price): what they would have cost as cache hits. A model with no rates shows `-`, never an estimate. To add other models or your negotiated rates, write a JSON file in the same format (`prefixwise prices --json` prints one) and set `PREFIXWISE_PRICES=/path/prices.json`. Your entries override the built-in ones. `prefixwise report` and `prefixwise fixes` then show dollars, and say how many requests were priced.
 
@@ -134,6 +135,19 @@ Avoidable tokens for a waste turn = the part of the previous turn's prompt that 
 - **Limits:** request bodies over 32 MiB (`PREFIXWISE_MAX_BODY_BYTES`) get a 413, and malformed requests get a 400 naming the field.
 
 Found a vulnerability? See [SECURITY.md](SECURITY.md).
+
+## Running in production
+
+Measured by [`benchmarks/bench.py`](benchmarks/README.md) (results in [`benchmarks/runs/`](benchmarks/runs/)); rerun it on your own hardware.
+
+- **Added latency:** about 3 ms per request at a 2k-token prompt, 6 ms at 30k, 13 ms at 120k (p50; p95 under 22 ms). Streaming adds the same to time to first byte. A model call takes seconds, so this is well under 1%.
+- **Capacity:** one proxy process handles about 185 requests/s of agent-sized traffic before CPU-bound, with no errors up to 128 concurrent clients. An agent sends roughly one request every few seconds, so one process serves hundreds of agents at once. Session state lives in the process: to run several, route each session to the same instance (e.g. hash `X-Prefixwise-Session-Id`).
+- **Memory:** about 11 KB per tracked session, capped by `PREFIXWISE_MAX_SESSIONS` (default 10,000: roughly 100-150 MB). RSS stays flat once the cap is reached.
+- **It fails open.** If the ledger cannot be written (disk full, locked) or classification fails, the client still gets the upstream response, with `X-Prefixwise-Error: not recorded`; the proxy logs why to stderr. Upstream errors (429, 500, ...) reach the client unchanged, with `retry-after`, `x-should-retry`, rate-limit headers and the provider's request id, so SDK retries behave as without the proxy. An unreachable or broken upstream is a 502.
+- **Timeouts:** a client connection idle for `PREFIXWISE_CLIENT_TIMEOUT` seconds (default 120) is closed, so idle or half-sent connections cannot pin threads. Upstream calls time out after 600 s (long generations stream for minutes).
+- **Shutdown:** on SIGTERM (`docker stop`, systemd, Kubernetes) the proxy stops accepting connections, lets in-flight requests and streams finish for up to `PREFIXWISE_DRAIN_SECONDS` (default 8), then exits 0.
+- **Ledger growth and retention:** about 450 bytes per request (a million requests is about 450 MB); `prefixwise report` takes about 2 s at a million rows. Delete old rows with `prefixwise prune --older-than 30d`, e.g. from a daily cron. Back it up while the proxy runs with `sqlite3 prefixwise.db ".backup backup.db"`.
+- **Not built yet:** shared session state across processes, a metrics endpoint, and request logging (the proxy logs only errors).
 
 ## Limits
 

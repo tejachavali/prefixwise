@@ -46,6 +46,12 @@ Shared handoff between the agents working on Prefixwise. It says **what is being
 
 Report the summary lines and per-cause tables. Don't change code.
 
+**Production benchmark (Claude, 2026-11-07, PR #23).** Teja wants Prefixwise benchmarked and production-ready before any outreach. `benchmarks/bench.py` drives the real `prefixwise serve` with agent-shaped traffic against a fake upstream (no keys). It found and fixed 5 production problems: high overhead on long prompts (+50 ms at 120k tokens, now +13 ms), a ledger failure turning a paid response into a 500, `retry-after` and the provider request id dropped, idle sockets pinning threads forever, and `docker stop` killing streams. Also new: `prefixwise prune` for ledger retention. Results: `benchmarks/runs/`; summary in README "Running in production".
+
+**Muse, after the E1 re-check: two production runs.** Don't change code; report the printed summaries.
+1. **Live overhead (cents):** `python benchmarks/live_overhead.py --provider anthropic` with `ANTHROPIC_API_KEY` from Colab Secrets (then `--provider openai` with `OPENAI_API_KEY`). It sends 20 pairs, direct vs. through the proxy, interleaved. Pass = `cache hit share ... MATCH`, `ledger rows: 20/20`, and the added latency median (expect a few ms; network jitter can make it negative).
+2. **Benchmark on Colab hardware (free, ~25 min):** `python benchmarks/bench.py --soak 900`. Pass = exit code 0 (no request errors, all fault cases pass). Commit `benchmarks/runs/*` from Colab, or paste the `.md`.
+
 **Next for Claude:**
 1. ~~Per-model lanes~~: done, PR #21.
 2. **The product plan proposed to Teja on 2026-11-06:** `prefixwise run -- <cmd>`, a local web UI (money view, session timeline, prefix map), and live fix experiments. Waiting on Teja's go-ahead and choice of first audience.
@@ -137,3 +143,4 @@ Then a soft launch to a few people who run agents (Omni's founder is a candidate
 - **2026-11-07:** v0.3.0 released. PR #18 (dogfood fixes) and #19 (CHANGELOG) merged. Claude's tag push got HTTP 403 (this session can't create tags), so Muse created the GitHub release and the release workflow published to PyPI. Claude verified with a clean `pip install prefixwise==0.3.0`. A smoke test found a BrokenPipeError on `report | head`, fixed in PR #20.
 - **2026-11-07:** Claude: per-model lanes (PR #21). They exposed two things: one-shot side calls were being read as `history_edit` (fixed), and E1-open Session B reverted to pre-compaction history after the model switch (harness fixed). All mocks pass; live re-check requested from Muse.
 - **2026-11-07:** Muse task C: OpenAI prices read from developers.openai.com. Claude added them (PR #22) with a `valid_until` expiry for Sol's promotional price, and tightened model-id matching so `gpt-5.6-sol-pro` cannot borrow Sol's rates. Muse's Colab retry of the live E1 re-check and dogfood 2 is running.
+- **2026-11-07:** Teja: benchmark and make it production-ready before outreach. Claude built `benchmarks/` (overhead, throughput, memory, soak, 13 fault cases; live overhead vs. a real provider for Muse) and fixed what it found (PR #23): mask-hash cache (3-4x lower overhead on long prompts), fail-open on ledger errors, upstream retry and rate-limit headers relayed, client idle timeout, graceful SIGTERM drain, `prefixwise prune`. CI now runs the fault suite and checks `docker stop` exits 0.

@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **Production benchmark** (`benchmarks/bench.py`): added latency, throughput, memory, a soak and 13 failure cases, against the real `prefixwise serve` and a fake upstream. Results in `benchmarks/runs/`; README "Running in production" summarises them. CI runs the failure cases on every push.
+- **3-4x lower overhead on long prompts:** masked block hashes are cached, since an agent resends the same prefix every turn. A 120k-token request went from +50 ms to +13 ms (p50).
+- **Fails open:** a ledger write or classifier failure no longer turns a paid upstream response into a 500 (or, mid-stream, appends an error to the stream). The response passes through with `X-Prefixwise-Error: not recorded`.
+- **Upstream headers relayed:** `retry-after`, `retry-after-ms`, `x-should-retry`, rate-limit headers and the provider's request id now reach the client, on success, errors and streams. They were dropped, so SDKs could not honour the provider's backoff.
+- **Idle connections are closed** after `PREFIXWISE_CLIENT_TIMEOUT` (120 s). Before, 300 idle sockets held 300 threads forever.
+- **Graceful shutdown:** SIGTERM drains in-flight requests and streams (up to `PREFIXWISE_DRAIN_SECONDS`, 8 s) and exits 0. In Docker the proxy is PID 1, where an unhandled SIGTERM was ignored and `docker stop` killed it mid-stream after 10 s.
+- **Ledger retention:** entries record when they were written; `prefixwise prune --older-than 30d` deletes old ones.
 - **Per-model lanes within a session.** Each request is compared with the last request to the same model, so small-model side calls no longer mask causes on the main thread. Found by dogfooding opencode, which interleaves Haiku calls with Sonnet. A first call to a new model is still `model_switch`; switching back to a model whose prefix is still cached is a hit. Provider diagnostics chain to the same model's last response.
 - **Replacing a one-shot request is not a history edit:** a single-message request followed by a different one (side calls) is judged on its shared-prefix cache reuse.
 - **E1-open harness fix:** Session B turns 8–10 now keep the compacted history. They had reverted to the pre-compaction history, hidden by the model switch until lanes exposed it.

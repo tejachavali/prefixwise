@@ -35,7 +35,9 @@ import hashlib
 import hmac as hmac_mod
 import json
 import re
+import threading
 import unicodedata
+from collections import OrderedDict
 from dataclasses import dataclass, field
 
 BLOCK_ROLES = (
@@ -51,6 +53,11 @@ BLOCK_ROLES = (
 
 # Policy choice, not a verified fact (see module docstring).
 DEFAULT_SHORT_BLOCK_CHARS = 256
+
+# Masked hashes are memoised by canonical hash: an agent resends the same
+# system prompt, tools and history every turn, and masking (six regex passes)
+# was ~80% of the proxy's per-request CPU on long prompts. Bounded LRU.
+MASK_CACHE_ENTRIES = 32768
 
 _DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)?")
 _TIME_RE = re.compile(r"\b\d{1,2}:\d{2}(?::\d{2})?(?:\s*[AP]M)?\b", re.IGNORECASE)
@@ -113,6 +120,22 @@ class Fingerprinter:
 
     hmac_key: bytes | None = None
     short_block_chars: int = DEFAULT_SHORT_BLOCK_CHARS
+    _masked_cache: OrderedDict = field(default_factory=OrderedDict, repr=False, compare=False)
+    _cache_lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
+
+    def _masked_hash(self, canon: bytes, canon_hash: str, key: bytes | None) -> str:
+        # canon_hash already depends on key, so it is a safe cache key for either mode.
+        with self._cache_lock:
+            hit = self._masked_cache.get(canon_hash)
+            if hit is not None:
+                self._masked_cache.move_to_end(canon_hash)
+                return hit
+        masked = _hash(mask_volatiles(canon.decode("utf-8", "replace")).encode("utf-8"), key)
+        with self._cache_lock:
+            self._masked_cache[canon_hash] = masked
+            if len(self._masked_cache) > MASK_CACHE_ENTRIES:
+                self._masked_cache.popitem(last=False)
+        return masked
 
     def _is_short(self, raw: bytes) -> bool:
         return len(raw) <= self.short_block_chars
@@ -127,13 +150,12 @@ class Fingerprinter:
                                     masked=digest, byte_length=len(payload), hmac=bool(self.hmac_key))
         raw = raw_bytes(value)
         canon = canonical_bytes(value)
-        masked_text = mask_volatiles(canon.decode("utf-8", "replace"))
-        masked = masked_text.encode("utf-8")
         # HMAC replaces bare hashing for short/predictable blocks entirely.
         key = self.hmac_key if self._is_short(raw) else None
+        canon_hash = _hash(canon, key)
         return BlockFingerprint(
             role=role, index=index,
-            raw=_hash(raw, key), canonical=_hash(canon, key), masked=_hash(masked, key),
+            raw=_hash(raw, key), canonical=canon_hash, masked=self._masked_hash(canon, canon_hash, key),
             byte_length=len(raw), hmac=bool(key),
         )
 
