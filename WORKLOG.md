@@ -27,11 +27,11 @@ Shared handoff between the agents working on Prefixwise. It says **what is being
 
 | Milestone | Status | Evidence |
 |---|---|---|
-| E1-open: classifier names injected causes on live vLLM | **Pass** 2026-11-06: 120 turns, 100%, Qwen3-4B on vLLM 0.33.0, Colab L4 | `experiments/e1_open/runs/` |
-| E1-hosted, Anthropic: agrees with Anthropic's own miss diagnostics | **Pass** 2026-11-06: 37/37 diagnosed misses, all 7 injected miss causes, 60/60 hits, UNKNOWN 0 | `experiments/e1_hosted/runs/` |
+| E1-open: classifier names injected causes on live vLLM | **Pass** 2026-11-06: 120 turns, 100%, Qwen3-4B on vLLM 0.33.0, Colab L4. Re-passed 2026-11-07 with per-model lanes (120/120) | `experiments/e1_open/runs/` |
+| E1-hosted, Anthropic: agrees with Anthropic's own miss diagnostics | **Pass** 2026-11-06: 37/37 diagnosed misses, all 7 injected miss causes, 60/60 hits, UNKNOWN 0. Re-passed 2026-11-07 with lanes (20/20) | `experiments/e1_hosted/runs/` |
 | E1-hosted, OpenAI | **Blocked on OpenAI:** `prompt_cache_diagnostics` returns `unavailable` on every comparison (GPT-5.6 Luna/Sol/base, delays up to 120 s, completed baseline). Not a Prefixwise bug. | `experiments/e1_hosted/runs/2026-11-06-round4.md` |
 | E4: a fix saves what Prefixwise predicts, tasks still succeed | **Pass** 2026-11-06: `canonical_tools` 99.9% realised (Anthropic), 97.5% (vLLM); success flat (0/60, 1/60 changed) | `experiments/e4/runs/2026-11-06-live.md` |
-| Dogfood: real agent traffic | **Done** 2026-11-06: opencode, 25 requests, 92.9% cached, 0 avoidable; 4 rough edges found and fixed (PR #18) | `experiments/dogfood/2026-11-06-opencode.md` |
+| Dogfood: real agent traffic | **Done** 2026-11-06: opencode, 25 requests, 92.9% cached, 0 avoidable; 4 rough edges found and fixed (PR #18). Dogfood 2 (2026-11-07): 21 requests, 92.2% cached, 0 avoidable, fixes confirmed | `experiments/dogfood/2026-11-06-opencode.md` |
 | E2/E3 engine join, E5 compaction | Not started | README "Build order" |
 
 ## Now
@@ -40,15 +40,11 @@ Shared handoff between the agents working on Prefixwise. It says **what is being
 
 **Task C (OpenAI prices): done by Muse 2026-11-07,** added by Claude in PR #22. Luna, Terra and Sol are priced; Sol's promotional price expires after 2026-11-30; plain `gpt-5.6` has no published row and stays unpriced.
 
-**Muse, when convenient: re-check E1 live after per-model lanes (PR #21).** Lanes change one turn per Session B: the switch back to the original model now expects `none` (its prefix is still cached) instead of a second `model_switch`. The mocks pass; live confirmation:
-1. E1-hosted Anthropic, about 20 turns, cents: `python experiments/e1_hosted/e1_hosted.py --providers anthropic --repeats 1`. Expect injected agreement 100% and `switch_back` 1/1.
-2. E1-open on Colab (free), same steps as before. Expect 120 turns at 100%, with `switch_back` 5/5 and `model_switch` 5/5.
-
-Report the summary lines and per-cause tables. Don't change code.
+**Lanes re-check: all passed (Muse, 2026-11-07).** E1-hosted Anthropic 20 turns, 100% injected and native agreement; E1-open on Colab L4 120 turns, 100%, `switch_back` 5/5; dogfood 2 with opencode 92.2% cached, 0 avoidable, $0.2452, `/messages` path fix confirmed. Records: `experiments/e1_hosted/runs/2026-11-07-anthropic-lanes.md`, `experiments/e1_open/runs/2026-11-07-lanes.md`, `experiments/dogfood/2026-11-07-opencode-2.md`.
 
 **Production benchmark (Claude, 2026-11-07, PR #23).** Teja wants Prefixwise benchmarked and production-ready before any outreach. `benchmarks/bench.py` drives the real `prefixwise serve` with agent-shaped traffic against a fake upstream (no keys). It found and fixed 5 production problems: high overhead on long prompts (+50 ms at 120k tokens, now +13 ms), a ledger failure turning a paid response into a 500, `retry-after` and the provider request id dropped, idle sockets pinning threads forever, and `docker stop` killing streams. Also new: `prefixwise prune` for ledger retention. Results: `benchmarks/runs/`; summary in README "Running in production".
 
-**Muse, after the E1 re-check: two production runs.** Don't change code; report the printed summaries.
+**Muse, next: two production runs.** Don't change code; report the printed summaries.
 1. **Live overhead (cents):** `python benchmarks/live_overhead.py --provider anthropic` with `ANTHROPIC_API_KEY` from Colab Secrets (then `--provider openai` with `OPENAI_API_KEY`). It sends 20 pairs, direct vs. through the proxy, interleaved. Pass = `cache hit share ... MATCH`, `ledger rows: 20/20`, and the added latency median (expect a few ms; network jitter can make it negative).
 2. **Benchmark on Colab hardware (free, ~25 min):** `python benchmarks/bench.py --soak 900`. Pass = exit code 0 (no request errors, all fault cases pass). Commit `benchmarks/runs/*` from Colab, or paste the `.md`.
 
@@ -144,3 +140,4 @@ Then a soft launch to a few people who run agents (Omni's founder is a candidate
 - **2026-11-07:** Claude: per-model lanes (PR #21). They exposed two things: one-shot side calls were being read as `history_edit` (fixed), and E1-open Session B reverted to pre-compaction history after the model switch (harness fixed). All mocks pass; live re-check requested from Muse.
 - **2026-11-07:** Muse task C: OpenAI prices read from developers.openai.com. Claude added them (PR #22) with a `valid_until` expiry for Sol's promotional price, and tightened model-id matching so `gpt-5.6-sol-pro` cannot borrow Sol's rates. Muse's Colab retry of the live E1 re-check and dogfood 2 is running.
 - **2026-11-07:** Teja: benchmark and make it production-ready before outreach. Claude built `benchmarks/` (overhead, throughput, memory, soak, 13 fault cases; live overhead vs. a real provider for Muse) and fixed what it found (PR #23): mask-hash cache (3-4x lower overhead on long prompts), fail-open on ledger errors, upstream retry and rate-limit headers relayed, client idle timeout, graceful SIGTERM drain, `prefixwise prune`. CI now runs the fault suite and checks `docker stop` exits 0.
+- **2026-11-07:** Muse: lanes live re-check passed on all three (E1-hosted Anthropic 100%, E1-open 120/120, dogfood 2 92.2% cached, 0 waste). Records committed by Claude. Open: no live run yet with Haiku calls interleaved between Sonnet turns.
