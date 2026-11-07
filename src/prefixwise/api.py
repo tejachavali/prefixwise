@@ -11,6 +11,7 @@ the proxy. Responses are JSON; errors are {"error": {"message": ...}} with a 4xx
     GET  /api/v1/requests                      request rows, newest first, paginated
     GET  /api/v1/requests/{request_id}         one request
     GET  /api/v1/fixes                         fixes ranked by what they would save
+    GET  /api/v1/findings                      the plain-English report, as data
     GET  /api/v1/prices                        the price table behind the dollars
     POST /api/v1/tasks                         {"task_id", "success"}: record an outcome
     POST /api/v1/explain                       {"previous", "current"}: why would it miss?
@@ -103,6 +104,10 @@ def get(proxy, path: str, query: str) -> tuple[int, dict]:
             return 200, {"request": row}
         if sub == "/fixes":
             return 200, recommend(led)
+        if sub == "/findings":
+            from .findings import findings
+            return 200, {"findings": findings(led, since=_time(p.get("since"), "since"),
+                                              until=_time(p.get("until"), "until"))}
         if sub == "/prices":
             return 200, {"as_of": proxy.prices.as_of, "sources": proxy.prices.sources,
                          "models": proxy.prices.models}

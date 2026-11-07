@@ -405,7 +405,7 @@ class PrefixwiseProxy:
     def __init__(self, ledger_path: str = ":memory:", hmac_key: bytes | None = None,
                  upstream_url: str | None = None, api_key: str | None = None,
                  mock: bool | None = None, fixes: str | list[str] | tuple[str, ...] | None = None,
-                 prices: str | None = None):
+                 prices: str | None = None, upstreams: dict[str, str] | None = None):
         self.ledger = Ledger(ledger_path)
         # Opt-in request rewrites (see fixes.py). Off unless named here or
         # in PREFIXWISE_FIXES; turning them off restores pass-through.
@@ -417,9 +417,17 @@ class PrefixwiseProxy:
         self.fingerprinter = Fingerprinter(hmac_key=hmac_key)
         self.scorer = AgreementScorer()
         self.upstream_url = (upstream_url or os.environ.get("PREFIXWISE_UPSTREAM_URL") or "").rstrip("/")
+        # Per-provider upstreams ({"anthropic": url, "openai": url}) override upstream_url, so
+        # one proxy can serve an agent that talks to both (prefixwise run).
+        self.upstreams = {k: v.rstrip("/") for k, v in (upstreams or {}).items() if v}
+        # Providers whose upstream base already ends in its API version, like an
+        # OPENAI_BASE_URL (https://api.openai.com/v1, or a gateway's .../openai):
+        # requests go to <base>/chat/completions, exactly as the SDK would send them.
+        self.versioned = set()
         self.api_key = api_key or os.environ.get("PREFIXWISE_API_KEY")
         self.mock = mock if mock is not None else (
-            not self.upstream_url or os.environ.get("PREFIXWISE_MOCK_UPSTREAM") == "1")
+            not (self.upstream_url or self.upstreams) or os.environ.get("PREFIXWISE_MOCK_UPSTREAM") == "1")
+        self.default_session = "default"  # for requests that carry no session id
         # Per-session state, shared across the threaded server's handlers.
         # Every read and write holds self._lock: the classifier must compare
         # a turn with the turn recorded just before it, never a torn state.
@@ -456,7 +464,7 @@ class PrefixwiseProxy:
             if headers.get(h) and len(headers[h]) > MAX_ID_CHARS:
                 raise ClientError(f"{h} is longer than {MAX_ID_CHARS} characters")
         session_id = str(headers.get("x-prefixwise-session-id") or body.get("session_id")
-                         or (body.get("metadata") or {}).get("user_id") or "default")
+                         or (body.get("metadata") or {}).get("user_id") or self.default_session)
         task_id = headers.get("x-prefixwise-task-id") or body.get("task_id")
         forward_body = {k: v for k, v in body.items()
                         if k not in PREFIXWISE_FIELDS or (provider == "vllm" and k == "session_id")}
@@ -736,8 +744,15 @@ class PrefixwiseProxy:
         query = client_headers.get(QUERY_KEY)
         if query:  # e.g. Anthropic SDK's ?beta=true: forwarded as the client sent it
             path += "?" + query
-        return urllib.request.Request(self.upstream_url + path, method="POST",
+        return urllib.request.Request(self.target(provider, path), method="POST",
                                       data=json.dumps(body).encode(), headers=headers)
+
+    def target(self, provider: str, path: str) -> str:
+        """The upstream URL for a request path like /v1/chat/completions."""
+        key = "anthropic" if provider == "anthropic" else "openai"
+        if key in self.versioned and path.startswith("/v1/"):
+            path = path[3:]
+        return self.upstreams.get(key, self.upstream_url) + path
 
     def passthrough(self, method: str, raw_path: str, body: bytes | None,
                     client_headers: dict[str, str]) -> tuple[int, str, bytes]:
@@ -766,8 +781,8 @@ class PrefixwiseProxy:
                 headers["authorization"] = f"Bearer {self.api_key}"
         if anthropic:
             headers.setdefault("anthropic-version", ANTHROPIC_VERSION)
-        req = urllib.request.Request(self.upstream_url + raw_path, method=method, data=body or None,
-                                     headers=headers)
+        req = urllib.request.Request(self.target("anthropic" if anthropic else "openai", raw_path),
+                                     method=method, data=body or None, headers=headers)
         try:
             with urllib.request.urlopen(req, timeout=UPSTREAM_TIMEOUT) as resp:
                 self._upstream.headers = relay_headers(resp.headers)
