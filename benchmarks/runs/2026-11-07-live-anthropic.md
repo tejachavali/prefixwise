@@ -22,6 +22,4 @@ single-request jitter. More pairs, or the same network path, would narrow it.
 **First attempt** (same day) stopped at pair 5 on a bug in the script (cache breakpoints
 accumulated in the session history; fixed in PR #26). Pairs 1-4 there: both sides 98% cached.
 
-**OpenAI:** the first attempt was rejected by OpenAI on the direct request (GPT-5.6 Luna on
-chat completions refuses function tools unless `reasoning_effort` is `none`); the script now
-sends it. Not yet re-run.
+**OpenAI:** passed the same check after a script fix; see `2026-11-07-live-openai.md`.
