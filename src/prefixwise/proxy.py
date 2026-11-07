@@ -427,14 +427,32 @@ class StreamAccumulator:
             self.saw_usage = True
 
 
+def _spans(setting):
+    """OpenTelemetry export (prefixwise.otel), or None when off or unavailable."""
+    from .otel import mode_from
+
+    mode = mode_from(setting)
+    if mode is None:
+        return None
+    try:
+        from .otel import Spans
+        return Spans(mode)
+    except ImportError:
+        print("prefixwise: PREFIXWISE_OTEL is set but OpenTelemetry is not installed; "
+              "pip install 'prefixwise[otel]'", file=sys.stderr)
+        return None
+
+
 class PrefixwiseProxy:
     def __init__(self, ledger_path: str = ":memory:", hmac_key: bytes | None = None,
                  upstream_url: str | None = None, api_key: str | None = None,
                  mock: bool | None = None, fixes: str | list[str] | tuple[str, ...] | None = None,
                  prices: str | None = None, engine: str | None = None, kv_events: str | None = None,
-                 upstreams: dict[str, str] | None = None, full_attention: bool | None = None):
+                 upstreams: dict[str, str] | None = None, full_attention: bool | None = None,
+                 otel: bool | str | None = None):
         self.ledger = Ledger(ledger_path)
         self.metrics = Metrics()  # GET /metrics (Prometheus), fed by every recorded row
+        self.spans = _spans(otel if otel is not None else os.environ.get("PREFIXWISE_OTEL"))
         # Self-hosted engine behind the proxy (vllm, sglang), and its KV-event
         # stream for the engine join (prefixwise.engines).
         self.engine = engine or os.environ.get("PREFIXWISE_ENGINE") or None
@@ -705,8 +723,11 @@ class PrefixwiseProxy:
             ctx["engine_verdict"] = self.engine_events.request_done(
                 ctx["engine_token"], cached if reported else None, prompt_tokens)
         with self._lock:
-            return self._finalize_locked(ctx, status, payload, usage, prompt_tokens, cached,
-                                         native_reason, response_id, fps)
+            result = self._finalize_locked(ctx, status, payload, usage, prompt_tokens, cached,
+                                           native_reason, response_id, fps)
+        if self.spans is not None:  # outside the lock; never raises
+            self.spans.export(ctx, result[1], payload, default_session=self.default_session)
+        return result
 
     def finalize_safely(self, ctx: dict, status: int, payload: dict) -> tuple[dict, LedgerEntry | None]:
         """finalize(), failing open: the client already paid for this response,
@@ -893,6 +914,9 @@ class PrefixwiseProxy:
             status=status, error=str(kind)[:80], api=ctx.get("api"), stream=ctx.get("stream"),
             latency_ms=ctx.get("upstream_ms"), overhead_ms=self._overhead_ms(ctx))
         self.metrics.observe(entry)  # counted even if the ledger write fails
+        if self.spans is not None:
+            self.spans.export(ctx, entry, payload if isinstance(payload, dict) else None,
+                              default_session=self.default_session)
         with self._lock:
             self._release_prefix(ctx)
         try:
@@ -1542,13 +1566,15 @@ def serve(host: str = "127.0.0.1", port: int = 8080, *, ledger_path: str | None 
           upstream_url: str | None = None, mock: bool | None = None, quiet: bool = False,
           fixes: str | list[str] | None = None, auth_token: str | None = None,
           allow_unauthenticated: bool = False, prices: str | None = None,
-          engine: str | None = None, kv_events: str | None = None, full_attention: bool | None = None):
+          engine: str | None = None, kv_events: str | None = None, full_attention: bool | None = None,
+          otel: bool | str | None = None):
     """Run the proxy until interrupted. Settings fall back to PREFIXWISE_* env vars."""
     hmac_key = os.environ.get("PREFIXWISE_HMAC_KEY")
     ledger_path = ledger_path or os.environ.get("PREFIXWISE_LEDGER_PATH", ":memory:")
     proxy = PrefixwiseProxy(ledger_path=ledger_path, upstream_url=upstream_url, mock=mock,
                             hmac_key=hmac_key.encode() if hmac_key else None, fixes=fixes,
-                            prices=prices, engine=engine, kv_events=kv_events, full_attention=full_attention)
+                            prices=prices, engine=engine, kv_events=kv_events, full_attention=full_attention,
+                            otel=otel)
     proxy.auth_token = auth_token or os.environ.get("PREFIXWISE_AUTH_TOKEN") or None
     exposed = not _is_loopback(host)
     if exposed and not proxy.auth_token and proxy.api_key and not proxy.mock and not allow_unauthenticated:
@@ -1578,6 +1604,10 @@ def serve(host: str = "127.0.0.1", port: int = 8080, *, ledger_path: str | None 
             print(f"  note:     start {proxy.engine} with {flag}, or every turn looks like a miss")
         print(f"  auth:     {'X-Prefixwise-Token required' if proxy.auth_token else 'none'}"
               + ("  (WARNING: listening beyond localhost without a token)" if exposed and not proxy.auth_token else ""))
+        if proxy.spans is not None:
+            where = (os.environ.get("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
+                     or os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT") or "your tracer provider, or OTLP default")
+            print(f"  otel:     a span per request ({proxy.spans.mode}) -> {where}")
         if not os.environ.get("PREFIXWISE_HMAC_KEY"):
             print("  note:     set PREFIXWISE_HMAC_KEY so hashes of short prompt blocks cannot be guessed")
         print("  POST /v1/chat/completions  POST /v1/responses  POST /v1/messages  POST /tasks")

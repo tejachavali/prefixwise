@@ -250,6 +250,8 @@ Every number Prefixwise shows is also data. Each request leaves a row of facts (
 
 **Prometheus and Grafana:** `GET /metrics` exports requests, tokens, avoidable tokens and dollars by provider, model and miss cause, plus Prefixwise's own latency and the KV-event stream's health. Import the Grafana dashboard ([`deploy/grafana/prefixwise.json`](deploy/grafana/prefixwise.json)) and the alert rules (hit rate below 80%, avoidable share above 10%, failures, lost KV events: [`deploy/prometheus/prefixwise-rules.yml`](deploy/prometheus/prefixwise-rules.yml)). Setup and queries: [docs/prometheus.md](docs/prometheus.md).
 
+**OpenTelemetry:** `PREFIXWISE_OTEL=1` (or `prefixwise serve --otel`) exports a span per request, following OpenTelemetry's GenAI semantic conventions (`chat {model}`, `gen_ai.usage.cache_read.input_tokens` and `cache_write.input_tokens`), with Prefixwise's verdict on it: `prefixwise.cache.cause`, `.detail`, `.avoidable_tokens`, `.avoidable_cost_usd`. Works the same from the proxy, `prefixwise.wrap` and the LiteLLM callback; through the proxy, a request with a `traceparent` header lands in the caller's trace. Spans go to your app's tracer provider, else over OTLP (`OTEL_EXPORTER_OTLP_ENDPOINT`; `pip install 'prefixwise[otel]'`). Already tracing your LLM calls? `PREFIXWISE_OTEL=cause` adds only Prefixwise's attributes, so tokens are not counted twice. Details: [docs/opentelemetry.md](docs/opentelemetry.md).
+
 ## Security
 
 - **What it stores:** the ledger keeps fingerprints of prompt blocks (hashes), token counts, causes, and your session, task and agent labels. It never stores prompt text or API keys. The ledger file is created readable by its owner only. Set `PREFIXWISE_HMAC_KEY` so hashes of short, guessable blocks are keyed.
@@ -337,7 +339,7 @@ Measured by [`benchmarks/bench.py`](benchmarks/README.md) (results in [`benchmar
 - **Timeouts:** a client connection idle for `PREFIXWISE_CLIENT_TIMEOUT` seconds (default 120) is closed, so idle or half-sent connections cannot pin threads. Upstream calls time out after 600 s (long generations stream for minutes).
 - **Shutdown:** on SIGTERM (`docker stop`, systemd, Kubernetes) the proxy stops accepting connections, lets in-flight requests and streams finish for up to `PREFIXWISE_DRAIN_SECONDS` (default 8), then exits 0.
 - **Ledger growth and retention:** about 450 bytes per request (a million requests is about 450 MB); `prefixwise report` takes about 2 s at a million rows. Delete old rows with `prefixwise prune --older-than 30d`, e.g. from a daily cron. Back it up while the proxy runs with `sqlite3 prefixwise.db ".backup backup.db"`.
-- **Not built yet:** shared session state across processes, a metrics endpoint, and request logging (the proxy logs only errors).
+- **Not built yet:** shared session state across processes, and request logging (the proxy logs only errors; metrics: `GET /metrics`, traces: OpenTelemetry, above).
 
 ## Limits
 

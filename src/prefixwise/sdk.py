@@ -76,6 +76,8 @@ class Recorder:
             if tid:
                 headers["x-prefixwise-task-id"] = str(tid)
             ctx = self.proxy.prepare(provider, dict(request), headers, api=api)
+            if latency_ms is not None:  # the call is already over: its span starts when it was sent
+                ctx["span_start"] = time.time() - latency_ms / 1000
             self.proxy.response_started(ctx)
             ctx["upstream_ms"] = latency_ms if latency_ms is not None else 0.0
             _, entry = self.proxy.finalize_safely(ctx, 200, response)

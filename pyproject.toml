@@ -36,7 +36,8 @@ prefixwise-proxy = "prefixwise.proxy:serve"
 
 [project.optional-dependencies]
 engines = ["pyzmq>=25", "msgspec>=0.18"]
-dev = ["pytest", "pyzmq>=25", "msgspec>=0.18", "prometheus-client", "openai", "anthropic", "litellm"]
+otel = ["opentelemetry-sdk>=1.30", "opentelemetry-exporter-otlp-proto-http>=1.30"]
+dev = ["pytest", "pyzmq>=25", "msgspec>=0.18", "prometheus-client", "openai", "anthropic", "litellm", "opentelemetry-sdk>=1.30"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/prefixwise"]
