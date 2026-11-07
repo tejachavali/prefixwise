@@ -6,5 +6,7 @@ from .classifier import MissCause, classify
 from .diagnostics import AgreementScorer
 from .fingerprint import Fingerprinter, fingerprint_blocks
 from .ledger import Ledger
+from .sdk import Recorder, session, wrap
 
-__all__ = ["__version__", "MissCause", "classify", "AgreementScorer", "Fingerprinter", "fingerprint_blocks", "Ledger"]
+__all__ = ["__version__", "MissCause", "classify", "AgreementScorer", "Fingerprinter", "fingerprint_blocks", "Ledger",
+           "Recorder", "session", "wrap"]
