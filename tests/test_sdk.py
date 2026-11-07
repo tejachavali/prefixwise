@@ -93,7 +93,8 @@ def test_recording_can_never_break_a_call(server, capsys):
     assert capsys.readouterr().err.count("could not record a call") == 1
 
 
-def test_wrap_is_idempotent_and_rejects_other_objects(server):
+def test_wrap_is_idempotent_and_rejects_other_objects(server, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
     rec = Recorder(":memory:")
     client = openai.OpenAI(base_url=server + "/v1", api_key="sk-test")
     prefixwise.wrap(prefixwise.wrap(client, recorder=rec), recorder=rec)
@@ -101,6 +102,7 @@ def test_wrap_is_idempotent_and_rejects_other_objects(server):
     assert len(rows(rec)) == 1  # wrapped once, recorded once
     with pytest.raises(TypeError):
         prefixwise.wrap(object())
+    assert not (tmp_path / "prefixwise.db").exists()  # rejected before any ledger is created
 
 
 def test_fixes_are_never_applied_to_what_is_recorded(monkeypatch):

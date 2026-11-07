@@ -133,6 +133,35 @@ prefixwise serve --upstream http://127.0.0.1:8000        # vLLM / any OpenAI-com
 docker build -t prefixwise . && docker run -p 127.0.0.1:8080:8080 -v pw:/data prefixwise   # mock in Docker
 ```
 
+### In your own code, or behind LiteLLM: no proxy
+
+Wrap the SDK client you already have. Calls go straight to the provider, unchanged; each completed call is classified and recorded exactly as the proxy would:
+
+```python
+import prefixwise
+from anthropic import Anthropic                       # or OpenAI(), AsyncOpenAI(), AsyncAnthropic()
+
+client = prefixwise.wrap(Anthropic())                 # ledger: ./prefixwise.db (or PREFIXWISE_LEDGER_PATH)
+with prefixwise.session("fix-bug-42", task_id="fix-bug-42"):
+    client.messages.create(...)                       # then `prefixwise report`, as above
+```
+
+Every call through **LiteLLM** (the SDK or its proxy server), with no change to your calls:
+
+```python
+import litellm
+from prefixwise.litellm_callback import PrefixwiseCallback
+litellm.callbacks = [PrefixwiseCallback()]
+```
+
+```yaml
+# LiteLLM proxy server, config.yaml
+litellm_settings:
+  callbacks: prefixwise.litellm_callback.prefixwise_callback
+```
+
+Sessions come from LiteLLM's `litellm_session_id`, else `metadata={"session_id": ..., "task_id": ..., "agent_id": ...}`, else `user`. Both record non-streamed calls for now (streams pass through unrecorded), never change a request (fixes are a proxy feature), and can never break a call: a recording failure is reported once and ignored. Through LiteLLM, Anthropic's 5-minute / 1-hour split of cache writes is not passed on, so `ttl_shortened` is not claimed there.
+
 **More: [docs/USE_CASES.md](docs/USE_CASES.md)** walks through eight concrete scenarios: a bill that jumped, a CI gate on prompt changes, A/B-testing prompt versions per successful task, Anthropic TTL choice, self-hosted vLLM, and more.
 
 ## What it tells you

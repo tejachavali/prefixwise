@@ -147,14 +147,14 @@ def wrap(client, *, recorder: Recorder | None = None, agent_id: str | None = Non
 
     Anthropic / AsyncAnthropic: messages.create. OpenAI / AsyncOpenAI (and OpenAI-compatible
     servers through the openai SDK): chat.completions.create and responses.create."""
-    recorder = recorder or default_recorder()
     module = type(client).__module__.split(".")[0]
+    if module not in ("anthropic", "openai"):
+        raise TypeError(f"prefixwise.wrap: expected an Anthropic or OpenAI client, got {type(client).__name__}")
+    recorder = recorder or default_recorder()
     if module == "anthropic":
         _patch(client.messages, "create", "anthropic", "chat", recorder, agent_id)
     elif module == "openai":
         _patch(client.chat.completions, "create", "openai", "chat", recorder, agent_id)
         if getattr(client, "responses", None) is not None:
             _patch(client.responses, "create", "openai", "responses", recorder, agent_id)
-    else:
-        raise TypeError(f"prefixwise.wrap: expected an Anthropic or OpenAI client, got {type(client).__name__}")
     return client

@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- **`prefixwise.wrap(client)`: Prefixwise in your own code, no proxy.** Wrap an `Anthropic`, `AsyncAnthropic`, `OpenAI` or `AsyncOpenAI` client (`messages.create`; `chat.completions.create` and `responses.create`); calls go to the provider unchanged and each completed one is classified and recorded exactly as the proxy would, into the same ledger. `prefixwise.session(id, task_id=...)` groups calls. Tested with the real SDKs over HTTP.
+- **LiteLLM callback.** `litellm.callbacks = [PrefixwiseCallback()]`, or `callbacks: prefixwise.litellm_callback.prefixwise_callback` in the LiteLLM proxy server's config, records every completed chat call. Anthropic-backed calls are rebuilt into Anthropic's shape (LiteLLM's `prompt_tokens` includes cache reads and writes; they are not counted twice) so Anthropic's rules and prices apply. Breakpoints LiteLLM injects itself (`cache_control_injection_points`) are never reported missing. Tested with LiteLLM 1.108 against a mock server, including its proxy server's config loader.
+- Both record non-streamed calls for now, never apply fixes, and can never break a call (`Recorder` is the shared machinery for other integrations).
+
 ## 0.5.0: 2026-11-07
 
 Built from research into what model labs, engine maintainers and agent users report about
