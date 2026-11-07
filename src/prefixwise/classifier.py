@@ -310,3 +310,26 @@ def classify_first_divergence(changed_role: str | None, *, model_changed: bool =
     if changed_role == "tool_results":
         return MissCause.TOOL_RESULT_MUTATION
     return MissCause.UNKNOWN
+
+
+def first_divergence(prev: list, curr: list) -> dict | None:
+    """Locate the first block, in prefix order, where two requests differ."""
+    for i, (a, b) in enumerate(zip(prev, curr)):
+        if a.role != b.role:
+            return {"index": i, "role": f"{a.role} -> {b.role}", "kind": "block order changed"}
+        if a.raw == b.raw:
+            continue
+        if a.canonical == b.canonical:
+            kind = "same content, different bytes (key order / whitespace / serialization)"
+        elif a.masked == b.masked:
+            kind = "only volatile values changed (dates, times, ids, numbers)"
+        else:
+            kind = "content changed"
+        return {"index": i, "role": a.role, "kind": kind}
+    if len(curr) > len(prev):
+        return {"index": len(prev), "role": curr[len(prev)].role,
+                "kind": "appended after the previous request (normal growth, not a divergence)"}
+    if len(curr) < len(prev):
+        return {"index": len(curr), "role": prev[len(curr)].role,
+                "kind": "previous blocks removed (history truncated or compacted)"}
+    return None

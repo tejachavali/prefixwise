@@ -56,11 +56,12 @@ import urllib.request
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from .classifier import Classification, MissCause, RequestSnapshot, classify
+from .classifier import Classification, MissCause, RequestSnapshot, classify, first_divergence
 from .diagnostics import AgreementScorer, anthropic_diagnostics, openai_comparison_options
 from .fingerprint import Fingerprinter
 from .fixes import apply_fixes, parse_fixes
-from .pricing import PriceTable
+from . import api
+from .pricing import PriceTable, breakdown
 from .ledger import Ledger, LedgerEntry, avoidable_for_turn
 
 
@@ -404,7 +405,8 @@ class PrefixwiseProxy:
     def __init__(self, ledger_path: str = ":memory:", hmac_key: bytes | None = None,
                  upstream_url: str | None = None, api_key: str | None = None,
                  mock: bool | None = None, fixes: str | list[str] | tuple[str, ...] | None = None,
-                 prices: str | None = None, engine: str | None = None, kv_events: str | None = None):
+                 prices: str | None = None, engine: str | None = None, kv_events: str | None = None,
+                 upstreams: dict[str, str] | None = None):
         self.ledger = Ledger(ledger_path)
         # Self-hosted engine behind the proxy (vllm, sglang), and its KV-event
         # stream for the engine join (prefixwise.engines).
@@ -429,9 +431,17 @@ class PrefixwiseProxy:
         self.fingerprinter = Fingerprinter(hmac_key=hmac_key)
         self.scorer = AgreementScorer()
         self.upstream_url = (upstream_url or os.environ.get("PREFIXWISE_UPSTREAM_URL") or "").rstrip("/")
+        # Per-provider upstreams ({"anthropic": url, "openai": url}) override upstream_url, so
+        # one proxy can serve an agent that talks to both (prefixwise run).
+        self.upstreams = {k: v.rstrip("/") for k, v in (upstreams or {}).items() if v}
+        # Providers whose upstream base already ends in its API version, like an
+        # OPENAI_BASE_URL (https://api.openai.com/v1, or a gateway's .../openai):
+        # requests go to <base>/chat/completions, exactly as the SDK would send them.
+        self.versioned = set()
         self.api_key = api_key or os.environ.get("PREFIXWISE_API_KEY")
         self.mock = mock if mock is not None else (
-            not self.upstream_url or os.environ.get("PREFIXWISE_MOCK_UPSTREAM") == "1")
+            not (self.upstream_url or self.upstreams) or os.environ.get("PREFIXWISE_MOCK_UPSTREAM") == "1")
+        self.default_session = "default"  # for requests that carry no session id
         # Per-session state, shared across the threaded server's handlers.
         # Every read and write holds self._lock: the classifier must compare
         # a turn with the turn recorded just before it, never a torn state.
@@ -468,7 +478,7 @@ class PrefixwiseProxy:
             if headers.get(h) and len(headers[h]) > MAX_ID_CHARS:
                 raise ClientError(f"{h} is longer than {MAX_ID_CHARS} characters")
         session_id = str(headers.get("x-prefixwise-session-id") or body.get("session_id")
-                         or (body.get("metadata") or {}).get("user_id") or "default")
+                         or (body.get("metadata") or {}).get("user_id") or self.default_session)
         task_id = headers.get("x-prefixwise-task-id") or body.get("task_id")
         forward_body = {k: v for k, v in body.items() if k not in PREFIXWISE_FIELDS}
         # E1-open retry turns: a harness-only upstream session id.
@@ -525,6 +535,7 @@ class PrefixwiseProxy:
             "compaction_event": bool(body.get("prefixwise_compaction_event", False))
             or headers.get("x-prefixwise-compaction-event") in ("1", "true"),
             "stream": bool(body.get("stream")),
+            "t0": time.perf_counter(),  # for latency and Prefixwise's own overhead
             "fixes_applied": fixes_applied,
             "fork_of": headers.get("x-prefixwise-fork-of"),
             "ttl_seconds": cache_ttl_seconds(provider, body, headers),
@@ -562,6 +573,7 @@ class PrefixwiseProxy:
         except Exception as exc:
             print(f"prefixwise: request {ctx['request_id']} passed through unrecorded: "
                   f"{type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
+            self.record_failure(ctx, status, error="not_recorded")  # at least a row, if the ledger works
             return {"request_id": ctx["request_id"], "status": status, "cause": None,
                     "recorded": False, "response": payload}, None
 
@@ -634,6 +646,8 @@ class PrefixwiseProxy:
             if ctx.get("api") == "responses":
                 self.snapshot_by_response[response_id] = curr
 
+        parts = breakdown(provider, usage)
+        div = first_divergence(prev.blocks, curr.blocks) if prev is not None else None
         entry = LedgerEntry(
             session_id=session_id, agent_id=ctx["agent_id"],
             provider=provider, model=ctx["model"], cause=result.cause.value,
@@ -645,11 +659,19 @@ class PrefixwiseProxy:
             task_id=ctx["task_id"], request_id=ctx["request_id"],
             completion_tokens=completion_tokens_of(provider, usage),
             fixes=",".join(ctx.get("fixes_applied") or []) or None,
+            status=status, api=ctx.get("api"), stream=ctx.get("stream"),
+            uncached_tokens=parts.uncached_input,
+            cache_write_tokens=parts.cache_write_5m + parts.cache_write_1h + parts.cache_write,
+            latency_ms=ctx.get("upstream_ms"), gap_seconds=gap_seconds,
+            evidence=result.evidence,
+            secondary_causes=",".join(c.value for c in result.secondary) or None,
+            divergence_role=div["role"] if div else None, divergence_index=div["index"] if div else None,
         )
         priced_model = str(payload.get("model") or ctx["model"])
         entry.avoidable_cost = self.prices.avoidable_cost(priced_model, entry.avoidable_tokens, prompt_tokens)
         if entry.cost is not None:
             entry.price_as_of = self.prices.as_of
+        entry.overhead_ms = self._overhead_ms(ctx)
         self.ledger.record(entry)
         return {"request_id": ctx["request_id"], "status": status, "cause": result.cause.value,
                 "legit": result.legit, "native_reason": native_reason, "usage": usage,
@@ -657,6 +679,31 @@ class PrefixwiseProxy:
                 "avoidable_tokens": entry.avoidable_tokens, "fixes_applied": ctx.get("fixes_applied") or [],
                 "cost": entry.cost, "avoidable_cost": entry.avoidable_cost, "evidence": result.evidence,
                 "response": payload}, entry
+
+    @staticmethod
+    def _overhead_ms(ctx: dict) -> float | None:
+        """Prefixwise's own time: everything since the request arrived, minus upstream."""
+        if "t0" not in ctx or ctx.get("upstream_ms") is None:
+            return None
+        return max(0.0, (time.perf_counter() - ctx["t0"]) * 1000 - ctx["upstream_ms"])
+
+    def record_failure(self, ctx: dict, status: int, payload: dict | None = None,
+                       error: str | None = None) -> None:
+        """A request that produced no verdict (upstream error, cut-off stream) is a
+        row too, so error rates exist and every other rate has an honest
+        denominator (docs/DATA.md). Never fails the request."""
+        err = (payload or {}).get("error") if isinstance(payload, dict) else None
+        kind = error or (err.get("type") if isinstance(err, dict) else None) or f"http_{status}"
+        try:
+            self.ledger.record(LedgerEntry(
+                session_id=ctx["session_id"], agent_id=ctx["agent_id"], provider=ctx["provider"],
+                model=ctx["model"], cause=None, prompt_tokens=0, cached_tokens=0, avoidable_tokens=0,
+                avoidable_cost=None, task_id=ctx["task_id"], request_id=ctx["request_id"],
+                status=status, error=str(kind)[:80], api=ctx.get("api"), stream=ctx.get("stream"),
+                latency_ms=ctx.get("upstream_ms"), overhead_ms=self._overhead_ms(ctx)))
+        except Exception as exc:
+            print(f"prefixwise: failure for {ctx['request_id']} not recorded: {type(exc).__name__}",
+                  file=sys.stderr, flush=True)
 
     # -- non-streaming ---------------------------------------------------------------
 
@@ -674,13 +721,16 @@ class PrefixwiseProxy:
             return {"request_id": ctx["request_id"], "status": 400, "cause": None,
                     "response": _error(400, "use handle_stream for stream=true")}, None
         self._upstream.headers = {}
+        sent = time.perf_counter()
         status, payload = self._forward(provider, ctx["forward_body"], ctx["request_id"],
                                         ctx["upstream_session_id"] or ctx["session_id"],
                                         ctx["headers"], api=api)
+        ctx["upstream_ms"] = (time.perf_counter() - sent) * 1000
         upstream_headers = getattr(self._upstream, "headers", {}) or {}
         if status >= 400:
             if self.engine_events is not None:
                 self.engine_events.discard(ctx.get("engine_token"))
+            self.record_failure(ctx, status, payload)
             return {"request_id": ctx["request_id"], "status": status, "cause": None,
                     "response": payload, "upstream_headers": upstream_headers}, None
         result, entry = self.finalize_safely(ctx, status, payload)
@@ -730,8 +780,15 @@ class PrefixwiseProxy:
         query = client_headers.get(QUERY_KEY)
         if query:  # e.g. Anthropic SDK's ?beta=true: forwarded as the client sent it
             path += "?" + query
-        return urllib.request.Request(self.upstream_url + path, method="POST",
+        return urllib.request.Request(self.target(provider, path), method="POST",
                                       data=json.dumps(body).encode(), headers=headers)
+
+    def target(self, provider: str, path: str) -> str:
+        """The upstream URL for a request path like /v1/chat/completions."""
+        key = "anthropic" if provider == "anthropic" else "openai"
+        if key in self.versioned and path.startswith("/v1/"):
+            path = path[3:]
+        return self.upstreams.get(key, self.upstream_url) + path
 
     def passthrough(self, method: str, raw_path: str, body: bytes | None,
                     client_headers: dict[str, str]) -> tuple[int, str, bytes]:
@@ -760,8 +817,8 @@ class PrefixwiseProxy:
                 headers["authorization"] = f"Bearer {self.api_key}"
         if anthropic:
             headers.setdefault("anthropic-version", ANTHROPIC_VERSION)
-        req = urllib.request.Request(self.upstream_url + raw_path, method=method, data=body or None,
-                                     headers=headers)
+        req = urllib.request.Request(self.target("anthropic" if anthropic else "openai", raw_path),
+                                     method=method, data=body or None, headers=headers)
         try:
             with urllib.request.urlopen(req, timeout=UPSTREAM_TIMEOUT) as resp:
                 self._upstream.headers = relay_headers(resp.headers)
@@ -1050,6 +1107,12 @@ def make_handler(proxy: PrefixwiseProxy):
                 ev = proxy.engine_events
                 return self._json(200, {"engine": proxy.engine,
                                         "kv_events": ev.snapshot() if ev else None})
+            if path.startswith(api.PREFIX + "/") or path == api.PREFIX:
+                try:
+                    return self._json(*api.get(proxy, path, route(self.path)[1]))
+                except Exception as exc:  # never drop the connection; never echo internals
+                    print(f"prefixwise: internal error on {path}: {type(exc).__name__}", file=sys.stderr)
+                    return self._json(500, _error(500, "internal error in the Prefixwise API"))
             if path == "/ledger":
                 return self._json(200, json.loads(proxy.ledger.to_json()))
             if path.startswith("/requests/"):
@@ -1088,6 +1151,22 @@ def make_handler(proxy: PrefixwiseProxy):
 
         def do_POST(self):
             path, _ = route(self.path)
+            if path.startswith(api.PREFIX + "/"):
+                if not self._authorized():
+                    return
+                try:
+                    return self._json(*api.post(proxy, path, self._read_json()))
+                except ClientError as exc:
+                    code = 413 if "larger than" in str(exc) else 400
+                    return self._json(code, _error(code, str(exc)))
+                except ValueError as exc:
+                    return self._json(400, _error(400, f"invalid JSON body: {exc}"))
+                except OSError:
+                    self.close_connection = True
+                    return
+                except Exception as exc:
+                    print(f"prefixwise: internal error on {path}: {type(exc).__name__}", file=sys.stderr)
+                    return self._json(500, _error(500, "internal error in the Prefixwise API"))
             if path not in CLASSIFIED_PATHS and path != "/tasks":
                 # Not analysed (count_tokens, files, batches, ...): forwarded unchanged.
                 return self._passthrough("POST")
@@ -1142,11 +1221,14 @@ def make_handler(proxy: PrefixwiseProxy):
 
         def _stream(self, provider: str, body: dict, api: str = "chat"):
             ctx = proxy.prepare(provider, body, self._client_headers(), api=api)
+            sent = time.perf_counter()
             status, lines, acc, err = proxy.open_stream(ctx)
             relayed = ctx.get("upstream_headers") or {}
             if lines is None:
                 if proxy.engine_events is not None:
                     proxy.engine_events.discard(ctx.get("engine_token"))
+                ctx["upstream_ms"] = (time.perf_counter() - sent) * 1000
+                proxy.record_failure(ctx, status, err)
                 return self._json(status, err, {**relayed, "X-Prefixwise-Request-Id": ctx["request_id"]})
             # Headers go out before usage is known, so the verdict cannot
             # ride in them: fetch it afterwards from GET /requests/<id>.
@@ -1157,22 +1239,27 @@ def make_handler(proxy: PrefixwiseProxy):
             for k, v in relayed.items():
                 self.send_header(k, v)
             self.end_headers()
-            completed = True
+            failure = None
             try:
                 for line in lines:
                     if acc.feed(line):
                         self.wfile.write(line)
                         self.wfile.flush()
             except (BrokenPipeError, ConnectionResetError):
-                completed = False  # client went away mid-stream
+                failure = "client_disconnected"  # client went away mid-stream
+                status = 499  # client closed request (not an upstream error)
             except (TimeoutError, OSError):
-                completed = False  # upstream stalled or dropped
-            # Record only a stream that finished with usage: a cut-off stream
-            # has partial or no usage, and a guess is worse than no entry.
-            if completed and acc.saw_usage:
+                failure = "upstream_dropped"  # upstream stalled or dropped
+            ctx["upstream_ms"] = (time.perf_counter() - sent) * 1000
+            # A cut-off stream has partial usage at best, and a guess is worse than
+            # none: it is recorded as a failure. A stream that completed is a
+            # response like any other, usage or not (no usage: verdict unknown).
+            if failure is None:
                 proxy.finalize_safely(ctx, status, acc.payload)
-            elif proxy.engine_events is not None:
-                proxy.engine_events.discard(ctx.get("engine_token"))
+            else:
+                if proxy.engine_events is not None:
+                    proxy.engine_events.discard(ctx.get("engine_token"))
+                proxy.record_failure(ctx, status, error=failure)
             self.close_connection = True
     return Handler
 

@@ -7,6 +7,14 @@
 - **E-evict** (`experiments/e_evict`): floods an engine past its GPU KV capacity and checks whether the session's prefix survives, with and without an offload tier (LMCache, HiCache), and with and without KV events.
 - **E1-open report:** the misses list compares against the expected cause, so `switch_back` hits no longer appear as misses.
 - **Fixed:** `vllm_server.sh` enabled KV events with a field name current vLLM rejects (`enable_kv_cache_events` is the field).
+- **`prefixwise run -- <agent>`**: zero setup. Starts the proxy on a free port, points the agent at it (`ANTHROPIC_BASE_URL` / `OPENAI_BASE_URL`; the agent keeps its own keys; existing base URLs become the upstreams), runs it, and prints a plain-English report on that run. The agent's exit code is passed through; Ctrl-C goes to the agent (it cancels a turn, it does not kill the agent) and SIGTERM is passed on. Gateway base URLs are kept exactly as set; a base URL that is already a Prefixwise proxy is refused rather than double-counted; `PREFIXWISE_API_KEY` never replaces the agent's keys.
+- **A report that says what to do:** `prefixwise report` now leads with findings in plain English (cache share, cost, avoidable waste by cause with the fix for each, expected misses, failures); `--detail` (or `--by`) adds the tables; `--since 24h` narrows the window. The same findings are data at `GET /api/v1/findings`.
+- **One proxy, two providers:** per-provider upstreams, so Anthropic and OpenAI requests each reach their own API.
+- **Data first** ([docs/DATA.md](docs/DATA.md)): every request leaves a row of facts, failures included. New per-request fields: status and error (upstream errors and cut-off streams are rows now, without a verdict, so rates keep honest denominators), api, stream, uncached and cache-write tokens, upstream latency, Prefixwise's own overhead, the gap since the previous turn, the verdict's evidence and secondary causes, and where the prompt first diverged. Existing ledgers migrate in place.
+- **Every metric defined once** (`prefixwise.metrics`): a catalog of names, units and definitions that the CLI, the API and exports all use. Ratios are ratios of sums. Token and cost metrics count requests with a verdict; failures count in `requests_failed` and `error_rate`.
+- **HTTP API `/api/v1`** ([docs/API.md](docs/API.md)): `metrics` (the catalog), `summary`, `breakdown?by=`, `timeseries?bucket=`, `requests` (paginated), `requests/{id}`, `fixes`, `prices`, `POST tasks`, `POST explain`; filters and time windows; same token auth as the proxy.
+- **`prefixwise export`**: raw rows as JSONL or CSV.
+- **Summary** reports `failed_requests`.
 
 ## 0.3.1: 2026-11-07
 

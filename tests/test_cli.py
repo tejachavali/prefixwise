@@ -155,4 +155,4 @@ def test_closed_pipe_exits_quietly(tmp_path):
     out = subprocess.run(cmd, shell=True, capture_output=True, text=True,
                          env={"PYTHONPATH": str(__import__("pathlib").Path(__file__).resolve().parents[1] / "src"),
                               "PATH": "/usr/bin:/bin"})
-    assert "Traceback" not in out.stderr and out.stdout.startswith("Requests")
+    assert "Traceback" not in out.stderr and out.stdout.startswith("400 requests")

@@ -30,10 +30,34 @@ none                       790  5,925,000   84.0%          0           0        
 
 ```bash
 pip install prefixwise
+prefixwise run -- claude                     # or any agent: your command after the --
+```
+
+`prefixwise run` starts the proxy, points the agent at it (`ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`; the agent keeps its own API key), and when the agent exits prints what that run's cache did, in plain English:
+
+```
+42 requests, 1,812,400 prompt tokens, 91% served from cache. Cost $3.08.
+Avoidable: 96,500 tokens ($0.26), 5.3% of prompt tokens. Fix these, biggest first:
+  1. The system prompt changed only in a date, time or id (14 requests, 88,200 tokens, $0.24).
+     Fix: Move dates, times and ids out of the system prompt, to the end of the prompt or the latest user message.
+  2. The same tools were sent in a different order or format (3 requests, 8,300 tokens, $0.02).
+     Fix: Send tools in a fixed order with deterministic serialization (...)
+     Prefixwise can do it for you: prefixwise serve --fix canonical_tools (proven)
+Expected misses (not waste): 2 x first request of a session: nothing to reuse yet; 1 x switched model: each model has its own cache.
+```
+
+(Illustrative output. `prefixwise run --mock -- <agent>` tries it with synthetic responses and no API calls.)
+
+Ctrl-C goes to the agent as usual. If you already set `ANTHROPIC_BASE_URL` or `OPENAI_BASE_URL` (a gateway), Prefixwise forwards there, so the agent reaches the same place. It works with agents that use an **API key**; an agent signed in with a subscription instead (for example Codex with a ChatGPT login) cannot be routed through a proxy, and the report says so if the provider rejects it.
+
+### Running the proxy yourself
+
+For a long-running proxy, start it and point any OpenAI- or Anthropic-compatible client at it:
+
+```bash
 prefixwise serve --mock                      # no API key, synthetic responses; try it first
 ```
 
-Point any OpenAI- or Anthropic-compatible client at it:
 
 ```python
 from openai import OpenAI
@@ -47,7 +71,7 @@ Then:
 
 ```bash
 prefixwise task fix-bug-42 --success         # when the task ends (or POST /tasks)
-prefixwise report                            # where the tokens went
+prefixwise report                            # what the cache did, and what to fix (--detail for tables)
 prefixwise report --by agent_id              # compare agent / prompt versions per successful task
 prefixwise explain examples/session.jsonl    # offline: diagnose a saved session (examples/ is in this repo)
 ```
@@ -98,8 +122,10 @@ Avoidable tokens for a waste turn = the part of the previous turn's prompt that 
 | Command | |
 |---|---|
 | `prefixwise serve [--upstream URL] [--mock] [--fix canonical_tools] [--engine vllm\|sglang] [--kv-events ENDPOINT] [--host H] [--port P] [--ledger FILE]` | Run the proxy. `--engine`/`--kv-events`: see Self-hosted engines. Ledger defaults to `./prefixwise.db`. `--fix` applies an opt-in, reversible rewrite to every request (see below). |
+| `prefixwise run [--mock] [--fix NAME] -- <agent>` | Run an agent through Prefixwise and report on that run when it exits. |
 | `prefixwise prices [--json]` | The dated price table behind dollar costs, and where each rate came from. |
 | `prefixwise prune --older-than 30d` | Delete ledger entries older than that (retention). Add `--include-undated` to also drop rows written before 0.3.1. |
+| `prefixwise export [--format jsonl\|csv] [--since 7d] [--where session=s1]` | Every ledger row (facts, never prompt text) for a spreadsheet, notebook or warehouse. |
 | `prefixwise fixes [--json]` | The fixes that would save the most, ranked by the avoidable tokens your own ledger attributes to each cause. |
 | `prefixwise report [--by cause\|session_id\|agent_id\|model\|provider\|task_id] [--json]` | Totals and a breakdown, most avoidable first. |
 | `prefixwise task ID --success\|--failure` | Record a task outcome (safe while the proxy runs). |
@@ -126,6 +152,10 @@ Avoidable tokens for a waste turn = the part of the previous turn's prompt that 
 **Dollar costs.** Each request is priced from the provider's own usage breakdown (uncached input, cache reads, cache writes by TTL, output), using a dated price table: `prefixwise prices` shows it. *Avoidable cost* is the avoidable tokens times (input price − cache-read price): what they would have cost as cache hits. A model with no rates shows `-`, never an estimate. To add other models or your negotiated rates, write a JSON file in the same format (`prefixwise prices --json` prints one) and set `PREFIXWISE_PRICES=/path/prices.json`. Your entries override the built-in ones. `prefixwise report` and `prefixwise fixes` then show dollars, and say how many requests were priced.
 
 **Fixes the proxy can apply.** `canonical_tools` sorts tools by name and sorts each tool's keys before forwarding, so a tool list that drifts between turns (plugin reload, dict rebuild) stops breaking the cache. It is off by default; with it off, requests pass through unchanged. Prefixwise classifies the request the provider actually received. Fixes that would change what the model reads, like moving a timestamp out of the system prompt, are advice only: `prefixwise fixes` lists them. `canonical_tools` is **proven**: in [E4](experiments/e4/runs/2026-11-06-live.md), turning it on realised 99.9% (Anthropic Haiku 5.5) and 97.5% (vLLM Qwen3-4B) of the savings Prefixwise predicted, with task success flat.
+
+## Data and API
+
+Every number Prefixwise shows is also data. Each request leaves a row of facts (verdict and its evidence, token breakdown, cost, latency, status; failed requests too), and every metric is defined once and served three ways: `prefixwise report`, the HTTP API at `/api/v1` (summary, breakdowns by cause, session, model, day..., request rows, fixes, prices, explain; [docs/API.md](docs/API.md)), and `prefixwise export`. `GET /api/v1/metrics` lists every metric and what it means. Design: [docs/DATA.md](docs/DATA.md).
 
 ## Security
 
