@@ -67,7 +67,8 @@ def cmd_serve(args) -> int:
         serve(host=args.host, port=args.port, ledger_path=ledger,
               upstream_url=args.upstream, mock=True if args.mock else None,
               fixes=args.fix or None, allow_unauthenticated=args.allow_unauthenticated,
-              prices=args.prices, engine=args.engine, kv_events=args.kv_events)
+              prices=args.prices, engine=args.engine, kv_events=args.kv_events,
+              full_attention=args.full_attention)
     except ValueError as exc:  # unknown --fix or --engine name
         sys.exit(f"prefixwise: {exc}")
     return 0
@@ -475,8 +476,11 @@ def build_parser() -> argparse.ArgumentParser:
                    help="one self-hosted engine behind --upstream: no routing, so an unchanged prefix "
                         "that misses is an eviction (inferred; see --kv-events)")
     p.add_argument("--kv-events", metavar="ENDPOINT",
-                   help="vLLM only: its KV-event stream, e.g. tcp://127.0.0.1:5557, to confirm evictions "
-                        "or rule them out (needs: pip install 'prefixwise[engines]')")
+                   help="the engine's KV-event stream, e.g. tcp://127.0.0.1:5557, to confirm evictions "
+                        "or rule them out (vLLM, or SGLang >= 0.5.20; needs: pip install 'prefixwise[engines]')")
+    p.add_argument("--full-attention", action="store_true", default=None,
+                   help="SGLang: the model has no sliding-window or Mamba layers, so KV events can also "
+                        "rule an eviction out (vLLM detects this itself)")
     p.set_defaults(func=cmd_serve)
 
     p = sub.add_parser("report", help="summarise the ledger")

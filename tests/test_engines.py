@@ -23,7 +23,8 @@ def _forwarded_body(engine) -> dict:
 
 
 def test_session_id_reaches_vllm_but_not_sglang():
-    # vLLM stamps a body session_id onto KV events; SGLang rejects session ids it did not open.
+    # vLLM stamps a body session_id onto KV events; SGLang gets it only with --kv-events
+    # (test_sglang_events.py).
     assert _forwarded_body("vllm")["session_id"] == "s1"
     assert "session_id" not in _forwarded_body("sglang")
     assert "session_id" not in _forwarded_body(None)  # hosted APIs reject unknown fields

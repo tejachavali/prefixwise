@@ -25,10 +25,11 @@ FONT = "system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif"
 # experiments/e4/runs/2026-11-06-live.md: cached / prompt tokens, 60 paired requests per arm
 FIX = [("Claude Haiku 5.5", 114_835 / 225_395, 219_451 / 225_395, "99.9%"),
        ("Qwen3-4B on vLLM", 138_928 / 157_706, 152_800 / 157_706, "97.5%")]
-# experiments/e_evict/runs/2026-11-07-colab-l4.md: cached / prompt tokens after the flood (rep 0)
+# experiments/e_evict/runs/2026-11-07-colab-l4.md: cached / prompt tokens after the flood (rep 0);
+# SGLang's verdict with KV events: 2026-11-07-colab-l4-sglang-events.md (same 3/3404)
 EVICT = [("vLLM", 0 / 3404, "evicted: confirmed from KV events"),
          ("vLLM + LMCache", 3328 / 3404, "hit: restored from CPU"),
-         ("SGLang", 3 / 3404, "evicted: inferred"),
+         ("SGLang", 3 / 3404, "evicted: confirmed from KV events"),
          ("SGLang + HiCache", 3382 / 3404, "hit: restored from host memory")]
 # benchmarks/runs/2026-11-07-vm.md: added latency, OpenAI, not streamed
 OVERHEAD = [(2_000, 2.71, 3.81), (30_000, 5.62, 7.51), (120_000, 13.27, 18.77)]

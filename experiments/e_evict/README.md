@@ -40,8 +40,13 @@ python experiments/e1_open/e1_open.py --engine vllm-lmcache --vllm-url http://12
 
 **Runtime 2: SGLang, then SGLang + HiCache**
 
+SGLang 0.5.23 pins `outlines==0.1.11`, whose `outlines_core 0.1.26` has prebuilt wheels only
+for Python 3.9-3.12. On a Python 3.13 runtime pip tries to compile it from Rust source and fails,
+so run SGLang in a Python 3.12 environment:
+
 ```bash
-pip install -e . "sglang[all]"
+pip install -q uv && uv venv -p 3.12 /content/sg312 && source /content/sg312/bin/activate
+uv pip install --prerelease=allow --only-binary outlines_core "sglang==0.5.23" -e ".[engines]"
 # 3. SGLang alone
 MODEL=Qwen/Qwen3-4B MAX_TOTAL_TOKENS=32768 ./experiments/e1_open/sglang_server.sh &
 python experiments/e1_open/e1_open.py --engine sglang --vllm-url http://127.0.0.1:30000 --model Qwen/Qwen3-4B
@@ -51,10 +56,19 @@ MODEL=Qwen/Qwen3-4B MAX_TOTAL_TOKENS=32768 HICACHE=1 ./experiments/e1_open/sglan
 python experiments/e_evict/e_evict.py --engine sglang-hicache --url http://127.0.0.1:30000 --model Qwen/Qwen3-4B
 ```
 
-**With KV events (vLLM only):** repeat run 1 with `--kv-events tcp://127.0.0.1:5557` added to
+**With KV events:** repeat run 1 with `--kv-events tcp://127.0.0.1:5557` added to
 `e_evict.py` (`pip install -e ".[engines]"` first; `vllm_server.sh` already publishes events).
-Expected: T3 is `evicted` with evidence starting "confirmed", instead of "inferred". SGLang's
-events cannot be attributed to sessions, so there is no SGLang variant (docs/ENGINES.md).
+Expected: T3 is `evicted` with evidence starting "confirmed", instead of "inferred".
+
+For SGLang (0.5.20 or later), repeat run 3 with the server publishing events:
+
+```bash
+MODEL=Qwen/Qwen3-4B MAX_TOTAL_TOKENS=32768 KV_EVENTS=1 ./experiments/e1_open/sglang_server.sh &
+python experiments/e_evict/e_evict.py --engine sglang --url http://127.0.0.1:30000 --model Qwen/Qwen3-4B \
+  --kv-events tcp://127.0.0.1:5557 --full-attention
+```
+
+Expected: T3 `evicted`, evidence starting "confirmed"; T2 a hit.
 
 Each run writes `results/*.md` and `.json`. If a server flag is rejected, check
 `--help` for that release and note the change; don't change the harness to make a run pass.
@@ -62,8 +76,9 @@ Each run writes `results/*.md` and `.json`. If a server flag is rejected, check
 ## Engine notes (verified in source, 2026-11-07)
 
 - **SGLang** needs `--enable-cache-report`, or `cached_tokens` is absent and every turn
-  looks like a miss. It reads a body `session_id` as its own stateful-session handle and
-  rejects unknown ones, so Prefixwise does not forward it to SGLang. It serves any model
+  looks like a miss. Since 0.5.20 it writes a body `session_id` on the blocks it stores (an
+  attribution label; `session_params` is the stateful-session handle), which Prefixwise sends
+  with `--kv-events`. It serves any model
   name with its one model, so E1's `model_switch` turns are a label change on the same weights.
 - **LMCache** now runs as its own server (`lmcache server`), connected to vLLM by
   `LMCacheMPConnector`; the old in-process mode and `LMCACHE_*` variables are gone. It stores
@@ -72,4 +87,4 @@ Each run writes `results/*.md` and `.json`. If a server flag is rejected, check
 - **vLLM** `cached_tokens` = local GPU hits + external (LMCache) tokens, decided when the
   request is admitted; a failed LMCache load can over-report.
 - Both engines publish `BlockStored` / `BlockRemoved` KV events over ZMQ
-  (`--kv-events-config`); only vLLM's can be attributed to sessions. See docs/ENGINES.md.
+  (`--kv-events-config`), tagged with the request's session (SGLang from 0.5.20). See docs/ENGINES.md.

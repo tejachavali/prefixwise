@@ -80,7 +80,8 @@ def flood(url: str, model: str, total_tokens: int, each: int, seed: int, mock_st
 
 def run(args) -> dict:
     engine = "vllm" if args.engine.startswith("vllm") else "sglang"
-    proxy = (PrefixwiseProxy(upstream_url=args.url, api_key="sk-dummy", engine=engine, kv_events=args.kv_events)
+    proxy = (PrefixwiseProxy(upstream_url=args.url, api_key="sk-dummy", engine=engine, kv_events=args.kv_events,
+                             full_attention=args.full_attention)
              if not args.mock else PrefixwiseProxy(engine=engine))
     mock_state = None
     if args.mock:
@@ -135,6 +136,8 @@ def run(args) -> dict:
     verdicts: dict[str, int] = {}
     for x in reps:
         verdicts[x["t3"]["cause"]] = verdicts.get(x["t3"]["cause"], 0) + 1
+    engine = {"notes": proxy.engine_notes,  # what Prefixwise's startup check of the engine found
+              "events": proxy.engine_events.snapshot() if proxy.engine_events is not None else None}
     if proxy.engine_events is not None:
         proxy.engine_events.stop()
     return {"engine": args.engine, "model": args.model, "mock": args.mock, "repeats": args.repeats,
@@ -144,7 +147,7 @@ def run(args) -> dict:
             "t3_hits": t3_hits, "engine_behaved_as_expected": control_ok and (
                 t3_hits == len(reps) if offload else t3_hits == 0),
             "correct_cause": correct, "prefixwise_t3": verdicts,
-            "prefixwise_correct": verdicts.get(correct, 0), "reps": reps}
+            "prefixwise_correct": verdicts.get(correct, 0), "engine_check": engine, "reps": reps}
 
 
 def write(res: dict, out: Path) -> Path:
@@ -165,6 +168,10 @@ def write(res: dict, out: Path) -> Path:
     for x in res["reps"]:
         lines.append(f"| {x['rep']} | {x['t2']['share']:.0%} | {x['flood_requests']} req, {x['flood_seconds']} s | "
                      f"{x['t3']['cached']}/{x['t3']['prompt']} | `{x['t3']['cause']}`: {x['t3'].get('evidence') or ''} |")
+    eng = res.get("engine_check") or {}
+    if eng.get("events") is not None or eng.get("notes"):
+        lines += ["", f"Engine check notes: {'; '.join(eng.get('notes') or []) or 'none'}",
+                  f"KV-event stream at the end: `{json.dumps(eng.get('events'))}`"]
     stem.with_suffix(".md").write_text("\n".join(lines) + "\n")
     return stem.with_suffix(".md")
 
@@ -182,6 +189,8 @@ def main() -> int:
     ap.add_argument("--mock", action="store_true", help="simulated engine, no GPU")
     ap.add_argument("--kv-events", help="the engine's KV-event endpoint (e.g. tcp://127.0.0.1:5557): with it, "
                     "Prefixwise should name the GPU-only eviction 'evicted' (the engine join)")
+    ap.add_argument("--full-attention", action="store_true",
+                    help="SGLang: the model has full attention only (Qwen3-4B does), so events can rule an eviction out")
     ap.add_argument("--output-dir", default=str(Path(__file__).resolve().parent / "results"))
     args = ap.parse_args()
     res = run(args)

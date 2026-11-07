@@ -28,6 +28,9 @@ ARGS=(--model-path "$MODEL" --host "$HOST" --port "$PORT"
 if [[ "${HICACHE:-0}" == 1 ]]; then
   ARGS+=(--enable-hierarchical-cache --hicache-ratio "${HICACHE_RATIO:-4}")
 fi
+if [[ "${KV_EVENTS:-0}" == 1 ]]; then  # for prefixwise --kv-events tcp://127.0.0.1:5557 (SGLang >= 0.5.20)
+  ARGS+=(--kv-events-config '{"publisher": "zmq", "endpoint": "tcp://*:5557"}')
+fi
 if [[ -n "${MAX_TOTAL_TOKENS:-}" ]]; then
   ARGS+=(--max-total-tokens "$MAX_TOTAL_TOKENS")
 fi

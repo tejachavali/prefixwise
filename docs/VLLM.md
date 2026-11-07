@@ -50,9 +50,12 @@ proxy stabilise tool order for you.
   LMCache restores after a GPU eviction counts as a hit. Only prefixes lost from every tier
   are evictions. Launch script: `experiments/e1_open/vllm_lmcache_server.sh`.
 - **SGLang (and HiCache):** start it with `--enable-cache-report`, then
-  `prefixwise serve --upstream http://127.0.0.1:30000 --engine sglang`. Evictions are named
-  as inferred: SGLang reads a body `session_id` as its own session handle, so its KV events
-  cannot be attributed to sessions. Launch script: `experiments/e1_open/sglang_server.sh`.
+  `prefixwise serve --upstream http://127.0.0.1:30000 --engine sglang`. Evictions are
+  inferred. To confirm them (SGLang 0.5.20 or later), also start SGLang with
+  `--kv-events-config '{"publisher": "zmq", "endpoint": "tcp://*:5557"}'` and add
+  `--kv-events tcp://127.0.0.1:5557` (and `--full-attention` for a model with no
+  sliding-window or Mamba layers, so Prefixwise can also say "not an eviction").
+  Launch script: `experiments/e1_open/sglang_server.sh` (`KV_EVENTS=1`).
 
 ## Validated live
 
@@ -65,6 +68,7 @@ tokens and flooded with 3x that ([record](../experiments/e_evict/runs/2026-11-07
 | vLLM + KV events | prefix lost, 0/5 hits | `evicted` 5/5, confirmed ("211 of the previous request's KV blocks removed") |
 | vLLM + LMCache | 98% restored, 5/5 hits | `none` 5/5 |
 | SGLang | prefix lost, 0/5 hits | `evicted` 5/5 (inferred) |
+| SGLang + KV events | prefix lost, 0/5 hits | `evicted` 5/5, confirmed ("3,382 of the previous request's KV blocks removed"; [record](../experiments/e_evict/runs/2026-11-07-colab-l4-sglang-events.md)) |
 | SGLang + HiCache | 99% restored, 5/5 hits | `none` 5/5 |
 
 The classifier also scores 120/120 on injected causes on vLLM, vLLM + LMCache and SGLang

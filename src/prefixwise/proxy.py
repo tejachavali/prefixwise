@@ -47,6 +47,7 @@ from __future__ import annotations
 import hmac
 import json
 import os
+import re
 import sys
 import threading
 from collections import OrderedDict
@@ -193,8 +194,8 @@ def _extract_responses_blocks(body: dict) -> list[tuple[str, object]]:
 
 
 # Body fields Prefixwise reads but upstream APIs do not accept. Stripped
-# before forwarding (OpenAI rejects unknown fields with a 400). vLLM
-# keeps session_id: it stamps it onto KV events for the engine join.
+# before forwarding (OpenAI rejects unknown fields with a 400). vLLM, and
+# SGLang with --kv-events, get Prefixwise's session id: they stamp it on KV events.
 PREFIXWISE_FIELDS = ("session_id", "agent_id", "task_id", "prefixwise_compaction_event",
                      "prefixwise_upstream_session_id")
 
@@ -412,7 +413,7 @@ class PrefixwiseProxy:
                  upstream_url: str | None = None, api_key: str | None = None,
                  mock: bool | None = None, fixes: str | list[str] | tuple[str, ...] | None = None,
                  prices: str | None = None, engine: str | None = None, kv_events: str | None = None,
-                 upstreams: dict[str, str] | None = None):
+                 upstreams: dict[str, str] | None = None, full_attention: bool | None = None):
         self.ledger = Ledger(ledger_path)
         # Self-hosted engine behind the proxy (vllm, sglang), and its KV-event
         # stream for the engine join (prefixwise.engines).
@@ -420,13 +421,21 @@ class PrefixwiseProxy:
         if self.engine not in (None, "vllm", "sglang"):
             raise ValueError(f"unknown engine {self.engine!r}: expected vllm or sglang")
         kv_events = kv_events or os.environ.get("PREFIXWISE_KV_EVENTS") or None
-        if kv_events and self.engine != "vllm":
-            raise ValueError("--kv-events needs --engine vllm: SGLang's events cannot be attributed to "
-                             "sessions (see docs/ENGINES.md)")
+        if kv_events and self.engine not in ("vllm", "sglang"):
+            raise ValueError("--kv-events needs --engine vllm or --engine sglang")
+        if full_attention is None:
+            full_attention = os.environ.get("PREFIXWISE_FULL_ATTENTION", "").lower() in ("1", "true", "yes")
         self.engine_events = None
+        # SGLang (>= 0.5.20) reads a body session_id as the attribution label on its KV
+        # events. Sent only once /server_info shows that is all it does (_check_sglang).
+        self.sglang_join = False
         if kv_events:
-            from .engines import EngineEvents
-            self.engine_events = EngineEvents(kv_events).start()
+            from .engines import EngineEvents, SGLangEvents
+            if self.engine == "sglang":
+                self.engine_events = SGLangEvents(kv_events, full_attention=full_attention)
+            else:
+                self.engine_events = EngineEvents(kv_events)
+            self.engine_events.start()
         # Opt-in request rewrites (see fixes.py). Off unless named here or
         # in PREFIXWISE_FIXES; turning them off restores pass-through.
         self.fixes = parse_fixes(fixes if fixes is not None else os.environ.get("PREFIXWISE_FIXES"))
@@ -448,6 +457,9 @@ class PrefixwiseProxy:
         self.mock = mock if mock is not None else (
             not (self.upstream_url or self.upstreams) or os.environ.get("PREFIXWISE_MOCK_UPSTREAM") == "1")
         self.default_session = "default"  # for requests that carry no session id
+        self.engine_notes: list[str] = []  # what the engine check found; printed by serve()
+        if self.engine == "sglang" and self.engine_events is not None and not self.mock:
+            self._check_sglang()
         # Per-session state, shared across the threaded server's handlers.
         # Every read and write holds self._lock: the classifier must compare
         # a turn with the turn recorded just before it, never a torn state.
@@ -469,6 +481,60 @@ class PrefixwiseProxy:
         self.lane_snapshot: dict[tuple, RequestSnapshot] = _SessionMap(MAX_SESSIONS)
         self.lane_seen: dict[tuple, float] = _SessionMap(MAX_SESSIONS)
         self.lane_response_id: dict[tuple, str] = _SessionMap(MAX_SESSIONS)
+
+    def _check_sglang(self) -> None:
+        """Read SGLang's /server_info once. Event verdicts stay off (session id not sent)
+        unless it shows: version >= 0.5.20 (session on events), events published, no
+        --enable-session-radix-cache (a session_id would pin the session's cache), and
+        one data-parallel rank (each rank has its own cache and event stream). It also
+        sizes the block index from the cache capacity, and a sliding-window model
+        turns "not an eviction" off."""
+        base = (self.upstreams.get("openai") or self.upstream_url).removesuffix("/v1")
+        headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
+        try:
+            req = urllib.request.Request(base + "/server_info", headers=headers)
+            with urllib.request.urlopen(req, timeout=5) as r:
+                info = json.loads(r.read())
+        except (OSError, ValueError) as exc:
+            self.engine_notes.append(f"could not read SGLang /server_info ({type(exc).__name__}"
+                                     f"{', set PREFIXWISE_API_KEY' if '401' in str(exc) else ''}): "
+                                     "evictions stay inferred")
+            return
+        problems = []
+        version = str(info.get("version") or "")
+        parts = re.match(r"(\d+)\.(\d+)\.(\d+)", version)
+        if not parts or tuple(int(x) for x in parts.groups()) < (0, 5, 20):
+            problems.append(f"SGLang {version or '(version unknown)'} may put no session on its KV events "
+                            "(needs >= 0.5.20)")
+        if info.get("enable_session_radix_cache"):
+            problems.append("SGLang runs with --enable-session-radix-cache, where a session_id pins the "
+                            "session's cache")
+        events = info.get("kv_events") or {}
+        if not events and not info.get("kv_events_config"):  # kv_events is None for ipc:// endpoints
+            problems.append("SGLang is not publishing KV events: start it with --kv-events-config "
+                            "'{\"publisher\": \"zmq\", \"endpoint\": \"tcp://*:5557\"}'")
+        dp = max(int(info.get("dp_size") or 1), int(events.get("dp_size") or 1) if isinstance(events, dict) else 1)
+        if dp > 1:
+            problems.append(f"SGLang runs {dp} data-parallel ranks, each with its own cache and events")
+        if problems:
+            self.engine_notes.extend(problems)
+            self.engine_notes.append("evictions stay inferred")
+            return
+        states = [s or {} for s in info.get("internal_states") or []]
+        usage = [s.get("memory_usage") or {} for s in states]
+        if any(u.get("token_capacity_swa") for u in usage):
+            self.engine_events.hybrid = True
+            self.engine_notes.append("the model has sliding-window layers: evictions can be confirmed, "
+                                     "never ruled out")
+        capacity = max([int(u.get("token_capacity") or 0) for u in usage]
+                       + [int(info.get("max_total_num_tokens") or 0)])
+        blocks = capacity // max(1, int(info.get("page_size") or 1))
+        if blocks:
+            self.engine_events.max_alive = max(self.engine_events.max_alive, blocks * 5 // 4 + 1024)
+            if blocks > 2_000_000:
+                self.engine_notes.append(f"SGLang caches up to {blocks:,} blocks: Prefixwise's index needs about "
+                                         f"{blocks * 80 // 1_000_000:,} MB (--page-size 16 cuts it 16-fold)")
+        self.sglang_join = True
 
     # -- shared request path ---------------------------------------------------------
 
@@ -500,10 +566,13 @@ class PrefixwiseProxy:
         upstream_session_id = (body.get("prefixwise_upstream_session_id")
                                or headers.get("x-prefixwise-upstream-session-id"))
         upstream_session_id = str(upstream_session_id) if upstream_session_id else None
-        # vLLM puts a body session_id on its KV events, so the engine join can
-        # attribute blocks to sessions. Only vLLM: SGLang rejects session ids it
-        # did not open, and hosted APIs reject unknown fields.
+        # vLLM and SGLang put a body session_id on their KV events, so the engine
+        # join can attribute blocks to sessions. Hosted APIs reject unknown fields.
         engine_token = None
+        if (self.engine == "sglang" and api == "chat" and self.engine_events is not None and self.sglang_join
+                and body.get("n") in (None, 1)):  # n > 1: the choices' stores would mix
+            forward_body["session_id"] = session_id
+            engine_token = self.engine_events.request_sent(session_id)
         if self.engine == "vllm" and api == "chat":
             forward_body["session_id"] = session_id
             xargs = body.get("vllm_xargs")
@@ -568,8 +637,9 @@ class PrefixwiseProxy:
             reported = "prompt_tokens_details" in usage  # vLLM needs --enable-prompt-tokens-details
             if not reported and not getattr(self, "_warned_details", False):
                 self._warned_details = True
-                print("prefixwise: vLLM is not reporting cached tokens; start it with "
-                      "--enable-prompt-tokens-details, or every request looks like a miss", file=sys.stderr)
+                flag = "--enable-cache-report" if self.engine == "sglang" else "--enable-prompt-tokens-details"
+                print(f"prefixwise: {self.engine} is not reporting cached tokens; start it with "
+                      f"{flag}, or every request looks like a miss", file=sys.stderr)
             ctx["engine_verdict"] = self.engine_events.request_done(
                 ctx["engine_token"], cached if reported else None, prompt_tokens)
         with self._lock:
@@ -1291,13 +1361,13 @@ def serve(host: str = "127.0.0.1", port: int = 8080, *, ledger_path: str | None 
           upstream_url: str | None = None, mock: bool | None = None, quiet: bool = False,
           fixes: str | list[str] | None = None, auth_token: str | None = None,
           allow_unauthenticated: bool = False, prices: str | None = None,
-          engine: str | None = None, kv_events: str | None = None):
+          engine: str | None = None, kv_events: str | None = None, full_attention: bool | None = None):
     """Run the proxy until interrupted. Settings fall back to PREFIXWISE_* env vars."""
     hmac_key = os.environ.get("PREFIXWISE_HMAC_KEY")
     ledger_path = ledger_path or os.environ.get("PREFIXWISE_LEDGER_PATH", ":memory:")
     proxy = PrefixwiseProxy(ledger_path=ledger_path, upstream_url=upstream_url, mock=mock,
                             hmac_key=hmac_key.encode() if hmac_key else None, fixes=fixes,
-                            prices=prices, engine=engine, kv_events=kv_events)
+                            prices=prices, engine=engine, kv_events=kv_events, full_attention=full_attention)
     proxy.auth_token = auth_token or os.environ.get("PREFIXWISE_AUTH_TOKEN") or None
     exposed = not _is_loopback(host)
     if exposed and not proxy.auth_token and proxy.api_key and not proxy.mock and not allow_unauthenticated:
@@ -1318,6 +1388,11 @@ def serve(host: str = "127.0.0.1", port: int = 8080, *, ledger_path: str | None 
         if proxy.engine:
             ev = proxy.engine_events.endpoint if proxy.engine_events else "none (evictions are inferred)"
             print(f"  engine:   {proxy.engine} (one self-hosted engine); KV events: {ev}")
+            if proxy.engine == "sglang" and proxy.engine_events is not None and proxy.engine_events.hybrid:
+                print("  note:     evictions can be confirmed but not ruled out; pass --full-attention "
+                      "if the model has no sliding-window or Mamba layers")
+            for note in proxy.engine_notes:
+                print(f"  note:     {note}")
             flag = "--enable-cache-report" if proxy.engine == "sglang" else "--enable-prompt-tokens-details"
             print(f"  note:     start {proxy.engine} with {flag}, or every turn looks like a miss")
         print(f"  auth:     {'X-Prefixwise-Token required' if proxy.auth_token else 'none'}"
