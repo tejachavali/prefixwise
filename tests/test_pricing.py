@@ -13,8 +13,9 @@ T = PriceTable.load()
 
 def test_builtin_table_is_dated_and_sourced():
     assert T.as_of == "2026-11-07"
+    official = {"anthropic": "platform.claude.com", "openai": "developers.openai.com"}
     for name, r in T.models.items():
-        assert "platform.claude.com" in r["source"], name  # official page only
+        assert official[r["provider"]] in r["source"], name  # official pages only
         assert all(isinstance(r[k], (int, float)) for k in ("input", "output", "cache_read")), name
 
 
@@ -38,11 +39,11 @@ def test_one_hour_writes_and_long_prompt_tier():
 def test_model_ids_match_snapshots_and_cloud_prefixes_but_not_other_models():
     assert T.rates_for("claude-haiku-5-5-20261007") is T.models["claude-haiku-5-5"]
     assert T.rates_for("us.anthropic.claude-sonnet-5-5-v1:0") is T.models["claude-sonnet-5-5"]
-    assert T.rates_for("claude-haiku-5") is None and T.rates_for("gpt-5.6-luna") is None
+    assert T.rates_for("claude-haiku-5") is None and T.rates_for("gpt-5.6") is None
 
 
 def test_unknown_is_none_never_zero(tmp_path):
-    assert T.request_cost("gpt-5.6-luna", "openai", {"input_tokens": 100, "output_tokens": 1}) is None
+    assert T.request_cost("gpt-5.6", "openai", {"input_tokens": 100, "output_tokens": 1}) is None
     path = tmp_path / "p.json"
     path.write_text(json.dumps({"models": {"my-model": {"input": 1.0, "cache_read": 0.1, "output": 2.0}}}))
     t = PriceTable.load(str(path))
@@ -85,7 +86,7 @@ def test_proxy_records_cost_and_report_shows_dollars(tmp_path, capsys):
     proxy.handle("anthropic", dict(body))
     _, entry = proxy.handle("anthropic", dict(body))
     assert entry.cost is not None and entry.cost > 0 and entry.price_as_of == "2026-11-07"
-    proxy.handle("openai", {"model": "gpt-5.6-luna", "session_id": "o", "messages": []})
+    proxy.handle("openai", {"model": "gpt-5.6", "session_id": "o", "messages": []})  # unpriced
     main(["report", "--ledger", path])
     out = capsys.readouterr().out
     assert "Cost" in out and "2 of 3 requests priced" in out
@@ -97,3 +98,26 @@ def test_proxy_records_cost_and_report_shows_dollars(tmp_path, capsys):
 def test_prices_command(capsys):
     assert main(["prices"]) == 0
     assert "claude-haiku-5-5" in capsys.readouterr().out
+
+
+def test_openai_prices_from_official_page():
+    # Live gpt-5.6-luna usage (2026-11-06): 5881 input, 5854 cached, 24 written, 16 output.
+    usage = {"input_tokens": 5881, "input_tokens_details": {"cache_write_tokens": 24, "cached_tokens": 5854},
+             "output_tokens": 16}
+    expected = (3 * 0.20 + 5854 * 0.02 + 24 * 0.25 + 16 * 1.20) / 1e6
+    assert T.request_cost("gpt-5.6-luna", "openai", usage) == pytest.approx(expected)
+    assert T.rates_for("gpt-5.6") is None  # no plain gpt-5.6 row on the page
+
+
+def test_promotional_price_expires():
+    from datetime import date
+
+    assert T.rates_for("gpt-5.6-sol", today=date(2026, 11, 30)) is not None
+    assert T.rates_for("gpt-5.6-sol", today=date(2026, 12, 1)) is None  # unknown after the promotion
+
+
+def test_matching_does_not_borrow_another_models_price():
+    assert T.rates_for("gpt-5.6-sol-pro") is None
+    assert T.rates_for("claude-sonnet-5-5-fast") is None
+    assert T.rates_for("claude-sonnet-5-5-20261001") is T.models["claude-sonnet-5-5"]
+    assert T.rates_for("anthropic.claude-sonnet-4-6-v1:0") is T.models["claude-sonnet-4-6"]

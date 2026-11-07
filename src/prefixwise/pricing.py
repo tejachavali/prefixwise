@@ -27,6 +27,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from datetime import date
 from dataclasses import dataclass, field
 from importlib import resources
 
@@ -104,18 +105,26 @@ class PriceTable:
             table.sources.append(path)
         return table
 
-    def rates_for(self, model: str) -> dict | None:
-        """Exact id, else the longest table id that the model id contains as a whole
-        segment (dated snapshots, cloud-prefixed ids: 'us.anthropic.claude-haiku-5-5-v1')."""
+    def rates_for(self, model: str, today: date | None = None) -> dict | None:
+        """Rates for a model id: exact, or a table id plus only a dated snapshot
+        (-20261007) and/or a cloud version suffix (-v1, -v1:0), optionally behind a
+        cloud prefix ('us.anthropic.'). A different model that merely starts with
+        a table id (gpt-5.6-sol-pro) is NOT matched. Rates past their
+        valid_until date (promotional prices) are unknown."""
         if not model:
             return None
-        if model in self.models:
-            return self.models[model]
-        best = None
-        for key in self.models:
-            if re.search(rf"(^|[./:]){re.escape(key)}($|[-@:.])", model) and (best is None or len(key) > len(best)):
-                best = key
-        return self.models[best] if best else None
+        key = model if model in self.models else None
+        if key is None:
+            for k in self.models:
+                if re.search(rf"(^|[./:]){re.escape(k)}(-\d{{8}})?(-v\d+(:\d+)?)?$", model) and (key is None or len(k) > len(key)):
+                    key = k
+        if key is None:
+            return None
+        rates = self.models[key]
+        until = rates.get("valid_until")
+        if until and (today or date.today()) > date.fromisoformat(until):
+            return None
+        return rates
 
     @staticmethod
     def _tier(rates: dict, prompt_tokens: int) -> dict:
