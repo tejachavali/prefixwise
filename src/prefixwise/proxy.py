@@ -679,6 +679,8 @@ class PrefixwiseProxy:
                                         ctx["headers"], api=api)
         upstream_headers = getattr(self._upstream, "headers", {}) or {}
         if status >= 400:
+            if self.engine_events is not None:
+                self.engine_events.discard(ctx.get("engine_token"))
             return {"request_id": ctx["request_id"], "status": status, "cause": None,
                     "response": payload, "upstream_headers": upstream_headers}, None
         result, entry = self.finalize_safely(ctx, status, payload)
@@ -1143,6 +1145,8 @@ def make_handler(proxy: PrefixwiseProxy):
             status, lines, acc, err = proxy.open_stream(ctx)
             relayed = ctx.get("upstream_headers") or {}
             if lines is None:
+                if proxy.engine_events is not None:
+                    proxy.engine_events.discard(ctx.get("engine_token"))
                 return self._json(status, err, {**relayed, "X-Prefixwise-Request-Id": ctx["request_id"]})
             # Headers go out before usage is known, so the verdict cannot
             # ride in them: fetch it afterwards from GET /requests/<id>.
@@ -1167,6 +1171,8 @@ def make_handler(proxy: PrefixwiseProxy):
             # has partial or no usage, and a guess is worse than no entry.
             if completed and acc.saw_usage:
                 proxy.finalize_safely(ctx, status, acc.payload)
+            elif proxy.engine_events is not None:
+                proxy.engine_events.discard(ctx.get("engine_token"))
             self.close_connection = True
     return Handler
 

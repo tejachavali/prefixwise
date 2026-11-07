@@ -89,19 +89,26 @@ counting (weak evidence), and metrics polling (engine-wide).
   DP rank). Prefixwise subscribes to one; run one Prefixwise per replica, or route each
   session to one replica.
 - **Memory:** the set of live blocks is bounded by the engine's GPU capacity (entries leave on
-  `BlockRemoved`; a hard cap of 1,000,000 stops trusting residency if removals were missed).
+  `BlockRemoved`). Past a hard cap of 1,000,000 (removals must have been missed) Prefixwise
+  forgets the saved chains rather than read every block as removed.
+- **Clocks:** catching up compares the engine's batch timestamps with the proxy's clock, after
+  correcting for the offset between them (learned from the batches), so an engine on another
+  host with a skewed clock cannot make a stale stream look current.
+- **Failed requests** (upstream error, cut-off stream) release their check, so they do not make
+  the session look like it has concurrent requests.
   Per session only the head of the previous request's chain is kept (4,096 blocks: the head
   is what decides a low cache read), for at most 1,000 sessions.
 
 - **Concurrent requests in one session** share a window, so a chain can mix two branches:
   detected, and those requests get no claim.
 
-Three rounds of independent review shaped this. The first version judged any removed block a
+Four rounds of independent review shaped this. The first version judged any removed block a
 session ever held (stale chains, output blocks), ignored hybrid models, raced the event
 stream, and mismatched session ids on retries; the second judged at send time and missed
 evictions while a request waits in vLLM's queue; the third found hybrid models, a busy
 engine and concurrent requests could still produce a false "not an eviction", and that
-arrival order could shift positions. The rules above answer all of them.
+arrival order could shift positions; the fourth found only rare cases (cap overflow, clock
+skew, failed requests), fixed above. The rules above answer all of them.
 
 ## How it is validated
 

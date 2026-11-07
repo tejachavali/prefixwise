@@ -69,6 +69,7 @@ class EngineEvents:
                       "dropped_messages": 0, "decode_errors": 0, "overflows": 0}
         self._last_seq: int | None = None
         self._latest_ts = 0.0  # engine timestamp of the last batch read
+        self._clock_offset: float | None = None  # min(receive time - engine ts): skew + least latency
         self._drained_at = 0.0  # last time the subscriber found the socket empty
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -106,7 +107,10 @@ class EngineEvents:
                     self.stats["cleared"] += 1
                     self._clear()
             if isinstance(batch[0], (int, float)):
-                self._latest_ts = max(self._latest_ts, float(batch[0]))
+                ts = float(batch[0])
+                self._latest_ts = max(self._latest_ts, ts)
+                offset = time.time() - ts  # the engine may run on another host with another clock
+                self._clock_offset = offset if self._clock_offset is None else min(self._clock_offset, offset)
 
     def _store(self, ev: dict) -> None:
         group, hashes, session = ev.get("group_idx") or 0, ev.get("block_hashes") or [], ev.get("session_id")
@@ -123,8 +127,9 @@ class EngineEvents:
             if w is not None and pos is not None and pos < self.max_chain:
                 w.at[pos] = key
             pos = None if pos is None else pos + 1
-        if len(self._alive) > self.max_alive:  # removals were missed: stop trusting residency
+        if len(self._alive) > self.max_alive:  # removals were missed: residency is unknown
             self._alive.clear()
+            self._windows.clear()  # their blocks would all look removed: judge nothing from them
             self.stats["overflows"] += 1
 
     def _remove(self, key) -> None:
@@ -202,6 +207,12 @@ class EngineEvents:
                 return NOTHING
             return 0, len(check["keys"] - check["lost"])
 
+    def discard(self, token: int | None) -> None:
+        """The request never completed (upstream error, cut-off stream)."""
+        if token is not None:
+            with self._lock:
+                self._checks.pop(token, None)
+
     def _settle(self) -> bool:
         """Wait until the stream has caught up with now: a batch stamped later
         than now was read (busy engine), or the socket was found empty (idle
@@ -211,7 +222,8 @@ class EngineEvents:
         asked = time.time()
         end = asked + self.settle_seconds
         while time.time() < end:
-            if self._drained_at >= asked or self._latest_ts >= asked:
+            offset = self._clock_offset or 0.0
+            if self._drained_at >= asked or self._latest_ts + offset >= asked:
                 return True
             time.sleep(0.002)
         return False

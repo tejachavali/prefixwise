@@ -267,3 +267,33 @@ def test_a_non_dict_vllm_xargs_is_forwarded_untouched(publisher):
         assert res["status"] == 200 and seen[0]["vllm_xargs"] == "client-value"
     finally:
         p.engine_events.stop()
+
+
+def test_overflow_judges_nothing_and_failed_requests_release_their_check():
+    # Fourth review: an overflow must not turn every earlier block into a "removal".
+    ev = EngineEvents(max_alive=3)
+    turn(ev, "s", 0, stored([1, 2], "s"))
+    ev.handle(decoded(stored([3, 4], "other")))  # 4 blocks > cap: residency unknown
+    assert turn(ev, "s", 0) == (None, None)
+    # A request that failed upstream must not leave its session "concurrent".
+    turn(ev, "t", 0, stored([7, 8], "t"))
+    ev.discard(ev.request_sent("t"))
+    ev.handle(decoded(stored([7, 8], "t")))
+    assert turn(ev, "t", 0) == (0, 2)
+
+
+def test_catch_up_uses_the_engines_clock_offset():
+    import threading as th
+
+    ev = EngineEvents(settle_seconds=1.0)
+    ev._thread = type("T", (), {"is_alive": lambda self: True})()  # pretend the subscriber runs
+    skew = -3600.0  # the engine's clock runs an hour behind ours
+    ev.handle([time.time() + skew, []])  # learns the offset
+    th.Timer(0.05, lambda: ev.handle([time.time() + skew, []])).start()  # a batch published during the wait
+    start = time.time()
+    assert ev._settle() and time.time() - start < 0.5  # caught up on that batch, not on the timeout
+    ev.handle([time.time() + skew, []])
+    lagging = EngineEvents(settle_seconds=0.1)
+    lagging._thread = ev._thread
+    lagging.handle([time.time() + skew, []])
+    assert not lagging._settle()  # no newer batch and never drained: not caught up
