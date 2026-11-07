@@ -1,6 +1,17 @@
 # Changelog
 
-## Unreleased
+## 0.4.0: 2026-11-07
+
+`prefixwise run`, a report that says what to do, every metric as data (API and export), and
+self-hosted engines (vLLM, SGLang, LMCache) validated live.
+
+**Upgrading:**
+- Existing ledgers migrate in place (schema 3); old rows count as succeeded.
+- `prefixwise report` now prints plain-English findings by default. The totals and tables
+  are behind `--detail` (or `--by`). Scripts should use `--json`, which keeps its keys and
+  adds `findings`.
+- Failed requests (upstream errors, cut-off streams) are now recorded as rows without a
+  verdict. Token and cost metrics exclude them; `summary` adds `failed_requests`.
 
 - **Self-hosted engines (vLLM, SGLang, LMCache):** `prefixwise serve --engine vllm|sglang` declares one self-hosted engine. With no routing possible, an unchanged-prefix miss is named `evicted` (inferred, and the evidence says so) instead of `routing_miss`. On vLLM, `--kv-events tcp://host:5557` reads the engine's KV-cache events: Prefixwise tags requests with its session id and asks vLLM to report every block a request uses, then checks the block where the cache read stopped (removed: confirmed eviction; still there: not an eviction). The verdict becomes `evicted` confirmed with a block count, or `unknown` ("not an eviction: the engine still holds this session's blocks"). Library callers: `handle("vllm", ...)` sends `session_id` only with `engine="vllm"`. Prefixes restored by LMCache or HiCache count as hits. `GET /engine` shows the stream. Optional extra `prefixwise[engines]`. Design and limits: `docs/ENGINES.md`.
 - **SGLang and LMCache:** E1-open takes `--engine vllm | vllm-lmcache | sglang | sglang-hicache`, with launch scripts `sglang_server.sh` and `vllm_lmcache_server.sh` (flags checked against each project's source). Prefixwise sends a body `session_id` only to vLLM; SGLang reads it as its own session handle and rejects unknown ones.

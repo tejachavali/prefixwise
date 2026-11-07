@@ -304,6 +304,8 @@ def cmd_run(args) -> int:
         print(f"No requests reached Prefixwise. Does {cmd[0]} read ANTHROPIC_BASE_URL or OPENAI_BASE_URL? "
               "If not, set its base URL to the proxy by hand (see the README).", file=sys.stderr)
     else:
+        if args.mock:
+            print("(mock: synthetic responses and usage, so the numbers below are illustrative)", file=sys.stderr)
         print(render(found, command="run"), file=sys.stderr)
         print(f"All runs: prefixwise report --ledger {ledger}", file=sys.stderr)
     return code

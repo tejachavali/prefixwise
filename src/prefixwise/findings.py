@@ -75,7 +75,7 @@ def findings(ledger, since: float | None = None, until: float | None = None) -> 
 def _usd(x) -> str:
     if x is None:
         return "-"
-    return f"${x:,.2f}" if abs(x) >= 0.01 or x == 0 else f"${x:.4f}"
+    return f"${x:,.2f}" if abs(x) >= 1 or x == 0 else f"${x:.4f}"  # cents need precision
 
 
 def _n(x) -> str:

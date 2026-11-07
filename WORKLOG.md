@@ -36,32 +36,16 @@ Shared handoff between the agents working on Prefixwise. It says **what is being
 
 ## Now
 
-**Prefixwise 0.3.0 is public:** `pip install prefixwise`. GitHub release `v0.3.0` (tag on `343ce61`), release workflow run #1 green, PyPI shows 0.3.0 as latest. Muse published it from the GitHub web UI (Claude's session cannot push tags), and Claude verified it by a clean install from PyPI and a smoke test.
+**Prefixwise 0.4.0 is ready to release** (PR: release 0.4.0), waiting only on Muse's compatibility check: Claude Code, Codex CLI and SDK scripts through `prefixwise run` (message given to Teja). On main since 0.3.1:
+- **Data first and API first** (PR #30): every request's facts recorded, failures included; every metric defined once (`prefixwise.metrics`); `/api/v1`; `prefixwise export`. docs/DATA.md, docs/API.md.
+- **`prefixwise run -- <agent>` and a plain-English report** (PR #31).
+- **Self-hosted engines** (PR #29, includes #24): `--engine`, vLLM `--kv-events`; validated live on vLLM, LMCache, SGLang and HiCache, all eight runs as expected. docs/ENGINES.md.
 
-**Task C (OpenAI prices): done by Muse 2026-11-07,** added by Claude in PR #22. Luna, Terra and Sol are priced; Sol's promotional price expires after 2026-11-30; plain `gpt-5.6` has no published row and stays unpriced.
+**Releasing:** Claude prepares the bump; **Muse (or Teja) creates the GitHub release** `v0.4.0` in the web UI after the release PR merges; the workflow publishes to PyPI; Claude verifies the install.
 
-**Lanes re-check: all passed (Muse, 2026-11-07).** E1-hosted Anthropic 20 turns, 100% injected and native agreement; E1-open on Colab L4 120 turns, 100%, `switch_back` 5/5; dogfood 2 with opencode 92.2% cached, 0 avoidable, $0.2452, `/messages` path fix confirmed. Records: `experiments/e1_hosted/runs/2026-11-07-anthropic-lanes.md`, `experiments/e1_open/runs/2026-11-07-lanes.md`, `experiments/dogfood/2026-11-07-opencode-2.md`.
+**After 0.4.0:** Teja sends the Omni message; watch issues and DMs from the group post. Next build unless feedback says otherwise: Prometheus / OpenTelemetry export (research in docs/DATA.md).
 
-**Production benchmark (Claude, 2026-11-07, PR #23).** Teja wants Prefixwise benchmarked and production-ready before any outreach. `benchmarks/bench.py` drives the real `prefixwise serve` with agent-shaped traffic against a fake upstream (no keys). It found and fixed 5 production problems: high overhead on long prompts (+50 ms at 120k tokens, now +13 ms), a ledger failure turning a paid response into a 500, `retry-after` and the provider request id dropped, idle sockets pinning threads forever, and `docker stop` killing streams. Also new: `prefixwise prune` for ledger retention. Results: `benchmarks/runs/`; summary in README "Running in production".
-
-**v0.3.1 is public (Muse, 2026-11-07):** release workflow run #2 green, PyPI shows 0.3.1 as latest; Claude verified a clean `pip install prefixwise==0.3.1`.
-
-**Live overhead check: first try stopped at pair 5 on a bug in `live_overhead.py` (fixed in PR #26),** not in Prefixwise. The script's cache breakpoints accumulated in the session history, and Anthropic rejected the 5th (max 4). Pairs 1-4 were already consistent: direct and proxy both 98% cached, proxy within ~40 ms of direct either way. **Live overhead check: PASSED on both providers (2026-11-07).** Anthropic Haiku 5.5: 98.1% cached direct and proxied, 20/20 recorded. OpenAI GPT-5.6 Luna: 97.9% and 97.9%, 20/20. Records in `benchmarks/runs/2026-11-07-live-*.md`.
-
-**Muse, next (Teja approved 2026-11-07): release 0.3.1, then the live overhead check.** No code changes, no pushes.
-1. **Publish v0.3.1** once PR #25 (version bump) is merged: GitHub web UI -> Releases -> Draft a new release -> tag `v0.3.1` (create on publish), target `main`, title `v0.3.1`, notes = the `## 0.3.1` section of `CHANGELOG.md`. The release workflow publishes to PyPI. Report the workflow run's result; Claude verifies with a clean `pip install prefixwise==0.3.1`.
-2. **Live overhead (well under $0.10):** with the 0.3.1 code, `python benchmarks/live_overhead.py --provider anthropic` with `ANTHROPIC_API_KEY` from Colab Secrets, then `--provider openai` with `OPENAI_API_KEY`. It sends 20 pairs, direct vs. through the proxy, interleaved. Pass = `cache hit share ... MATCH` and `ledger rows: 20/20`; also report the added-latency median (expect a few ms; network jitter can make it negative). Paste the printed summary.
-3. *(Optional, free, ~25 min)* `python benchmarks/bench.py --soak 900` on Colab hardware: paste the `.md` it writes (don't commit it). Pass = exit code 0.
-
-**SGLang + LMCache (Claude, 2026-11-07, PR #24).** Teja asked to integrate or test Prefixwise on SGLang and LMCache. What the engines' source says: SGLang reports `cached_tokens` with `--enable-cache-report`; vLLM's `cached_tokens` includes tokens loaded from LMCache; both publish BlockStored/BlockRemoved KV events. So Prefixwise works on both as-is, except one known gap: an eviction for lack of GPU memory reads as `routing_miss` (no engine events yet). Built: `--engine` in E1-open, launch scripts, and E-evict to measure it.
-
-**Muse, next (Teja approved 2026-11-07): live engine runs on Colab L4, branch `claude/engine-join`.** No code changes, no pushes, no API keys needed. Steps and expected results are in the message Claude gave Teja (also `experiments/e_evict/README.md`). The question: does Prefixwise name an engine eviction correctly on real vLLM and SGLang, and does LMCache/HiCache turn it back into a hit?
-
-**Next for Claude:**
-1. ~~Per-model lanes~~: done, PR #21.
-2. **The product plan proposed to Teja on 2026-11-06:** `prefixwise run -- <cmd>`, a local web UI (money view, session timeline, prefix map), and live fix experiments. Waiting on Teja's go-ahead and choice of first audience.
-
-**Releasing from now on:** Claude prepares the version bump and CHANGELOG in a PR. **Muse (or Teja) creates the GitHub release** in the web UI, which creates the tag and triggers `.github/workflows/release.yml`.
+**Waiting on Teja (nothing blocked):** the local web view; the OpenAI support note; scrubbing the old note from git history.
 
 ## In parallel (Claude): launch gates
 
@@ -166,3 +150,4 @@ Then a soft launch to a few people who run agents (Omni's founder is a candidate
 - **2026-11-07:** Muse: run D (SGLang + HiCache) passed: T3 5/5 hits (3382/3404 restored from host memory), Prefixwise `none` 5/5. All eight engine runs matched. PRs #24/#29 await Teja's go-ahead to merge (they need a catch-up merge with main first).
 - **2026-11-07:** Teja: API-first and data-first. Claude audited what the ledger records (facts dropped, failures unrecorded, metric logic split between CLI and ledger) and researched the OpenTelemetry GenAI conventions (all experimental; no cost or miss-cause convention). Built on `claude/data-first`: schema 3 facts incl. failure rows; `prefixwise.metrics` (one catalog, one query); `/api/v1`; `prefixwise export`; docs/DATA.md and docs/API.md. Next: Prometheus/OTel export, then the report UX and `prefixwise run` on top.
 - **2026-11-07:** Teja agreed the order: merge data-first (PR #30), Muse compatibility check (Claude Code, Codex, SDKs), then `prefixwise run` + the plain-English report, then release 0.4.0 before the Omni message. Built `prefixwise run` (per-provider upstreams, agent keeps its keys, report on that run) and the findings report (also `/api/v1/findings`), on `claude/run-report` stacked on PR #30.
+- **2026-11-07:** PRs #30 (data first), #31 (run + report) and #29 (engines; #24 closed as included) merged. Fresh-install check from main passed (run, report, export); fixed mock-mode cost wording and cent precision. Release 0.4.0 prepared; publishing waits on Muse's compatibility check.

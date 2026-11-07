@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "prefixwise"
-version = "0.3.1"
+version = "0.4.0"
 description = "Name why your LLM prompt cache missed, price the miss, and measure tokens per successful task. A local proxy and CLI for OpenAI, Anthropic and vLLM."
 readme = "README.md"
 requires-python = ">=3.11"
