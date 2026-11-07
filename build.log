@@ -397,3 +397,15 @@
 - rates_for: exact id, or id + dated snapshot / cloud version suffix only;
   gpt-5.6-sol-pro no longer matches gpt-5.6-sol.
 - Tests: 142 passed.
+
+## 2026-11-07 Production benchmark (claude/production-bench)
+- benchmarks/bench.py + upstream.py: real `prefixwise serve` vs fake upstream.
+- Before fixes: +50 ms p50 at 120k tokens (81% in mask_volatiles regex);
+  300 idle sockets = 301 threads forever; ledger error -> 500 on a paid
+  response; retry-after/x-request-id dropped; SIGTERM ignored as PID 1.
+- Fixes: masked-hash LRU (32k entries), finalize_safely (fail open),
+  relay_headers allowlist, CLIENT_TIMEOUT 120 s, SIGTERM drain (8 s),
+  recorded_at + `prefixwise prune`.
+- After: +3 / +6 / +13 ms p50 at 2k / 30k / 120k tokens; ~185 req/s per
+  process; 0 errors at c=128; 1M-row report 2.2 s.
+- Tests: 149 passed. CI: fault suite + docker stop exit 0.

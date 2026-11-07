@@ -202,6 +202,21 @@ PASSTHROUGH_HEADERS = ("authorization", "x-api-key", "anthropic-version", "anthr
                        "openai-organization", "openai-project")
 ANTHROPIC_VERSION = "2023-06-01"
 UPSTREAM_TIMEOUT = 600  # seconds; long generations stream for minutes
+# A client socket that sends nothing (or stops reading) for this long is
+# dropped, so idle or half-sent connections cannot pin threads forever.
+CLIENT_TIMEOUT = float(os.environ.get("PREFIXWISE_CLIENT_TIMEOUT", "120"))
+
+# Upstream response headers relayed to the client: SDK retry hints, the
+# provider's request id (support tickets), and rate-limit state.
+RELAY_HEADERS = ("retry-after", "retry-after-ms", "x-should-retry", "x-request-id", "request-id")
+RELAY_PREFIXES = ("x-ratelimit-", "anthropic-ratelimit-")
+
+
+def relay_headers(headers) -> dict[str, str]:
+    if not headers:
+        return {}
+    return {k: v for k, v in headers.items()
+            if k.lower() in RELAY_HEADERS or k.lower().startswith(RELAY_PREFIXES)}
 # Sessions remembered for classification; least recently used are dropped,
 # so a long-running proxy does not grow without bound. A dropped session's
 # next turn classifies as FIRST_WRITE (honest: no prior turn is known).
@@ -408,6 +423,7 @@ class PrefixwiseProxy:
         # Every read and write holds self._lock: the classifier must compare
         # a turn with the turn recorded just before it, never a torn state.
         self._lock = threading.Lock()
+        self._upstream = threading.local()  # last upstream response headers, per thread
         self.last_snapshot: dict[str, RequestSnapshot] = _SessionMap(MAX_SESSIONS)
         self.last_response_id: dict[str, str | None] = _SessionMap(MAX_SESSIONS)
         self.last_seen: dict[str, float] = _SessionMap(MAX_SESSIONS)
@@ -506,6 +522,18 @@ class PrefixwiseProxy:
         with self._lock:
             return self._finalize_locked(ctx, status, payload, usage, prompt_tokens, cached,
                                          native_reason, response_id, fps)
+
+    def finalize_safely(self, ctx: dict, status: int, payload: dict) -> tuple[dict, LedgerEntry | None]:
+        """finalize(), failing open: the client already paid for this response,
+        so a ledger or classifier failure (disk full, locked database, a bug)
+        must never cost them it. The response passes through unrecorded."""
+        try:
+            return self.finalize(ctx, status, payload)
+        except Exception as exc:
+            print(f"prefixwise: request {ctx['request_id']} passed through unrecorded: "
+                  f"{type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
+            return {"request_id": ctx["request_id"], "status": status, "cause": None,
+                    "recorded": False, "response": payload}, None
 
     def _stitch(self, ctx: dict, fps: list) -> tuple[list | None, RequestSnapshot | None]:
         """Responses API with previous_response_id: the input holds only new
@@ -612,13 +640,17 @@ class PrefixwiseProxy:
         if ctx["stream"]:
             return {"request_id": ctx["request_id"], "status": 400, "cause": None,
                     "response": _error(400, "use handle_stream for stream=true")}, None
+        self._upstream.headers = {}
         status, payload = self._forward(provider, ctx["forward_body"], ctx["request_id"],
                                         ctx["upstream_session_id"] or ctx["session_id"],
                                         ctx["headers"], api=api)
+        upstream_headers = getattr(self._upstream, "headers", {}) or {}
         if status >= 400:
             return {"request_id": ctx["request_id"], "status": status, "cause": None,
-                    "response": payload}, None
-        return self.finalize(ctx, status, payload)
+                    "response": payload, "upstream_headers": upstream_headers}, None
+        result, entry = self.finalize_safely(ctx, status, payload)
+        result["upstream_headers"] = upstream_headers
+        return result, entry
 
     def _mock_payload(self, provider: str, model: str, request_id: str, session_id: str,
                       api: str = "chat") -> dict:
@@ -668,6 +700,12 @@ class PrefixwiseProxy:
 
     def passthrough(self, method: str, raw_path: str, body: bytes | None,
                     client_headers: dict[str, str]) -> tuple[int, str, bytes]:
+        """See _passthrough; relayed headers land in self._upstream.headers."""
+        self._upstream.headers = {}
+        return self._passthrough(method, raw_path, body, client_headers)
+
+    def _passthrough(self, method: str, raw_path: str, body: bytes | None,
+                     client_headers: dict[str, str]) -> tuple[int, str, bytes]:
         """Forward a request Prefixwise does not analyse (GET /v1/models,
         count_tokens, ...) to the upstream unchanged. Nothing is recorded.
         Returns (status, content type, body)."""
@@ -691,8 +729,10 @@ class PrefixwiseProxy:
                                      headers=headers)
         try:
             with urllib.request.urlopen(req, timeout=UPSTREAM_TIMEOUT) as resp:
+                self._upstream.headers = relay_headers(resp.headers)
                 return resp.status, resp.headers.get("Content-Type", "application/json"), resp.read()
         except urllib.error.HTTPError as exc:
+            self._upstream.headers = relay_headers(exc.headers)
             return exc.code, exc.headers.get("Content-Type", "application/json"), exc.read() or b""
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             return 502, "application/json", json.dumps(_error(502, f"upstream unreachable: {exc}")).encode()
@@ -715,8 +755,10 @@ class PrefixwiseProxy:
         req = self._upstream_request(provider, body, request_id, session_id, client_headers, api)
         try:
             with urllib.request.urlopen(req, timeout=UPSTREAM_TIMEOUT) as resp:
+                self._upstream.headers = relay_headers(resp.headers)
                 return resp.status, json.loads(resp.read() or b"{}")
         except urllib.error.HTTPError as exc:
+            self._upstream.headers = relay_headers(exc.headers)
             return self._http_error(exc)
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             return 502, _error(502, f"upstream unreachable: {exc}")
@@ -748,7 +790,9 @@ class PrefixwiseProxy:
                                      ctx["headers"], api)
         try:
             resp = urllib.request.urlopen(req, timeout=UPSTREAM_TIMEOUT)
+            ctx["upstream_headers"] = relay_headers(resp.headers)
         except urllib.error.HTTPError as exc:
+            ctx["upstream_headers"] = relay_headers(exc.headers)
             status, payload = self._http_error(exc)
             return status, None, acc, payload
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
@@ -874,11 +918,34 @@ class PrefixwiseHTTPServer(ThreadingHTTPServer):
     request_queue_size = 256
     daemon_threads = True
 
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        self.active = 0  # requests in flight, for a graceful drain on shutdown
+        self._active_lock = threading.Lock()
+
+    def process_request_thread(self, request, client_address):
+        with self._active_lock:
+            self.active += 1
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            with self._active_lock:
+                self.active -= 1
+
+    def drain(self, seconds: float) -> int:
+        """Wait up to `seconds` for in-flight requests; returns how many were left."""
+        end = time.time() + seconds
+        while self.active and time.time() < end:
+            time.sleep(0.05)
+        return self.active
+
 
 def make_handler(proxy: PrefixwiseProxy):
     class Handler(BaseHTTPRequestHandler):
         # HTTP/1.0: a streamed body ends when the connection closes, so no
         # chunked encoding is needed for SSE.
+        timeout = CLIENT_TIMEOUT  # socket timeout on the client connection
+
         def log_message(self, *args):  # keep test output clean
             pass
 
@@ -923,11 +990,17 @@ def make_handler(proxy: PrefixwiseProxy):
                     return self._json(400, _error(400, "Content-Length is not a number"))
                 if length < 0 or length > MAX_BODY_BYTES:
                     return self._json(413 if length > 0 else 400, _error(400, "bad Content-Length"))
-                body = self.rfile.read(length)
+                try:
+                    body = self.rfile.read(length)
+                except OSError:  # client stalled past CLIENT_TIMEOUT or hung up mid-body
+                    self.close_connection = True
+                    return
             status, ctype, data = proxy.passthrough(method, self.path, body, self._client_headers())
             self.send_response(status)
             self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(data)))
+            for k, v in (getattr(proxy._upstream, "headers", None) or {}).items():
+                self.send_header(k, v)
             self.end_headers()
             if method != "HEAD":
                 self.wfile.write(data)
@@ -988,6 +1061,9 @@ def make_handler(proxy: PrefixwiseProxy):
                 return self._json(code, _error(code, str(exc)))
             except ValueError as exc:
                 return self._json(400, _error(400, f"invalid JSON body: {exc}"))
+            except OSError:  # client stalled past CLIENT_TIMEOUT or hung up mid-body
+                self.close_connection = True
+                return
             try:
                 return self._dispatch(body)
             except ClientError as exc:
@@ -1007,7 +1083,9 @@ def make_handler(proxy: PrefixwiseProxy):
             result, _ = proxy.handle(provider, body, self._client_headers(), api=api)
             # The client gets the upstream response unchanged; Prefixwise's
             # verdict rides in headers so drop-in clients are unaffected.
-            extra = {"X-Prefixwise-Request-Id": result["request_id"]}
+            extra = {**result.get("upstream_headers", {}), "X-Prefixwise-Request-Id": result["request_id"]}
+            if result.get("recorded") is False:
+                extra["X-Prefixwise-Error"] = "not recorded (see proxy log)"
             if result.get("cause"):
                 extra.update({"X-Prefixwise-Cause": result["cause"],
                               "X-Prefixwise-Legit": str(result["legit"]).lower(),
@@ -1026,14 +1104,17 @@ def make_handler(proxy: PrefixwiseProxy):
         def _stream(self, provider: str, body: dict, api: str = "chat"):
             ctx = proxy.prepare(provider, body, self._client_headers(), api=api)
             status, lines, acc, err = proxy.open_stream(ctx)
+            relayed = ctx.get("upstream_headers") or {}
             if lines is None:
-                return self._json(status, err, {"X-Prefixwise-Request-Id": ctx["request_id"]})
+                return self._json(status, err, {**relayed, "X-Prefixwise-Request-Id": ctx["request_id"]})
             # Headers go out before usage is known, so the verdict cannot
             # ride in them: fetch it afterwards from GET /requests/<id>.
             self.send_response(status)
             self.send_header("Content-Type", "text/event-stream")
             self.send_header("Cache-Control", "no-cache")
             self.send_header("X-Prefixwise-Request-Id", ctx["request_id"])
+            for k, v in relayed.items():
+                self.send_header(k, v)
             self.end_headers()
             completed = True
             try:
@@ -1048,7 +1129,7 @@ def make_handler(proxy: PrefixwiseProxy):
             # Record only a stream that finished with usage: a cut-off stream
             # has partial or no usage, and a guess is worse than no entry.
             if completed and acc.saw_usage:
-                proxy.finalize(ctx, status, acc.payload)
+                proxy.finalize_safely(ctx, status, acc.payload)
             self.close_connection = True
     return Handler
 
@@ -1086,11 +1167,27 @@ def serve(host: str = "127.0.0.1", port: int = 8080, *, ledger_path: str | None 
             print("  note:     set PREFIXWISE_HMAC_KEY so hashes of short prompt blocks cannot be guessed")
         print("  POST /v1/chat/completions  POST /v1/responses  POST /v1/messages  POST /tasks")
         print("  GET  /ledger  GET /requests/<id>  GET /health", flush=True)
+    # SIGTERM (docker stop, systemd, Kubernetes): stop accepting, let in-flight
+    # requests and streams finish, then exit. As PID 1 in a container an
+    # unhandled SIGTERM is ignored and the runtime SIGKILLs mid-stream.
+    import signal
+
+    def _stop(signum, frame):
+        threading.Thread(target=server.shutdown, daemon=True).start()
+
+    try:
+        signal.signal(signal.SIGTERM, _stop)
+    except ValueError:  # not the main thread (embedded use)
+        pass
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
+        server.socket.close()  # refuse new connections while draining
+        left = server.drain(float(os.environ.get("PREFIXWISE_DRAIN_SECONDS", "8")))
+        if left and not quiet:
+            print(f"prefixwise: stopped with {left} request(s) still in flight", file=sys.stderr)
         server.server_close()
 
 

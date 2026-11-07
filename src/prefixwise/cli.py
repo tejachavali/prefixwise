@@ -196,6 +196,28 @@ def cmd_task(args) -> int:
     return 0
 
 
+def _duration_seconds(text: str) -> float:
+    units = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}
+    t = text.strip().lower()
+    if t and t[-1] in units:
+        return float(t[:-1]) * units[t[-1]]
+    return float(t) * 86400  # a bare number is days
+
+
+def cmd_prune(args) -> int:
+    from .ledger import Ledger
+
+    try:
+        seconds = _duration_seconds(args.older_than)
+    except ValueError:
+        print(f"prefixwise: --older-than takes a duration like 30d, 12h or 90 (days), not {args.older_than!r}",
+              file=sys.stderr)
+        return 2
+    n = Ledger(_ledger_path(args)).prune(seconds, undated=args.include_undated)
+    print(f"deleted {n} ledger entries older than {args.older_than}")
+    return 0
+
+
 def cmd_request(args) -> int:
     row = _open_existing_ledger(args).get_request(args.request_id)
     if row is None:
@@ -311,6 +333,13 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--failure", dest="outcome", action="store_const", const="failure")
     ledger_opt(p)
     p.set_defaults(func=cmd_task)
+
+    p = sub.add_parser("prune", help="delete old ledger entries (retention)")
+    p.add_argument("--older-than", required=True, metavar="AGE", help="e.g. 30d, 12h, 90 (days)")
+    p.add_argument("--include-undated", action="store_true",
+                   help="also delete entries recorded before 0.3.1 (they have no timestamp)")
+    ledger_opt(p)
+    p.set_defaults(func=cmd_prune)
 
     p = sub.add_parser("request", help="show one request's ledger entry")
     p.add_argument("request_id", help="the X-Prefixwise-Request-Id response header")

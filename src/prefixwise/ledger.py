@@ -22,6 +22,8 @@ is model-dependent, so 0.9 is not universal; label it as a model.
 
 from __future__ import annotations
 
+import time
+
 import json
 import sqlite3
 from dataclasses import dataclass
@@ -87,7 +89,8 @@ def reuse_adjusted_reads(write_multiplier: float, read_multiplier: float) -> flo
 
 # Columns added after the first schema; added in place to older ledgers.
 _MIGRATIONS = {"task_id": "TEXT", "request_id": "TEXT", "completion_tokens": "INTEGER",
-               "fixes": "TEXT", "cost": "REAL", "price_as_of": "TEXT"}
+               "fixes": "TEXT", "cost": "REAL", "price_as_of": "TEXT",
+               "recorded_at": "REAL"}  # unix time; NULL on rows from before 0.3.1
 
 
 class Ledger:
@@ -139,8 +142,8 @@ class Ledger:
                 """INSERT INTO entries (session_id, agent_id, provider, model, cause,
                     legit, prompt_tokens, cached_tokens, avoidable_tokens,
                     avoidable_cost, task_success, native_reason, classifier_version,
-                    task_id, request_id, completion_tokens, fixes, cost, price_as_of)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    task_id, request_id, completion_tokens, fixes, cost, price_as_of, recorded_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (entry.session_id, entry.agent_id, entry.provider, entry.model,
                  entry.cause, None if entry.legit is None else int(entry.legit),
                  entry.prompt_tokens, entry.cached_tokens, entry.avoidable_tokens,
@@ -148,12 +151,27 @@ class Ledger:
                  None if entry.task_success is None else int(entry.task_success),
                  entry.native_reason, entry.classifier_version,
                  entry.task_id, entry.request_id, entry.completion_tokens, entry.fixes,
-                 entry.cost, entry.price_as_of),
+                 entry.cost, entry.price_as_of, time.time()),
             )
             if entry.task_id and entry.task_success is not None:
                 self._set_task_outcome_locked(entry.task_id, entry.task_success)
             self.conn.commit()
             return cur.lastrowid
+
+    def prune(self, older_than_seconds: float, undated: bool = False) -> int:
+        """Delete entries recorded more than older_than_seconds ago (and, with
+        undated, rows from before timestamps were recorded). Tasks no remaining
+        entry refers to go too. Returns the number of entries deleted."""
+        with self._lock:
+            cutoff = time.time() - older_than_seconds
+            where = "recorded_at < ?" + (" OR recorded_at IS NULL" if undated else "")
+            n = self.conn.execute(f"DELETE FROM entries WHERE {where}", (cutoff,)).rowcount
+            self.conn.execute("DELETE FROM tasks WHERE task_id NOT IN "
+                              "(SELECT task_id FROM entries WHERE task_id IS NOT NULL)")
+            self.conn.commit()
+            if n:
+                self.conn.execute("VACUUM")
+            return n
 
     def _set_task_outcome_locked(self, task_id: str, success: bool) -> None:
         import time
