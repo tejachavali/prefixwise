@@ -343,7 +343,8 @@ class SGLangEvents(EngineEvents):
         self.max_held_tokens = max_held_tokens  # tokens of chains kept for sessions (8 bytes each)
         self.barrier_seconds = barrier_seconds
         self._alive: dict = {}  # block hash on the GPU -> its run
-        self._tails: OrderedDict = OrderedDict()  # session -> [(run, last index) or None, concurrent]
+        # session -> [(run, last index) or None, mixed, positions where its stores started]
+        self._tails: OrderedDict = OrderedDict()
         self._held = 0
         self._born = itertools.count(1)
         self.stats["duplicate_hashes"] = 0
@@ -384,7 +385,7 @@ class SGLangEvents(EngineEvents):
         elif p is None:  # stored before Prefixwise subscribed: this chain cannot be placed
             seg = _Seg(None, -1, None, block, tokens, packed, born)
         else:
-            i = p.hashes.index(parent_hash)
+            i = len(p.hashes) - 1 if p.hashes[-1] == parent_hash else p.hashes.index(parent_hash)
             seg = _Seg(p, i, None if p.start is None else p.end(i), block, tokens, packed, born)
         alive = self._alive
         for h in hashes:
@@ -398,17 +399,19 @@ class SGLangEvents(EngineEvents):
         session = ev.get("session_id")
         if session:
             tail = self._tails.get(session)
-            if tail is None:
-                tail = self._tails[session] = [None, False]
+            if tail is None:  # no window opened by request_sent (dropped, or another client): mixed
+                tail = self._tails[session] = [None, True, set()]
             self._tails.move_to_end(session)
+            if seg.start is not None:
+                tail[2].add(seg.start)
             self._hold(tail[0], -1)
             tail[0] = (seg, len(packed) - 1)  # stores come in chain order: the latest is the deepest
             self._hold(tail[0], 1)
             self._trim()
         if len(alive) > self.max_alive:  # more blocks than the GPU holds: removals were missed
             alive.clear()
-            for _, (t, _c) in list(self._tails.items()):
-                self._hold(t, -1)
+            for t in list(self._tails.values()):
+                self._hold(t[0], -1)
             self._tails.clear()
             for check in self._checks.values():
                 check["overflowed"] = True
@@ -416,8 +419,8 @@ class SGLangEvents(EngineEvents):
 
     def _trim(self) -> None:
         while self._tails and (len(self._tails) > self.max_sessions or self._held > self.max_held_tokens):
-            _, (t, _c) = self._tails.popitem(last=False)
-            self._hold(t, -1)
+            _, t = self._tails.popitem(last=False)
+            self._hold(t[0], -1)
 
     def _remove(self, hashes) -> None:
         self.stats["removed"] += len(hashes)
@@ -456,7 +459,7 @@ class SGLangEvents(EngineEvents):
                 if check["session"] == session_id:
                     check["concurrent"] = concurrent = True
             prev = self._tails.pop(session_id, None)  # its held tokens move to the check
-            window = self._tails[session_id] = [None, concurrent]
+            window = self._tails[session_id] = [None, concurrent, set()]
             token = next(self._tokens)
             self._checks[token] = {"session": session_id, "tail": prev[0] if prev else None,
                                    "window": window, "sent": next(self._born) if prev else 0,
@@ -522,9 +525,12 @@ class SGLangEvents(EngineEvents):
                 self._drop_check(token)
                 return NOTHING
         # Not removed so far. Wait for this request's own store: SGLang queues events in
-        # order, so it follows every removal made to admit this request.
+        # order, so it follows every removal made to admit this request. Its first store
+        # starts exactly where its read stopped; the previous request's late finish store
+        # (published after its response) starts elsewhere, so it cannot pass for it.
+        stop = max(0, cached_tokens)
         end = time.time() + self.barrier_seconds
-        while check["window"][0] is None and time.time() < end and self._thread is not None:
+        while stop not in check["window"][2] and time.time() < end and self._thread is not None:
             time.sleep(0.002)
         with self._lock:
             self._drop_check(token)
@@ -534,7 +540,7 @@ class SGLangEvents(EngineEvents):
             seg, j, total, gone = judged
             if self._removed(check, seg, j):
                 return max(gone, 1), 0
-            barrier = check["window"][0] is not None or self._thread is None
+            barrier = stop in check["window"][2] or self._thread is None
             if (not barrier or check["concurrent"] or check["overflowed"]
                     or self._errors() != check["errors"]):
                 return NOTHING

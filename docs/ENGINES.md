@@ -122,7 +122,9 @@ session's cache; Prefixwise reads that flag from `/server_info` and then sends n
   can reach Prefixwise before the removal that caused its miss, and an empty socket proves
   nothing. But events are queued in order, and a missed request stores its new blocks (tagged
   with its session) after every eviction made to admit it. So "not an eviction" waits, up to
-  0.5 s, for the request's own store; without it there is no claim.
+  0.5 s, for the request's own store; without it there is no claim. The store must start
+  exactly where the read stopped: the previous request's finish store can itself be published
+  after its response, land in this request's window, and would otherwise pass for it.
 - **Event hashes leave out `extra_key`** (`compute_node_event_hash_values`), so identical tokens
   sent with different `extra_key` values sit in two subtrees under the same hashes. A hash
   stored while already present marks both runs, and chains through them are not judged.
@@ -141,10 +143,15 @@ version >= 0.5.20, events published, no `--enable-session-radix-cache`, and one 
 rank (SGLang routes requests across ranks without session affinity, and each rank has its own
 cache and stream). It also sizes the block index from the cache capacity (`token_capacity` /
 `page_size`, plus a quarter), so a large cache is not mistaken for missed removals, and a
-sliding-window capacity turns "not an eviction" off. Chains kept for sessions are capped at 16
-million tokens in all (8 bytes each), oldest sessions first. Requests with `n > 1` are not
+sliding-window capacity turns "not an eviction" off. Chains kept for sessions are capped by the
+sum of their lengths, 16 million tokens (oldest sessions dropped first); a prefix shared by many
+sessions counts once per session there but is stored once, so memory stays under 8 bytes times
+that. A session's window that is dropped while its request runs comes back marked mixed, so no
+negative claim is built on it. Requests with `n > 1` are not
 judged (the choices' stores would mix).
 
+A second review found that the previous request's late store could pass for this request's
+(fixed above), and that a window dropped mid-request lost its concurrency mark (fixed).
 Independent review of this design found two ways to a wrong claim (the `extra_key` hash
 collision; data-parallel ranks), the publishing schedule above, a crash on index overflow, and
 unbounded memory and quadratic time on deep chains; all fixed as described, with tests.

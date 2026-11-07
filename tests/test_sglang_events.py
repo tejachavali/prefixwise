@@ -394,3 +394,45 @@ def test_review_findings():
     ev.handle(batch(AllBlocksCleared()))
     t = time.time()
     assert turn(ev, "s", 3) == (9000, 0) and time.time() - t < 0.5
+
+
+def test_second_review_findings(publisher):
+    # The previous request's finish store, published late, lands in this request's window.
+    # It starts past the previous prompt, not where this read stopped: it is not the barrier.
+    def live(full=True):
+        ev = SGLangEvents(full_attention=full, barrier_seconds=0.05)
+        ev._thread = threading.current_thread()  # as if subscribed: the barrier applies
+        return ev
+    ev = live()
+    two_turns(ev)
+    token = ev.request_sent("s")
+    ev.handle(batch(stored(115, 3, parent=114, session="s")))  # turn 2's late finish store
+    assert ev.request_done(token, 5) == (None, None)
+    ev = live()
+    two_turns(ev)
+    token = ev.request_sent("s")
+    ev.handle(batch(stored(200, 10, parent=104, session="s")))  # this request's own store, from token 5
+    assert ev.request_done(token, 5) == (0, 15)
+
+    # A window dropped while its request ran (budget, overflow) comes back marked mixed.
+    ev = live()
+    turn(ev, "s", 0, stored(100, 10, session="s"))
+    token = ev.request_sent("s")
+    ev._tails.clear()
+    ev.handle(batch(stored(110, 5, parent=109, session="s")))
+    ev.discard(token)
+    token = ev.request_sent("s")
+    ev.handle(batch(stored(300, 10, parent=104, session="s")))
+    assert ev.request_done(token, 5) == (None, None)
+
+    # "0.5.19rc1" and a missing version are refused; an ipc:// publisher (kv_events None) is accepted.
+    for info, sends in (({**INFO, "version": "0.5.19rc1"}, False), ({**INFO, "version": None}, False),
+                        ({**INFO, "version": "0.5.23rc0"}, True),
+                        ({**INFO, "kv_events": None, "kv_events_config": '{"endpoint": "ipc:///tmp/kv"}'}, True)):
+        p, seen = proxy(publisher, [0], info=info)
+        try:
+            p.handle("openai", dict(BODY), {"x-prefixwise-session-id": "x"})
+            assert ("session_id" in seen[0]) is sends, info
+        finally:
+            p.engine_events.stop()
+            p._srv.shutdown()

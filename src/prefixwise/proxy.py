@@ -47,6 +47,7 @@ from __future__ import annotations
 import hmac
 import json
 import os
+import re
 import sys
 import threading
 from collections import OrderedDict
@@ -501,16 +502,15 @@ class PrefixwiseProxy:
             return
         problems = []
         version = str(info.get("version") or "")
-        try:
-            if tuple(int(x) for x in version.split(".")[:3]) < (0, 5, 20):
-                problems.append(f"SGLang {version} puts no session on its KV events (needs >= 0.5.20)")
-        except ValueError:
-            pass
+        parts = re.match(r"(\d+)\.(\d+)\.(\d+)", version)
+        if not parts or tuple(int(x) for x in parts.groups()) < (0, 5, 20):
+            problems.append(f"SGLang {version or '(version unknown)'} may put no session on its KV events "
+                            "(needs >= 0.5.20)")
         if info.get("enable_session_radix_cache"):
             problems.append("SGLang runs with --enable-session-radix-cache, where a session_id pins the "
                             "session's cache")
         events = info.get("kv_events") or {}
-        if not events:
+        if not events and not info.get("kv_events_config"):  # kv_events is None for ipc:// endpoints
             problems.append("SGLang is not publishing KV events: start it with --kv-events-config "
                             "'{\"publisher\": \"zmq\", \"endpoint\": \"tcp://*:5557\"}'")
         dp = max(int(info.get("dp_size") or 1), int(events.get("dp_size") or 1) if isinstance(events, dict) else 1)
