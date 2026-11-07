@@ -655,7 +655,7 @@ class PrefixwiseProxy:
                 "legit": result.legit, "native_reason": native_reason, "usage": usage,
                 "prompt_tokens": prompt_tokens, "cached_tokens": cached,
                 "avoidable_tokens": entry.avoidable_tokens, "fixes_applied": ctx.get("fixes_applied") or [],
-                "cost": entry.cost, "avoidable_cost": entry.avoidable_cost,
+                "cost": entry.cost, "avoidable_cost": entry.avoidable_cost, "evidence": result.evidence,
                 "response": payload}, entry
 
     # -- non-streaming ---------------------------------------------------------------

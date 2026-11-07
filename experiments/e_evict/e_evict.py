@@ -120,12 +120,13 @@ def run(args) -> dict:
             res, _ = proxy.handle("vllm", {**body(args.model, system, turns), "session_id": sid})
             if res["status"] >= 400:
                 raise SystemExit(f"rep {r} {label}: upstream {res['status']}: {json.dumps(res['response'])[:300]}")
-            row[label] = {"cause": res["cause"], "prompt": res["prompt_tokens"], "cached": res["cached_tokens"],
+            row[label] = {"cause": res["cause"], "evidence": res.get("evidence"),
+                          "prompt": res["prompt_tokens"], "cached": res["cached_tokens"],
                           "share": round(res["cached_tokens"] / res["prompt_tokens"], 3) if res["prompt_tokens"] else 0}
         reps.append(row)
         print(f"rep {r}: T2 {row['t2']['share']:.0%} cached ({row['t2']['cause']}); flood {row['flood_requests']} "
               f"requests in {row['flood_seconds']} s; T3 {row['t3']['cached']}/{row['t3']['prompt']} cached "
-              f"-> Prefixwise: {row['t3']['cause']}", flush=True)
+              f"-> Prefixwise: {row['t3']['cause']} ({(row['t3']['evidence'] or '').split(':')[0]})", flush=True)
 
     offload = args.engine in OFFLOAD
     control_ok = all(x["t2"]["share"] >= 0.5 for x in reps)
@@ -163,7 +164,7 @@ def write(res: dict, out: Path) -> Path:
              "| rep | T2 cached | flood | T3 cached | Prefixwise on T3 |", "|---:|---:|---|---:|---|"]
     for x in res["reps"]:
         lines.append(f"| {x['rep']} | {x['t2']['share']:.0%} | {x['flood_requests']} req, {x['flood_seconds']} s | "
-                     f"{x['t3']['cached']}/{x['t3']['prompt']} | `{x['t3']['cause']}` |")
+                     f"{x['t3']['cached']}/{x['t3']['prompt']} | `{x['t3']['cause']}`: {x['t3'].get('evidence') or ''} |")
     stem.with_suffix(".md").write_text("\n".join(lines) + "\n")
     return stem.with_suffix(".md")
 
