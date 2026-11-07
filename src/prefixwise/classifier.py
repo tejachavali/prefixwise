@@ -146,6 +146,16 @@ def _role_unchanged(role: str, p: list[BlockFingerprint], c: list[BlockFingerpri
     return len(p) == len(c) and all(_same(a, b) for a, b in zip(p, c))
 
 
+def _min_prefix(curr: RequestSnapshot) -> int | None:
+    """The provider's minimum cacheable prefix for this request; None when there is
+    none to apply (self-hosted engines)."""
+    if curr.min_prefix_tokens is not None:
+        return curr.min_prefix_tokens
+    if curr.provider == "anthropic":
+        return anthropic_min_prefix(curr.model)
+    return {"openai": OPENAI_MIN_PREFIX, "gemini": GEMINI_MIN_PREFIX}.get(curr.provider)
+
+
 def classify(prev: RequestSnapshot | None, curr: RequestSnapshot,
              *, native_reason: str | None = None) -> Classification:
     """Classify one turn against the previous turn in the same session."""
@@ -159,6 +169,15 @@ def classify(prev: RequestSnapshot | None, curr: RequestSnapshot,
     if prev.model != curr.model:
         return Classification(MissCause.MODEL_SWITCH, True,
                               f"model {prev.model} -> {curr.model}", native_reason=native_reason)
+
+    # The previous request was too short for the provider to cache at all, so
+    # nothing could have been reused, whatever changed since: not waste.
+    floor = _min_prefix(curr)
+    if floor is not None and 0 < prev.prompt_tokens < floor and curr.cached_tokens == 0:
+        return Classification(MissCause.BELOW_MIN_PREFIX, None,
+                              f"previous request was {prev.prompt_tokens} tokens, below the provider's minimum "
+                              f"cacheable prefix ({floor}): nothing was cached to reuse",
+                              native_reason=native_reason)
 
     prev_by_role = _blocks_by_role(prev.blocks)
     curr_by_role = _blocks_by_role(curr.blocks)
@@ -217,11 +236,7 @@ def classify(prev: RequestSnapshot | None, curr: RequestSnapshot,
                               f"blocks equal; prompt-affecting params changed: {changed}",
                               secondary, native_reason)
 
-    min_prefix = curr.min_prefix_tokens
-    if min_prefix is None:
-        min_prefix = {"openai": OPENAI_MIN_PREFIX, "gemini": GEMINI_MIN_PREFIX}.get(curr.provider, None)
-        if curr.provider == "anthropic":
-            min_prefix = anthropic_min_prefix(curr.model)
+    min_prefix = _min_prefix(curr)
     # 0 prompt tokens means usage was absent, not a short prompt: fall
     # through to UNKNOWN rather than claim BELOW_MIN_PREFIX.
     if min_prefix is not None and 0 < curr.prompt_tokens < min_prefix:

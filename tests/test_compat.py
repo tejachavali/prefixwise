@@ -55,3 +55,33 @@ def test_anthropic_minimums_by_model():
     assert anthropic_min_prefix("claude-sonnet-4-6") == 1024
     assert anthropic_min_prefix("claude-opus-4-5-20251101") == 4096
     assert anthropic_min_prefix("some-new-claude") == 512  # the floor: never over-claims
+
+
+def test_short_previous_request_is_below_the_minimum_even_if_history_changed():
+    # Muse's OpenAI run: 27-token prompts, history differed between turns; it was
+    # reported as history_edit with avoidable tokens, though nothing could be cached.
+    usage = lambda n: {"id": "chatcmpl-x", "object": "chat.completion",
+                       "usage": {"prompt_tokens": n, "prompt_tokens_details": {"cached_tokens": 0}}}
+    p, _ = scripted([usage(27), usage(40)])
+    h = {"x-prefixwise-session-id": "s"}
+    p.handle("openai", {"model": "gpt-5.6-luna", "messages": [{"role": "user", "content": "hi"}]}, h)
+    res = p.handle("openai", {"model": "gpt-5.6-luna", "messages": [{"role": "user", "content": "rewritten"},
+                                                                   {"role": "user", "content": "next"}]}, h)[0]
+    assert res["cause"] == "below_min_prefix" and res["avoidable_tokens"] == 0
+
+
+def test_server_errors_never_print_tracebacks(capsys):
+    from prefixwise.proxy import PrefixwiseHTTPServer
+
+    server = PrefixwiseHTTPServer.__new__(PrefixwiseHTTPServer)  # handle_error needs no socket
+    try:
+        raise BrokenPipeError(32, "Broken pipe")  # an agent cancelled its turn mid-stream
+    except BrokenPipeError:
+        server.handle_error(None, ("127.0.0.1", 5555))
+    try:
+        raise ValueError("odd")
+    except ValueError:
+        server.handle_error(None, ("127.0.0.1", 5555))
+    err = capsys.readouterr().err
+    assert "Traceback" not in err and "Broken pipe" not in err
+    assert err.strip() == "prefixwise: error serving 127.0.0.1: ValueError: odd"

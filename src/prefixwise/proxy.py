@@ -1016,6 +1016,15 @@ class PrefixwiseHTTPServer(ThreadingHTTPServer):
     request_queue_size = 256
     daemon_threads = True
 
+    def handle_error(self, request, client_address):
+        """A client hanging up (an agent cancelling a turn with Ctrl-C) is normal: say
+        nothing. Anything else gets one line, never a traceback (socketserver's default
+        prints one, which lands in the agent's terminal under `prefixwise run`)."""
+        exc = sys.exc_info()[1]
+        if isinstance(exc, (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, TimeoutError)):
+            return
+        print(f"prefixwise: error serving {client_address[0]}: {type(exc).__name__}: {exc}", file=sys.stderr)
+
     def __init__(self, *a, **kw):
         super().__init__(*a, **kw)
         self.active = 0  # requests in flight, for a graceful drain on shutdown

@@ -281,10 +281,19 @@ def cmd_run(args) -> int:
     try:
         child = subprocess.Popen(cmd, env=env)
     except FileNotFoundError:
-        print(f"prefixwise: command not found: {cmd[0]}", file=sys.stderr)
         child = None
+        print(f"prefixwise: command not found: {cmd[0]}", file=sys.stderr)
     code = 127
     if child is not None:
+        # While the agent runs it owns the terminal (often a full-screen UI), so the
+        # proxy's own messages go to a log file. The agent writes to the terminal
+        # directly, not through Python's sys.stderr, so it is unaffected.
+        log_path = os.path.join(os.path.dirname(os.path.abspath(ledger)), "prefixwise-run.log")
+        real_stderr = sys.stderr
+        try:
+            sys.stderr = open(log_path, "a", buffering=1)
+        except OSError:
+            log_path = None
         # Ctrl-C reaches the agent directly (same process group): agents use it to cancel a
         # turn, so Prefixwise must neither die nor kill the agent. SIGTERM is passed on.
         old_int = signal.signal(signal.SIGINT, signal.SIG_IGN)
@@ -294,9 +303,16 @@ def cmd_run(args) -> int:
         finally:
             signal.signal(signal.SIGINT, old_int)
             signal.signal(signal.SIGTERM, old_term)
+            server.shutdown()
+            server.drain(5)
+            if sys.stderr is not real_stderr:
+                sys.stderr.close()
+                sys.stderr = real_stderr
         code = 128 - code if code < 0 else code  # killed by a signal: shell convention
-    server.shutdown()
-    server.drain(5)
+        if log_path and os.path.exists(log_path) and os.path.getsize(log_path):
+            print(f"prefixwise: proxy messages from this run are in {log_path}", file=sys.stderr)
+    else:
+        server.shutdown()
     server.server_close()
     found = findings(proxy.ledger, since=start)
     print("\n-- prefixwise: this run --", file=sys.stderr)
