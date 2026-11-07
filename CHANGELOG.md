@@ -1,6 +1,10 @@
 # Changelog
 
-## Unreleased
+## 0.3.1: 2026-11-07
+
+Production hardening, found by a new benchmark; per-model lanes; OpenAI prices.
+**Upgrading:** existing ledgers are migrated in place on first start. Rows written before
+0.3.1 have no timestamp, so `prefixwise prune` keeps them unless you add `--include-undated`.
 
 - **Production benchmark** (`benchmarks/bench.py`): added latency, throughput, memory, a soak and 13 failure cases, against the real `prefixwise serve` and a fake upstream. Results in `benchmarks/runs/`; README "Running in production" summarises them. CI runs the failure cases on every push.
 - **3-4x lower overhead on long prompts:** masked block hashes are cached, since an agent resends the same prefix every turn. A 120k-token request went from +50 ms to +13 ms (p50).
