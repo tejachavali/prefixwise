@@ -65,7 +65,7 @@ docker build -t prefixwise . && docker run -p 127.0.0.1:8080:8080 -v pw:/data pr
 
 ## What it tells you
 
-One cause per request: the first thing, in prefix order, that broke reuse. Waste is avoidable; legitimate changes cost tokens but are not waste.
+One cause per request: the first thing, in prefix order, that broke reuse. Each request is compared with the previous request **to the same model** in its session, so an agent's small-model side calls (titles, summaries) never mask what is happening on its main thread. Waste is avoidable; legitimate changes cost tokens but are not waste.
 
 | Cause | Meaning | Waste? | Typical fix |
 |---|---|---|---|
@@ -79,7 +79,7 @@ One cause per request: the first thing, in prefix order, that broke reuse. Waste
 | `tool_result_mutation` | An earlier tool result was re-rendered or removed | **yes** | Freeze tool output once sent |
 | `compaction_rewrite` | Context was compacted (send `X-Prefixwise-Compaction-Event: 1`) | no | Compact at task boundaries, not per turn |
 | `param_rendered` | Blocks equal, but tool_choice / thinking / reasoning / format changed | depends | Keep those params stable within a session |
-| `model_switch` | Different model than the previous turn | no | - |
+| `model_switch` | First call to a different model in the session | no | - |
 | `retry_replay` | Identical request within 60 s with nothing cached | **yes** | Check retry logic |
 | `breakpoint_misplaced` | Anthropic: no `cache_control` breakpoint | **yes** | Add `cache_control` after the stable prefix |
 | `below_min_prefix` | Prompt below the provider's minimum cacheable length | depends | - |

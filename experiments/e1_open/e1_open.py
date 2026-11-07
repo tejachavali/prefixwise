@@ -18,7 +18,12 @@ Session A (x5, coding questions):
 Session B (x5, coding questions):
   1 FIRST_WRITE, 2 NONE, 3 COMPACTION_REWRITE, 4 COMPACTION_REWRITE,
   5 NONE, 6 RETRY_REPLAY, 7 RETRY_REPLAY, 8 MODEL_SWITCH,
-  9 MODEL_SWITCH, 10 NONE
+  9 SWITCH_BACK (expected NONE), 10 NONE
+
+  SWITCH_BACK returns to the original model. Prefixwise compares each
+  turn with the last turn to the SAME model (per-model lanes), so going
+  back to a model whose prefix is still cached is a hit, not a second
+  MODEL_SWITCH. Its expected cause is NONE.
 
 Session C (x2, append-only growth, the shape of real agent traffic):
   1 FIRST_WRITE, 2-10 NONE. Each turn appends the previous assistant
@@ -27,9 +32,9 @@ Session C (x2, append-only growth, the shape of real agent traffic):
   and B repeat identical requests for NONE, which cannot catch a
   classifier that mistakes growth for HISTORY_EDIT; Session C does.
 
-That is 120 turns: FIRST_WRITE 12, NONE 38, VOLATILE_SYSTEM 10,
-TOOL_RESERIALIZE 10, TOOL_CATALOG_CHANGE 10, SYSTEM_EDIT 10,
-COMPACTION_REWRITE 10, RETRY_REPLAY 10, MODEL_SWITCH 10.
+That is 120 turns: FIRST_WRITE 12, NONE 38 (+5 SWITCH_BACK expected
+NONE), VOLATILE_SYSTEM 10, TOOL_RESERIALIZE 10, TOOL_CATALOG_CHANGE 10,
+SYSTEM_EDIT 10, COMPACTION_REWRITE 10, RETRY_REPLAY 10, MODEL_SWITCH 5.
 
 How each injection is made (all other blocks identical to the
 previous turn, so the first divergence is the injected one):
@@ -132,7 +137,7 @@ SESSION_A = ["first_write", "none", "volatile_system", "volatile_system",
              "tool_catalog_change", "system_edit", "system_edit"]
 SESSION_B = ["first_write", "none", "compaction_rewrite", "compaction_rewrite",
              "none", "retry_replay", "retry_replay", "model_switch",
-             "model_switch", "none"]
+             "switch_back", "none"]
 # Append-only growth: every turn adds an exchange; nothing earlier changes.
 SESSION_C = ["first_write"] + ["none"] * 9
 SESSIONS = [SESSION_A] * 5 + [SESSION_B] * 5 + [SESSION_C] * 2
@@ -157,6 +162,7 @@ def simulate_cached_tokens(injected: str, prompt_tokens: int = PROMPT_TOKENS_MOC
         "tool_catalog_change": 0.0,
         "compaction_rewrite": 0.1,
         "model_switch": 0.0,
+        "switch_back": 0.9,  # the original model's prefix is still cached
         "retry_replay": 0.0,
         "system_edit": 0.2,
     }
@@ -219,12 +225,12 @@ def build_body(*, session_id: str, model: str, injected: str, turn: int,
         "max_tokens": 16,
         "temperature": 0,
     }
-    if not grow and injected in ("none", "retry_replay") and turn in (5, 6, 7):
-        # Session B, turns 5-7: these follow a compaction, so the
-        # identical request to repeat is the compacted history from
-        # turn 4, not the pre-compaction baseline. Without this the
-        # "identical" turn would differ in messages and be classified
-        # HISTORY_EDIT instead of NONE / RETRY_REPLAY.
+    if not grow and injected in ("none", "retry_replay", "model_switch", "switch_back") and 5 <= turn <= 10:
+        # Session B, turns 5-10: everything after the compaction carries the
+        # compacted history from turn 4, as a real harness would. (Until
+        # 2026-11-07 turns 8-10 reverted to the pre-compaction history; the
+        # model switch at turn 8 hid that. Per-model lanes compare turn 9
+        # with the same model's turn 7, which exposed it as HISTORY_EDIT.)
         messages = [
             {"role": "system", "content": system},
             {"role": "user", "content": "[Summary of prior turns, compaction 4] Prefix caching was discussed; the user asked about vLLM eviction."},
@@ -238,17 +244,25 @@ def build_body(*, session_id: str, model: str, injected: str, turn: int,
     return body
 
 
+# Injected labels whose expected cause differs from the label itself.
+EXPECTED = {"switch_back": "none"}
+
+
+def expected_cause(injected: str) -> str:
+    return EXPECTED.get(injected, injected)
+
+
 def score_results(results: list[dict]) -> dict:
     """Score a list of turn results against their injected causes."""
     total = len(results)
-    agreed = sum(1 for r in results if r["predicted"] == r["injected"])
-    misses = [r for r in results if r["injected"] not in ("none", "first_write")]
+    agreed = sum(1 for r in results if r["predicted"] == expected_cause(r["injected"]))
+    misses = [r for r in results if expected_cause(r["injected"]) not in ("none", "first_write")]
     unknown = sum(1 for r in misses if r["predicted"] == "unknown")
     per_cause: dict[str, dict] = {}
     for r in results:
         c = per_cause.setdefault(r["injected"], {"n": 0, "correct": 0})
         c["n"] += 1
-        if r["predicted"] == r["injected"]:
+        if r["predicted"] == expected_cause(r["injected"]):
             c["correct"] += 1
     for c in per_cause.values():
         c["precision"] = c["correct"] / c["n"] if c["n"] else None
@@ -348,9 +362,7 @@ def run(*, vllm_url: str, model: str, model_alias: str, mock: bool,
             if max_turns is not None and turn_no > max_turns:
                 break
             model_for_turn = model_alias if injected == "model_switch" and turn_idx in (8,) else model
-            # Turn 9 in session B switches back to the original model.
-            if injected == "model_switch" and turn_idx == 9:
-                model_for_turn = model
+            # Turn 9 in session B (switch_back) is on the original model again.
             state["injected"] = injected
             body = build_body(session_id=session_id, model=model_for_turn,
                               injected=injected, turn=turn_idx, base_date=base_date,
@@ -379,7 +391,7 @@ def run(*, vllm_url: str, model: str, model_alias: str, mock: bool,
                 "turn": turn_no, "session_id": session_id, "injected": injected,
                 "predicted": predicted, "cached_tokens": cached,
                 "prompt_tokens": prompt_tokens,
-                "agreement": predicted == injected,
+                "agreement": predicted == expected_cause(injected),
                 "unknown": predicted == "unknown",
                 "upstream_error": upstream_error,
                 "upstream_session_id": retry_upstream_session_id,

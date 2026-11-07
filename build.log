@@ -380,3 +380,13 @@
   0.3.0, `prefixwise prices`, mock serve + classify + priced report OK.
 - Found: BrokenPipeError traceback on `report | head`; fixed in this
   commit (quiet exit). Tests: 134 passed.
+
+## 2026-11-07 PST -- commit 0ca07191e4478d7c36a133e858c0f585abe97dac (per-model lanes)
+- What changed: (session, model) lanes in the proxy and explain; one-
+  shot replacement not HISTORY_EDIT; E1 switch_back expected none;
+  E1-open Session B keeps compacted history on turns 8-10.
+- Found while building it: one-shot side calls were HISTORY_EDIT
+  (false waste); E1-open turns 8-10 reverted the compaction (masked by
+  model_switch).
+- Tests: 139 passed. Mocks: E1-open 100%, E1-hosted 100%/100%, E4 99.8%.
+- Not yet: live E1 re-check under lanes (Muse).

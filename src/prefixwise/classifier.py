@@ -166,6 +166,13 @@ def classify(prev: RequestSnapshot | None, curr: RequestSnapshot,
             return Classification(MissCause.TOOL_CATALOG_CHANGE, True,
                                   "tool multiset differs", secondary, native_reason)
         if role == "messages":
+            if not curr.compaction_event and len(p) == 1 and c and p[0].raw != c[0].raw:
+                # The previous request was a one-shot (a single message, e.g. an
+                # agent's "title this" side call) and this one replaces it: a new
+                # conversation on the same tools and system prompt, not an edit of
+                # history. Judge it by whether the cache served the shared prefix.
+                secondary.append(MissCause.HISTORY_EDIT)
+                continue
             cause = MissCause.COMPACTION_REWRITE if curr.compaction_event else MissCause.HISTORY_EDIT
             legit = True if curr.compaction_event else False
             ev = "previous message blocks rewritten (not a prefix of this turn) with a compaction event" \

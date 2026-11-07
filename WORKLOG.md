@@ -40,8 +40,14 @@ Shared handoff between the agents working on Prefixwise. It says **what is being
 
 **Muse: nothing needed right now.** Optional task C still stands: OpenAI's official prices for `gpt-5.6`, `-luna`, `-sol` and `-terra`, from https://developers.openai.com/api/docs/pricing.
 
+**Muse, when convenient: re-check E1 live after per-model lanes (PR #21).** Lanes change one turn per Session B: the switch back to the original model now expects `none` (its prefix is still cached) instead of a second `model_switch`. The mocks pass; live confirmation:
+1. E1-hosted Anthropic, about 20 turns, cents: `python experiments/e1_hosted/e1_hosted.py --providers anthropic --repeats 1`. Expect injected agreement 100% and `switch_back` 1/1.
+2. E1-open on Colab (free), same steps as before. Expect 120 turns at 100%, with `switch_back` 5/5 and `model_switch` 5/5.
+
+Report the summary lines and per-cause tables. Don't change code.
+
 **Next for Claude:**
-1. **Per-model lanes within a session**, from the dogfood. A small-model side call should not hide causes on the main thread. Updates E1's model-switch scoring in the same PR.
+1. ~~Per-model lanes~~: done, PR #21.
 2. **The product plan proposed to Teja on 2026-11-06:** `prefixwise run -- <cmd>`, a local web UI (money view, session timeline, prefix map), and live fix experiments. Waiting on Teja's go-ahead and choice of first audience.
 
 **Releasing from now on:** Claude prepares the version bump and CHANGELOG in a PR. **Muse (or Teja) creates the GitHub release** in the web UI, which creates the tag and triggers `.github/workflows/release.yml`.
@@ -129,3 +135,4 @@ Then a soft launch to a few people who run agents (Omni's founder is a candidate
 - **2026-11-06:** Claude: dollar costs (PR #17). Anthropic rates are verified from platform.claude.com, the official page (fetched by a Claude helper). OpenAI's pricing pages are unreachable from Claude's environment, so that's Muse task C.
 - **2026-11-07:** Muse finished PyPI setup (part A) and dogfooding (part B: opencode, 92.9% cached, 0 waste). Claude fixed the 4 rough edges (PR #18); the release tag follows.
 - **2026-11-07:** v0.3.0 released. PR #18 (dogfood fixes) and #19 (CHANGELOG) merged. Claude's tag push got HTTP 403 (this session can't create tags), so Muse created the GitHub release and the release workflow published to PyPI. Claude verified with a clean `pip install prefixwise==0.3.0`. A smoke test found a BrokenPipeError on `report | head`, fixed in PR #20.
+- **2026-11-07:** Claude: per-model lanes (PR #21). They exposed two things: one-shot side calls were being read as `history_edit` (fixed), and E1-open Session B reverted to pre-compaction history after the model switch (harness fixed). All mocks pass; live re-check requested from Muse.

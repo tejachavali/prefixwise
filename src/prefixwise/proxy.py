@@ -415,6 +415,15 @@ class PrefixwiseProxy:
         # previous_response_id (input = new items only) can be stitched
         # onto the exact turn it continues, including branches.
         self.snapshot_by_response: dict[str, RequestSnapshot] = _SessionMap(MAX_SESSIONS)
+        # Per-model lanes within a session, keyed (session, model). Agents
+        # interleave small-model side calls (titles, summaries) with the main
+        # thread; each turn is compared with the last turn to the SAME model,
+        # so a side call never masks a cause on the main thread (dogfood,
+        # 2026-11-06). The session-level maps above still say "has this
+        # session been seen", which decides FIRST_WRITE vs MODEL_SWITCH.
+        self.lane_snapshot: dict[tuple, RequestSnapshot] = _SessionMap(MAX_SESSIONS)
+        self.lane_seen: dict[tuple, float] = _SessionMap(MAX_SESSIONS)
+        self.lane_response_id: dict[tuple, str] = _SessionMap(MAX_SESSIONS)
 
     # -- shared request path ---------------------------------------------------------
 
@@ -453,7 +462,10 @@ class PrefixwiseProxy:
         # client that sets its own comparison id keeps it.
         forward_body, fixes_applied = apply_fixes(forward_body, self.fixes)
         with self._lock:
-            previous_id = self.last_response_id.get(session_id)
+            # Chain the provider's diagnostics to this model's last turn when
+            # there is one, so its verdict compares like with like.
+            lane = (session_id, str(body.get("model", "unknown")))
+            previous_id = self.lane_response_id.get(lane) or self.last_response_id.get(session_id)
         if provider == "anthropic":
             forward_body.update(anthropic_diagnostics(previous_id))
         elif api == "responses" and previous_id:
@@ -516,9 +528,18 @@ class PrefixwiseProxy:
                          native_reason, response_id, fps) -> tuple[dict, LedgerEntry]:
         provider, body, session_id = ctx["provider"], ctx["body"], ctx["session_id"]
         now = time.time()
-        gap_seconds = (now - self.last_seen[session_id]) if session_id in self.last_seen else None
+        lane = (session_id, ctx["model"])
+        if lane in self.lane_snapshot:
+            # Compare with this model's previous turn, and time the gap from it.
+            prev = self.lane_snapshot.get(lane)
+            gap_seconds = now - self.lane_seen[lane] if lane in self.lane_seen else None
+        else:
+            # First turn on this model: FIRST_WRITE for a new session, else
+            # MODEL_SWITCH (the classifier compares models first).
+            prev = self.last_snapshot.get(session_id)
+            gap_seconds = (now - self.last_seen[session_id]) if session_id in self.last_seen else None
         self.last_seen[session_id] = now
-        prev = self.last_snapshot.get(session_id)
+        self.lane_seen[lane] = now
         unknown_parent = False
         if ctx.get("api") == "responses" and body.get("previous_response_id"):
             stitched, prior = self._stitch(ctx, fps)
@@ -545,8 +566,10 @@ class PrefixwiseProxy:
             result = classify(prev, curr, native_reason=native_reason)
         self.scorer.record(result.cause, native_reason, provider)
         self.last_snapshot[session_id] = curr
+        self.lane_snapshot[lane] = curr
         if response_id:
             self.last_response_id[session_id] = response_id
+            self.lane_response_id[lane] = response_id
             if ctx.get("api") == "responses":
                 self.snapshot_by_response[response_id] = curr
 

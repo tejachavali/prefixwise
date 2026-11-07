@@ -492,12 +492,13 @@ def test_anthropic_ttl_expired_and_one_hour_ttl():
                     "system": [{"type": "text", "text": "x", "cache_control": cc}],
                     "messages": [{"role": "user", "content": "hi"}]}
         post(port, "/v1/messages", body())
-        proxy.last_seen["ttl"] = _time.time() - 600  # 10 minutes idle > 5 min default
+        idle = _time.time() - 600  # 10 minutes idle > 5 min default
+        proxy.last_seen["ttl"] = proxy.lane_seen[("ttl", "claude-sonnet-5-5")] = idle
         _, _, h = post(port, "/v1/messages", body())
         assert h["X-Prefixwise-Cause"] == "ttl_expired"
         # Same 10-minute gap in a session that asked for a 1 h cache: not expiry.
         post(port, "/v1/messages", body("1h", "ttl1h"))
-        proxy.last_seen["ttl1h"] = _time.time() - 600
+        proxy.last_seen["ttl1h"] = proxy.lane_seen[("ttl1h", "claude-sonnet-5-5")] = _time.time() - 600
         _, _, h = post(port, "/v1/messages", body("1h", "ttl1h"))
         assert h["X-Prefixwise-Cause"] == "routing_miss"
     finally:
