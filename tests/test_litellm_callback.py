@@ -136,6 +136,9 @@ def test_answers_from_litellms_own_cache_are_not_recorded(base, cb):
         msgs = [{"role": "user", "content": "cache me " + SYSTEM}]
         for _ in range(3):
             call(base, "anthropic/claude-haiku-5-5", msgs, caching=True, litellm_session_id="lc")
+    except ImportError as exc:  # LiteLLM's response cache needs its proxy-server extras
+        pytest.skip(f"LiteLLM's response cache is not installed here ({exc.name}); "
+                    "test_a_cache_hit_is_never_recorded covers the callback")
     finally:
         litellm.cache = saved
     time.sleep(0.5)
@@ -239,3 +242,11 @@ def test_a_user_id_is_a_session_but_not_a_conversation():
     provider, _, _, kw = spy.calls[0]
     assert provider == "openai" and kw["session_id"] == "alice" and kw["session_is_user"]
     assert kw["genai_provider"] == "groq"
+
+
+def test_a_cache_hit_is_never_recorded():
+    spy = _Spy()
+    c = PrefixwiseCallback(recorder=spy)
+    c._record(_kwargs(cache_hit=True), _response({"prompt_tokens": 10, "completion_tokens": 1}), None, None)
+    c._record(_kwargs(cache_hit=None), _response({"prompt_tokens": 10, "completion_tokens": 1}), None, None)
+    assert len(spy.calls) == 1
