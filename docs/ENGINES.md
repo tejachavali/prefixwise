@@ -115,14 +115,39 @@ session's cache; Prefixwise reads that flag from `/server_info` and then sends n
   "not an eviction" is claimed only with `--full-attention`. `/server_info` shows sliding-window
   capacity (`token_capacity_swa`), which turns the flag off; it has nothing for Mamba, hence the
   flag.
-- **The same wire format and stream.** `[topic, seq, msgpack [ts, events, attn_dp_rank]]`,
-  sequence numbers, a publisher that sends only when something changed (so an empty socket means
-  the stream has caught up), one port per DP rank.
+- **The same wire format.** `[topic, seq, msgpack [ts, events, attn_dp_rank]]` with sequence
+  numbers, one port per DP rank.
+- **A different publishing schedule.** SGLang publishes a step's events after it has sent that
+  step's output (after a prefill result, every 40 decode steps, and when idle), so a response
+  can reach Prefixwise before the removal that caused its miss, and an empty socket proves
+  nothing. But events are queued in order, and a missed request stores its new blocks (tagged
+  with its session) after every eviction made to admit it. So "not an eviction" waits, up to
+  0.5 s, for the request's own store; without it there is no claim.
+- **Event hashes leave out `extra_key`** (`compute_node_event_hash_values`), so identical tokens
+  sent with different `extra_key` values sit in two subtrees under the same hashes. A hash
+  stored while already present marks both runs, and chains through them are not judged.
+- **Blocks stored again** (another session, a HiCache load-back) before this request was sent
+  count as present, as on vLLM; stored again after it was sent (by this request itself), they
+  do not.
 
 The rest is the vLLM design: freeze the previous request's chain when the next is sent, judge
-only the block where the cache read stopped, make the negative claim only when the stream has
-caught up with no lost messages and one request in flight. `AllBlocksCleared` (`/flush_cache`)
-and an engine restart count as evictions.
+only the block where the cache read stopped, make the negative claim only with no lost messages
+and one request in flight. `AllBlocksCleared` (`/flush_cache`) and an engine restart count as
+evictions.
+
+**What `/server_info` gates.** Prefixwise sends a session id, and so judges anything, only when
+`/server_info` (read with `PREFIXWISE_API_KEY`, since SGLang's `--api-key` protects it) shows
+version >= 0.5.20, events published, no `--enable-session-radix-cache`, and one data-parallel
+rank (SGLang routes requests across ranks without session affinity, and each rank has its own
+cache and stream). It also sizes the block index from the cache capacity (`token_capacity` /
+`page_size`, plus a quarter), so a large cache is not mistaken for missed removals, and a
+sliding-window capacity turns "not an eviction" off. Chains kept for sessions are capped at 16
+million tokens in all (8 bytes each), oldest sessions first. Requests with `n > 1` are not
+judged (the choices' stores would mix).
+
+Independent review of this design found two ways to a wrong claim (the `extra_key` hash
+collision; data-parallel ranks), the publishing schedule above, a crash on index overflow, and
+unbounded memory and quadratic time on deep chains; all fixed as described, with tests.
 
 **Shared limit, vLLM and SGLang:** a removal is counted from the previous request until the
 response. If the cache read stopped because the tokens changed, and the engine then evicted that

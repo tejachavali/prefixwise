@@ -425,10 +425,9 @@ class PrefixwiseProxy:
         if full_attention is None:
             full_attention = os.environ.get("PREFIXWISE_FULL_ATTENTION", "").lower() in ("1", "true", "yes")
         self.engine_events = None
-        # SGLang reads a body session_id as the attribution label on its KV events
-        # (>= 0.5.20), except with --enable-session-radix-cache, where it pins the
-        # session's cache: then Prefixwise sends none and claims nothing.
-        self.sglang_session_cache = False
+        # SGLang (>= 0.5.20) reads a body session_id as the attribution label on its KV
+        # events. Sent only once /server_info shows that is all it does (_check_sglang).
+        self.sglang_join = False
         if kv_events:
             from .engines import EngineEvents, SGLangEvents
             if self.engine == "sglang":
@@ -483,38 +482,59 @@ class PrefixwiseProxy:
         self.lane_response_id: dict[tuple, str] = _SessionMap(MAX_SESSIONS)
 
     def _check_sglang(self) -> None:
-        """Read SGLang's /server_info once: an engine older than 0.5.20 puts no
-        session on its events, --enable-session-radix-cache gives a body session_id
-        another meaning, and a sliding-window model frees layers without events."""
-        base = self.upstreams.get("openai") or self.upstream_url
-        base = base.removesuffix("/v1")
+        """Read SGLang's /server_info once. Event verdicts stay off (session id not sent)
+        unless it shows: version >= 0.5.20 (session on events), events published, no
+        --enable-session-radix-cache (a session_id would pin the session's cache), and
+        one data-parallel rank (each rank has its own cache and event stream). It also
+        sizes the block index from the cache capacity, and a sliding-window model
+        turns "not an eviction" off."""
+        base = (self.upstreams.get("openai") or self.upstream_url).removesuffix("/v1")
+        headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
         try:
-            with urllib.request.urlopen(base + "/server_info", timeout=5) as r:
+            req = urllib.request.Request(base + "/server_info", headers=headers)
+            with urllib.request.urlopen(req, timeout=5) as r:
                 info = json.loads(r.read())
-        except (OSError, ValueError) as exc:  # not fatal: the inference still works
-            self.engine_notes.append(f"could not read SGLang /server_info ({type(exc).__name__}); "
-                                     "KV events need SGLang >= 0.5.20")
+        except (OSError, ValueError) as exc:
+            self.engine_notes.append(f"could not read SGLang /server_info ({type(exc).__name__}"
+                                     f"{', set PREFIXWISE_API_KEY' if '401' in str(exc) else ''}): "
+                                     "evictions stay inferred")
             return
+        problems = []
         version = str(info.get("version") or "")
         try:
-            too_old = tuple(int(x) for x in version.split(".")[:3]) < (0, 5, 20)
+            if tuple(int(x) for x in version.split(".")[:3]) < (0, 5, 20):
+                problems.append(f"SGLang {version} puts no session on its KV events (needs >= 0.5.20)")
         except ValueError:
-            too_old = False
-        if too_old:
-            self.engine_notes.append(f"SGLang {version} puts no session on its KV events (needs >= 0.5.20): "
-                                     "evictions stay inferred")
+            pass
         if info.get("enable_session_radix_cache"):
-            self.sglang_session_cache = True
-            self.engine_notes.append("SGLang runs with --enable-session-radix-cache, which gives a session_id "
-                                     "its own meaning: Prefixwise sends none, and evictions stay inferred")
-        states = info.get("internal_states") or []
-        if any(((s or {}).get("memory_usage") or {}).get("token_capacity_swa") for s in states):
+            problems.append("SGLang runs with --enable-session-radix-cache, where a session_id pins the "
+                            "session's cache")
+        events = info.get("kv_events") or {}
+        if not events:
+            problems.append("SGLang is not publishing KV events: start it with --kv-events-config "
+                            "'{\"publisher\": \"zmq\", \"endpoint\": \"tcp://*:5557\"}'")
+        dp = max(int(info.get("dp_size") or 1), int(events.get("dp_size") or 1) if isinstance(events, dict) else 1)
+        if dp > 1:
+            problems.append(f"SGLang runs {dp} data-parallel ranks, each with its own cache and events")
+        if problems:
+            self.engine_notes.extend(problems)
+            self.engine_notes.append("evictions stay inferred")
+            return
+        states = [s or {} for s in info.get("internal_states") or []]
+        usage = [s.get("memory_usage") or {} for s in states]
+        if any(u.get("token_capacity_swa") for u in usage):
             self.engine_events.hybrid = True
             self.engine_notes.append("the model has sliding-window layers: evictions can be confirmed, "
                                      "never ruled out")
-        if not info.get("kv_events"):
-            self.engine_notes.append("SGLang is not publishing KV events: start it with --kv-events-config "
-                                     "'{\"publisher\": \"zmq\", \"endpoint\": \"tcp://*:5557\"}'")
+        capacity = max([int(u.get("token_capacity") or 0) for u in usage]
+                       + [int(info.get("max_total_num_tokens") or 0)])
+        blocks = capacity // max(1, int(info.get("page_size") or 1))
+        if blocks:
+            self.engine_events.max_alive = max(self.engine_events.max_alive, blocks * 5 // 4 + 1024)
+            if blocks > 2_000_000:
+                self.engine_notes.append(f"SGLang caches up to {blocks:,} blocks: Prefixwise's index needs about "
+                                         f"{blocks * 80 // 1_000_000:,} MB (--page-size 16 cuts it 16-fold)")
+        self.sglang_join = True
 
     # -- shared request path ---------------------------------------------------------
 
@@ -549,8 +569,8 @@ class PrefixwiseProxy:
         # vLLM and SGLang put a body session_id on their KV events, so the engine
         # join can attribute blocks to sessions. Hosted APIs reject unknown fields.
         engine_token = None
-        if (self.engine == "sglang" and api == "chat" and self.engine_events is not None
-                and not self.sglang_session_cache):
+        if (self.engine == "sglang" and api == "chat" and self.engine_events is not None and self.sglang_join
+                and body.get("n") in (None, 1)):  # n > 1: the choices' stores would mix
             forward_body["session_id"] = session_id
             engine_token = self.engine_events.request_sent(session_id)
         if self.engine == "vllm" and api == "chat":

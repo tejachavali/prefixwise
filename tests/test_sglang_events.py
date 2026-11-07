@@ -227,8 +227,10 @@ def server_info(info):
     """A stand-in for SGLang's GET /server_info."""
     class H(BaseHTTPRequestHandler):
         def do_GET(self):
-            data = json.dumps(info if self.path == "/server_info" else {}).encode()
-            self.send_response(200 if self.path == "/server_info" else 404)
+            server_info.auth = self.headers.get("Authorization")
+            ok = self.path == "/server_info" and info is not None
+            data = json.dumps(info if ok else {}).encode()
+            self.send_response(200 if ok else 401)
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
             self.wfile.write(data)
@@ -252,10 +254,13 @@ def proxy(publisher, cached, info=INFO, full_attention=True):
 
     def fake(provider, body, request_id, session_id, client_headers, api="chat"):
         seen.append(dict(body))
+        if len(seen) > 1 and p.engine_store:  # the engine stores this request's blocks as it finishes
+            publisher(*p.engine_store)
         return 200, {"id": request_id, "usage": {"prompt_tokens": 4000, "completion_tokens": 1,
                                                  "prompt_tokens_details": {"cached_tokens": cached.pop(0)}}}
     p._forward = fake
     p._srv = srv
+    p.engine_store = [stored(9000, 3000, session="agent-7")]
     return p, seen
 
 
@@ -268,8 +273,10 @@ def wait_for(cond, timeout=5.0):
     return False
 
 
-def over_the_wire(publisher, cached, *between, **kw):
+def over_the_wire(publisher, cached, *between, own_store=True, **kw):
     p, seen = proxy(publisher, cached, **kw)
+    if not own_store:
+        p.engine_store = []
     try:
         assert wait_for(lambda: (publisher(), p.engine_events.snapshot()["batches"] > 0)[1])
         h = {"x-prefixwise-session-id": "agent-7"}
@@ -293,6 +300,12 @@ def test_over_the_wire_still_resident_is_not_an_eviction(publisher):
     assert res["cause"] == "unknown" and res["evidence"].startswith("not an eviction")
 
 
+def test_over_the_wire_no_claim_until_the_requests_own_store_arrives(publisher):
+    # SGLang publishes a step's events after its output: an empty socket proves nothing.
+    res, _ = over_the_wire(publisher, [0, 0], own_store=False)
+    assert res["cause"] == "evicted" and res["evidence"].startswith("inferred")
+
+
 def test_over_the_wire_sliding_window_model_keeps_the_inference(publisher):
     info = {**INFO, "internal_states": [{"memory_usage": {"token_capacity_swa": 8192}}]}
     res, p = over_the_wire(publisher, [0, 0], info=info)
@@ -312,3 +325,72 @@ def test_session_radix_cache_and_old_engines_get_no_session_id(publisher):
     p.engine_events.stop()
     p._srv.shutdown()
     assert any("0.5.20" in n for n in p.engine_notes) and any("--kv-events-config" in n for n in p.engine_notes)
+
+
+def test_server_info_gates_the_join(publisher):
+    def sent_session(info, **kw):
+        p, seen = proxy(publisher, [0], info=info, **kw)
+        try:
+            p.handle("openai", dict(BODY), {"x-prefixwise-session-id": "x"})
+            return "session_id" in seen[0], p
+        finally:
+            p.engine_events.stop()
+            p._srv.shutdown()
+
+    ok, p = sent_session(INFO)
+    assert ok and server_info.auth == "Bearer k"  # SGLang --api-key protects /server_info
+    assert p.engine_events.max_alive == 2_000_000  # 32k-token cache: the default cap holds
+    big = {**INFO, "page_size": 1, "internal_states": [{"memory_usage": {"token_capacity": 3_000_000}}]}
+    ok, p = sent_session(big)
+    assert ok and p.engine_events.max_alive > 3_000_000 and any("MB" in n for n in p.engine_notes)
+    for info in ({**INFO, "dp_size": 2}, {**INFO, "kv_events": {"dp_size": 4}}, None):
+        ok, p = sent_session(info)  # several ranks, or /server_info unreadable: no session id
+        assert not ok and "evictions stay inferred" in " ".join(p.engine_notes)
+
+
+def test_n_choices_are_not_judged(publisher):
+    p, seen = proxy(publisher, [0])
+    try:
+        p.handle("openai", dict(BODY, n=2), {"x-prefixwise-session-id": "x"})
+        assert "session_id" not in seen[0]
+    finally:
+        p.engine_events.stop()
+        p._srv.shutdown()
+
+
+def test_review_findings():
+    # A hash on two subtrees (requests with different extra_key): neither chain is judged.
+    ev = SGLangEvents(full_attention=True)
+    turn(ev, "a", 0, stored(100, 10, session="a"))
+    turn(ev, "b", 0, stored(100, 10, session="b"))
+    ev.handle(batch(removed(100, 10)))
+    assert turn(ev, "a", 5) == (None, None) and turn(ev, "b", 5) == (None, None)
+
+    # Blocks stored again (another session, HiCache load-back) before the request: present.
+    ev = SGLangEvents(full_attention=True)
+    two_turns(ev, removed(110, 5), removed(100, 10), stored(100, 10, session="other"))
+    assert turn(ev, "s", 5) == (0, 15)
+    # ...but stored again by the request itself, after it was sent: still an eviction.
+    ev = SGLangEvents(full_attention=True)
+    two_turns(ev, removed(110, 5), removed(100, 10))
+    assert turn(ev, "s", 5, stored(100, 10, session="s")) == (15, 0)
+
+    # An overflow while a check waits does not crash it.
+    ev = SGLangEvents(full_attention=True, max_alive=20)
+    two_turns(ev)
+    token = ev.request_sent("s")
+    ev.handle(batch(stored(500, 30)))
+    assert ev.request_done(token, 5) == (None, None)
+
+    # Chains kept for sessions are bounded by a token budget.
+    ev = SGLangEvents(max_held_tokens=1000)
+    for k in range(10):
+        ev.handle(batch(stored(10_000 * (k + 1), 300, session=f"s{k}"), removed(10_000 * (k + 1), 300)))
+    assert ev.snapshot()["chain_tokens_held"] <= 1000 and ev.snapshot()["sessions_tracked"] <= 4
+
+    # Deep chains are walked once, not once per removed run.
+    ev = SGLangEvents()
+    turn(ev, "s", 0, *[stored(k + 1, 1, parent=k or None, session="s") for k in range(9000)])
+    ev.handle(batch(AllBlocksCleared()))
+    t = time.time()
+    assert turn(ev, "s", 3) == (9000, 0) and time.time() - t < 0.5
