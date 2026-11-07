@@ -63,6 +63,7 @@ from .fingerprint import Fingerprinter
 from .fixes import apply_fixes, parse_fixes
 from . import api
 from .pricing import PriceTable, breakdown
+from .prom import Metrics
 from .ledger import Ledger, LedgerEntry, avoidable_for_turn
 
 
@@ -420,6 +421,7 @@ class PrefixwiseProxy:
                  prices: str | None = None, engine: str | None = None, kv_events: str | None = None,
                  upstreams: dict[str, str] | None = None, full_attention: bool | None = None):
         self.ledger = Ledger(ledger_path)
+        self.metrics = Metrics()  # GET /metrics (Prometheus), fed by every recorded row
         # Self-hosted engine behind the proxy (vllm, sglang), and its KV-event
         # stream for the engine join (prefixwise.engines).
         self.engine = engine or os.environ.get("PREFIXWISE_ENGINE") or None
@@ -774,6 +776,7 @@ class PrefixwiseProxy:
             entry.price_as_of = self.prices.as_of
         entry.overhead_ms = self._overhead_ms(ctx)
         self.ledger.record(entry)
+        self.metrics.observe(entry)
         return {"request_id": ctx["request_id"], "status": status, "cause": result.cause.value,
                 "legit": result.legit, "native_reason": native_reason, "usage": usage,
                 "prompt_tokens": prompt_tokens, "cached_tokens": cached,
@@ -795,13 +798,15 @@ class PrefixwiseProxy:
         denominator (docs/DATA.md). Never fails the request."""
         err = (payload or {}).get("error") if isinstance(payload, dict) else None
         kind = error or (err.get("type") if isinstance(err, dict) else None) or f"http_{status}"
+        entry = LedgerEntry(
+            session_id=ctx["session_id"], agent_id=ctx["agent_id"], provider=ctx["provider"],
+            model=ctx["model"], cause=None, prompt_tokens=0, cached_tokens=0, avoidable_tokens=0,
+            avoidable_cost=None, task_id=ctx["task_id"], request_id=ctx["request_id"],
+            status=status, error=str(kind)[:80], api=ctx.get("api"), stream=ctx.get("stream"),
+            latency_ms=ctx.get("upstream_ms"), overhead_ms=self._overhead_ms(ctx))
+        self.metrics.observe(entry)  # counted even if the ledger write fails
         try:
-            self.ledger.record(LedgerEntry(
-                session_id=ctx["session_id"], agent_id=ctx["agent_id"], provider=ctx["provider"],
-                model=ctx["model"], cause=None, prompt_tokens=0, cached_tokens=0, avoidable_tokens=0,
-                avoidable_cost=None, task_id=ctx["task_id"], request_id=ctx["request_id"],
-                status=status, error=str(kind)[:80], api=ctx.get("api"), stream=ctx.get("stream"),
-                latency_ms=ctx.get("upstream_ms"), overhead_ms=self._overhead_ms(ctx)))
+            self.ledger.record(entry)
         except Exception as exc:
             print(f"prefixwise: failure for {ctx['request_id']} not recorded: {type(exc).__name__}",
                   file=sys.stderr, flush=True)
@@ -1206,13 +1211,17 @@ def make_handler(proxy: PrefixwiseProxy):
             self.end_headers()
             self.wfile.write(data)
 
-        def _authorized(self) -> bool:
+        def _authorized(self, bearer: bool = False) -> bool:
             """With an auth token configured, every request but /health must
-            carry it in X-Prefixwise-Token (constant-time compare)."""
+            carry it in X-Prefixwise-Token (constant-time compare). /metrics also
+            takes it as Authorization: Bearer, which is how Prometheus sends it."""
             token = getattr(proxy, "auth_token", None)
             if not token:
                 return True
             given = self.headers.get("X-Prefixwise-Token") or ""
+            if not given and bearer:
+                auth = self.headers.get("Authorization") or ""
+                given = auth[7:] if auth[:7].lower() == "bearer " else ""
             if hmac.compare_digest(given.encode(), token.encode()):
                 return True
             self._json(401, _error(401, "missing or wrong X-Prefixwise-Token"))
@@ -1256,6 +1265,17 @@ def make_handler(proxy: PrefixwiseProxy):
             path, _ = route(self.path)
             if path == "/health":
                 return self._json(200, {"ok": True, "mock": proxy.mock})
+            if path == "/metrics":
+                if not self._authorized(bearer=True):
+                    return
+                ev = proxy.engine_events
+                data = proxy.metrics.render(proxy.engine, ev.snapshot() if ev else None).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+                return
             if not self._authorized():
                 return
             if path == "/engine":
@@ -1462,7 +1482,7 @@ def serve(host: str = "127.0.0.1", port: int = 8080, *, ledger_path: str | None 
         if not os.environ.get("PREFIXWISE_HMAC_KEY"):
             print("  note:     set PREFIXWISE_HMAC_KEY so hashes of short prompt blocks cannot be guessed")
         print("  POST /v1/chat/completions  POST /v1/responses  POST /v1/messages  POST /tasks")
-        print("  GET  /ledger  GET /requests/<id>  GET /health", flush=True)
+        print("  GET  /ledger  GET /requests/<id>  GET /metrics  GET /health", flush=True)
     # SIGTERM (docker stop, systemd, Kubernetes): stop accepting, let in-flight
     # requests and streams finish, then exit. As PID 1 in a container an
     # unhandled SIGTERM is ignored and the runtime SIGKILLs mid-stream.
