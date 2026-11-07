@@ -43,7 +43,7 @@ Shared handoff between the agents working on Prefixwise. It says **what is being
 
 **Releasing:** Claude prepares the bump; **Muse (or Teja) creates the GitHub release** `v0.4.0` in the web UI after the release PR merges; the workflow publishes to PyPI; Claude verifies the install.
 
-**After 0.4.0:** Teja sends the Omni message; watch issues and DMs from the group post. Next build unless feedback says otherwise: Prometheus / OpenTelemetry export (research in docs/DATA.md).
+**After 0.4.0:** Teja posts in the vLLM Slack (~15k members; draft ready, links docs/VLLM.md); watch issues and DMs from that and the founders' group post. (The Omni founder already has the earlier message.) Next build unless feedback says otherwise: Prometheus / OpenTelemetry export (research in docs/DATA.md).
 
 **Waiting on Teja (nothing blocked):** the local web view; the OpenAI support note; scrubbing the old note from git history.
 
@@ -151,3 +151,4 @@ Then a soft launch to a few people who run agents (Omni's founder is a candidate
 - **2026-11-07:** Teja: API-first and data-first. Claude audited what the ledger records (facts dropped, failures unrecorded, metric logic split between CLI and ledger) and researched the OpenTelemetry GenAI conventions (all experimental; no cost or miss-cause convention). Built on `claude/data-first`: schema 3 facts incl. failure rows; `prefixwise.metrics` (one catalog, one query); `/api/v1`; `prefixwise export`; docs/DATA.md and docs/API.md. Next: Prometheus/OTel export, then the report UX and `prefixwise run` on top.
 - **2026-11-07:** Teja agreed the order: merge data-first (PR #30), Muse compatibility check (Claude Code, Codex, SDKs), then `prefixwise run` + the plain-English report, then release 0.4.0 before the Omni message. Built `prefixwise run` (per-provider upstreams, agent keeps its keys, report on that run) and the findings report (also `/api/v1/findings`), on `claude/run-report` stacked on PR #30.
 - **2026-11-07:** PRs #30 (data first), #31 (run + report) and #29 (engines; #24 closed as included) merged. Fresh-install check from main passed (run, report, export); fixed mock-mode cost wording and cent precision. Release 0.4.0 prepared; publishing waits on Muse's compatibility check.
+- **2026-11-07:** Teja already sent the Omni founder a message; that draft is retired. Next outreach: the vLLM Slack after 0.4.0. Added Python 3.10 support (suite passes on 3.10) and docs/VLLM.md for that audience.
