@@ -38,13 +38,25 @@ add little over inference.
    unchanged-prefix miss is named `evicted`, and the evidence says it is **inferred** and
    names the look-alikes. No dependencies. (Without the flag Prefixwise assumes a hosted
    API and says `routing_miss`, which is wrong behind one engine.)
-2. **`--kv-events` (vLLM only)** turns the inference into evidence. Prefixwise sends its
-   session id in the request body, vLLM puts it on `BlockStored`, and per session
-   Prefixwise tracks blocks resident on the GPU and blocks removed since the last turn:
-   - removed > 0: `evicted`, **confirmed**, with the block count
-   - none removed and blocks still resident: **not an eviction**, so `unknown`, with the
-     two remaining explanations (token-level divergence, DP routing)
-   - nothing attributed (session never seen in events): back to the inference
+2. **`--kv-events` (vLLM only)** turns the inference into evidence:
+   - Prefixwise sends its session id in the request body and
+     `vllm_xargs: {"kv_cache_report_mode": "full"}` (merged with the client's). By default
+     vLLM reports only *newly stored* blocks; in `full` mode it also reports the blocks a
+     request *reused* (`kv_cache_manager.py`), so the whole prefix chain of each request is
+     known, tagged with the session.
+   - When a session's next request is about to be sent, Prefixwise checks the blocks of its
+     **previous request** against the blocks still on the GPU:
+     - some gone: `evicted`, **confirmed**, with the count
+     - all still there: **not an eviction**, so `unknown`, with the two remaining
+       explanations (token-level divergence, DP routing)
+     - nothing known (first turn, or the window had no events): the inference stands
+   - The check runs at send time, not when the previous response arrives: the evictions
+     that matter happen between turns, and their events have arrived by then. (Checking at
+     response time races the event stream.)
+   - Only blocks of the previous request count. Older chains a session no longer uses
+     (after a template re-render, say) are evicted routinely and must not confirm anything.
+   - Only full-attention block groups are tracked, keyed by (group, hash). On hybrid models,
+     sliding-window blocks are freed routinely without breaking the prefix.
 3. **LMCache and HiCache need nothing extra.** vLLM's `cached_tokens` includes tokens loaded
    from LMCache (`PrefillStats`: local + external), and SGLang's includes host-tier hits. A
    prefix restored from CPU memory is a hit and is never examined for eviction. Only GPU
@@ -59,21 +71,26 @@ counting (weak evidence), and metrics polling (engine-wide).
   make a session look resident. Gaps in the sequence number are counted; after any gap or
   undecodable message, Prefixwise stops claiming "not an eviction" and falls back to inference.
 - **Engine restart:** the sequence number restarts; Prefixwise treats that as a cleared cache.
-- **Late subscription:** blocks stored before Prefixwise subscribed are not attributed, so
-  those sessions fall back to inference (never a false claim).
-- **Event lag:** events are published per scheduler step; a removal could land just after
-  the turn it explains. Then the verdict is inferred `evicted`, still the right answer.
+- **Late subscription / tight loops:** if a session's previous request reported no blocks
+  (Prefixwise subscribed later, or the next request followed within milliseconds), there is
+  nothing to judge and the inference stands. Never a false claim.
 - **Several replicas or DP ranks:** each publishes its own stream (vLLM offsets the port per
   DP rank). Prefixwise subscribes to one; run one Prefixwise per replica, or route each
   session to one replica.
-- **Memory:** tracking is bounded by blocks resident on the GPU (entries leave on
-  `BlockRemoved`), with a hard cap of 500,000 blocks.
+- **Memory:** the set of live blocks is bounded by the engine's GPU capacity (entries leave on
+  `BlockRemoved`; a hard cap of 1,000,000 stops trusting residency if removals were missed).
+  Per session only the head of the previous request's chain is kept (4,096 blocks: the head
+  is what decides a low cache read), for at most 1,000 sessions.
+
+An independent review of the first version found four of these failure modes (judging stale
+chains, hybrid models, the response-time race, and a session-id mismatch on retries); the
+design above is the result.
 
 ## How it is validated
 
 - `tests/test_engine_join.py` encodes events with vLLM's own struct definitions and sends
   them over a real ZMQ socket: confirmed eviction, blocks still resident, offload-restored
-  hit, malformed payload, restart, lost messages.
+  hit, stale chains, hybrid groups, malformed payload, restart, lost messages.
 - `experiments/e_evict` (live; on hold): floods an engine past its GPU KV capacity and
   checks T3, with and without LMCache/HiCache and with and without `--kv-events`.
 - Open: a live test of token-level divergence (a template that re-renders history), to

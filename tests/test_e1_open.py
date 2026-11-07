@@ -135,7 +135,7 @@ def test_proxy_strips_upstream_session_override():
     assert result["status"] == 200
     assert "prefixwise_upstream_session_id" not in seen["body"]
     assert seen["session_id"] == "s1-retry-6"  # upstream sees the fresh session
-    assert seen["body"]["session_id"] == "s1-retry-6"  # vLLM body session too
+    assert seen["body"]["session_id"] == "s1"  # vLLM body: Prefixwise's own session (KV-event attribution)
     assert "s1" in proxy.last_snapshot  # proxy chain keeps the original session
 
 

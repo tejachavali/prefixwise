@@ -146,7 +146,7 @@ prefixwise serve --upstream http://127.0.0.1:8000 --engine vllm      # or --engi
 
 One engine means one cache and no routing, so a request whose prefix is unchanged but was not reused is named `evicted` (the engine ran out of GPU memory). That verdict is **inferred**, and the evidence says so: a chat template that renders history differently, or data-parallel routing, looks the same.
 
-**vLLM: confirm it with KV events.** vLLM can attribute its cached blocks to sessions, so Prefixwise can check:
+**vLLM: confirm it with KV events.** vLLM can tag the blocks each request uses with a session, so Prefixwise can check whether the previous request's blocks are still on the GPU:
 
 ```bash
 pip install "prefixwise[engines]"     # pyzmq + msgspec; the core stays stdlib-only
