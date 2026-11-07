@@ -75,7 +75,7 @@ def findings(ledger, since: float | None = None, until: float | None = None) -> 
 def _usd(x) -> str:
     if x is None:
         return "-"
-    return f"${x:,.2f}" if abs(x) >= 0.01 or x == 0 else f"${x:.4f}"
+    return f"${x:,.2f}" if abs(x) >= 1 or x == 0 else f"${x:.4f}"  # cents need precision
 
 
 def _req(n: int) -> str:
@@ -98,7 +98,7 @@ def render(f: dict, command: str = "serve") -> str:
         lines.append(f"No request got a response with usage: {_n(s['requests_failed'])} failed.")
     else:
         hit = s["cache_hit_rate"]
-        head = f"{_n(s['requests'])} requests, {_n(s['prompt_tokens'])} prompt tokens"
+        head = f"{_req(s['requests'])}, {_n(s['prompt_tokens'])} prompt tokens"
         if hit is not None:
             head += f", {hit:.0%} served from cache"
         partial = s["requests_priced"] and s["requests_priced"] < s["requests"]

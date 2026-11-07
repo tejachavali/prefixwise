@@ -239,6 +239,17 @@ def _is_prefixwise(url: str) -> bool:
         return False
 
 
+def _codex_args(base: str) -> list[str]:
+    """Codex ignores OPENAI_BASE_URL (codex-cli 0.167+). A custom model provider, set
+    with -c overrides, sends its Responses calls to the proxy over plain HTTP + SSE
+    (the built-in provider tries WebSocket first), takes the key from
+    OPENAI_API_KEY, skips the sign-in screen and writes nothing to ~/.codex."""
+    p = "model_providers.prefixwise."
+    return ["-c", "model_provider=\"prefixwise\"", "-c", f'{p}name="Prefixwise"',
+            "-c", f'{p}base_url="{base}/v1"', "-c", f'{p}env_key="OPENAI_API_KEY"',
+            "-c", f'{p}wire_api="responses"', "-c", f"{p}supports_websockets=false"]
+
+
 def cmd_run(args) -> int:
     """Run an agent through Prefixwise and report on that run when it exits."""
     import signal
@@ -275,16 +286,33 @@ def cmd_run(args) -> int:
     base = f"http://127.0.0.1:{server.server_address[1]}"
     threading.Thread(target=server.serve_forever, daemon=True).start()
     env = {**os.environ, "ANTHROPIC_BASE_URL": base, "OPENAI_BASE_URL": base + "/v1", "PREFIXWISE_URL": base}
+    if os.path.basename(cmd[0]) == "codex":
+        if not os.environ.get("OPENAI_API_KEY"):
+            print("prefixwise: Codex goes through Prefixwise with an API key: set OPENAI_API_KEY "
+                  "(a ChatGPT sign-in cannot be proxied).", file=sys.stderr)
+            server.shutdown()
+            server.server_close()
+            return 2
+        cmd = [cmd[0], *_codex_args(base), *cmd[1:]]
     upstream = "mock" if args.mock else f"anthropic -> {_show_url(anthropic)}, openai -> {_show_url(openai)}"
     print(f"prefixwise: proxy on {base} ({upstream}); ledger {ledger}", file=sys.stderr, flush=True)
     start = time.time()
     try:
         child = subprocess.Popen(cmd, env=env)
     except FileNotFoundError:
-        print(f"prefixwise: command not found: {cmd[0]}", file=sys.stderr)
         child = None
+        print(f"prefixwise: command not found: {cmd[0]}", file=sys.stderr)
     code = 127
     if child is not None:
+        # While the agent runs it owns the terminal (often a full-screen UI), so the
+        # proxy's own messages go to a log file. The agent writes to the terminal
+        # directly, not through Python's sys.stderr, so it is unaffected.
+        log_path = os.path.join(os.path.dirname(os.path.abspath(ledger)), "prefixwise-run.log")
+        real_stderr = sys.stderr
+        try:
+            sys.stderr = open(log_path, "a", buffering=1)
+        except OSError:
+            log_path = None
         # Ctrl-C reaches the agent directly (same process group): agents use it to cancel a
         # turn, so Prefixwise must neither die nor kill the agent. SIGTERM is passed on.
         old_int = signal.signal(signal.SIGINT, signal.SIG_IGN)
@@ -294,9 +322,16 @@ def cmd_run(args) -> int:
         finally:
             signal.signal(signal.SIGINT, old_int)
             signal.signal(signal.SIGTERM, old_term)
+            server.shutdown()
+            server.drain(5)
+            if sys.stderr is not real_stderr:
+                sys.stderr.close()
+                sys.stderr = real_stderr
         code = 128 - code if code < 0 else code  # killed by a signal: shell convention
-    server.shutdown()
-    server.drain(5)
+        if log_path and os.path.exists(log_path) and os.path.getsize(log_path):
+            print(f"prefixwise: proxy messages from this run are in {log_path}", file=sys.stderr)
+    else:
+        server.shutdown()
     server.server_close()
     found = findings(proxy.ledger, since=start)
     print("\n-- prefixwise: this run --", file=sys.stderr)
@@ -304,6 +339,8 @@ def cmd_run(args) -> int:
         print(f"No requests reached Prefixwise. Does {cmd[0]} read ANTHROPIC_BASE_URL or OPENAI_BASE_URL? "
               "If not, set its base URL to the proxy by hand (see the README).", file=sys.stderr)
     else:
+        if args.mock:
+            print("(mock: synthetic responses and usage, so the numbers below are illustrative)", file=sys.stderr)
         print(render(found, command="run"), file=sys.stderr)
         print(f"All runs: prefixwise report --ledger {ledger}", file=sys.stderr)
     return code

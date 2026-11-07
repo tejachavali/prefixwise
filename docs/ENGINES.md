@@ -116,7 +116,10 @@ skew, failed requests), fixed above. The rules above answer all of them.
   them over a real ZMQ socket: confirmed eviction, blocks still resident, offload-restored
   hit, queue-time eviction, output blocks and older chains, hybrid groups, duplicates,
   malformed payload, restart, lost messages.
-- `experiments/e_evict` (live; on hold): floods an engine past its GPU KV capacity and
-  checks T3, with and without LMCache/HiCache and with and without `--kv-events`.
+- `experiments/e_evict`, **run live 2026-11-07** (Colab L4, Qwen3-4B; vLLM 0.33.0, LMCache 0.5.7,
+  SGLang 0.5.23): all eight runs as expected. vLLM eviction named 5/5, confirmed from KV
+  events ("211 of the previous request's KV blocks removed"); LMCache and HiCache restores
+  (98-99% of the prefix) counted as hits 5/5; E1-open 120/120 on vLLM + LMCache and on SGLang.
+  Record: `experiments/e_evict/runs/2026-11-07-colab-l4.md`.
 - Open: a live test of token-level divergence (a template that re-renders history), to
   measure how often "not an eviction" occurs in real agent traffic.

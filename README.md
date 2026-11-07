@@ -48,7 +48,7 @@ Expected misses (not waste): 2 x first request of a session: nothing to reuse ye
 
 (Illustrative output. `prefixwise run --mock -- <agent>` tries it with synthetic responses and no API calls.)
 
-Ctrl-C goes to the agent as usual. If you already set `ANTHROPIC_BASE_URL` or `OPENAI_BASE_URL` (a gateway), Prefixwise forwards there, so the agent reaches the same place. It works with agents that use an **API key**; an agent signed in with a subscription instead (for example Codex with a ChatGPT login) cannot be routed through a proxy, and the report says so if the provider rejects it.
+Ctrl-C goes to the agent as usual. If you already set `ANTHROPIC_BASE_URL` or `OPENAI_BASE_URL` (a gateway), Prefixwise forwards there, so the agent reaches the same place. It works with agents that use an **API key**; an agent signed in with a subscription instead cannot be routed through a proxy, and the report says so if the provider rejects it. **Codex** ignores `OPENAI_BASE_URL`, so `prefixwise run -- codex ...` adds `-c` settings that point it at the proxy as a custom provider (plain HTTP, the key from `OPENAI_API_KEY`, no sign-in screen, nothing written to `~/.codex`).
 
 ### Running the proxy yourself
 
@@ -168,6 +168,8 @@ Found a vulnerability? See [SECURITY.md](SECURITY.md).
 
 ## Self-hosted engines: vLLM, SGLang, LMCache
 
+Step-by-step for vLLM users, with what each verdict means: **[docs/VLLM.md](docs/VLLM.md)**.
+
 Prefixwise reads the engine's `cached_tokens` like any provider's: start vLLM with `--enable-prompt-tokens-details`, SGLang with `--enable-cache-report`. Tell it there is one self-hosted engine behind it:
 
 ```bash
@@ -213,7 +215,7 @@ Measured by [`benchmarks/bench.py`](benchmarks/README.md) (results in [`benchmar
   - **OpenAI native agreement.** OpenAI's `prompt_cache_diagnostics` returned `unavailable` for every comparison on gpt-5.6, -luna and -sol. That held with turn delays of 1 s, 30 s and 120 s, and on a minimal standalone call with a completed baseline. OpenAI's dashboard shows 0 diagnosed responses. Prefixwise still classifies OpenAI traffic; only the cross-check against OpenAI's own verdict is missing.
   - **Causes E1 does not inject:** TTL expiry, routing, eviction, tool-result mutation.
   - **Real agent traffic,** which is messier than scripted turns.
-- **Self-hosted engines:** with `--engine`, an engine eviction is inferred from one cache and no routing; on vLLM, `--kv-events` confirms it or rules it out. Tested against vLLM's event wire format, not yet on a live engine. Several replicas need one Prefixwise each.
+- **Self-hosted engines:** with `--engine`, an engine eviction is inferred from one cache and no routing; on vLLM, `--kv-events` confirms it or rules it out. Validated live on vLLM 0.33 and SGLang 0.5.23 (Colab L4): evictions named 5/5 (confirmed with KV events), LMCache and HiCache restores counted as hits 5/5 ([record](experiments/e_evict/runs/2026-11-07-colab-l4.md)). Not yet measured live: how often the "not an eviction" verdict (token-level divergence) occurs in real agent traffic. Several replicas need one Prefixwise each.
 - **Divergence is located per block, not per token.** An edit at the very end of a long system prompt is reported as `system_edit`, even if the provider could have reused everything before it. In one live OpenAI call, appending three words to 2,100 tokens of instructions gave 0 cached tokens, which looks more like routing than the edit itself.
 - One proxy process keeps session state in memory: run one instance per agent fleet, or send all of a session's turns to the same instance.
 - `evicted` needs vLLM KV events, which the proxy does not consume yet.

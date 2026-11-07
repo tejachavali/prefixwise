@@ -437,3 +437,12 @@
   Dropped SGLang events and engine-wide counts. Engine restart (seq reset)
   clears residency; lost/garbled messages stop the negative claim.
   docs/ENGINES.md. Tests: 162 passed.
+
+## 2026-11-07 Release 0.4.0 (claude/release-0.4.0)
+- On main: data first + /api/v1 + export (#30), prefixwise run + findings
+  report (#31), self-hosted engines validated live (#29, incl. #24).
+- Fresh-install check from main: run (mock) catches a clock in the system
+  prompt, report and export work. Fixed: mock-mode cost note, cent precision.
+- Version 0.4.0; wheel includes engines/metrics/api/findings; extra
+  [engines] = pyzmq, msgspec. Tests: 190 passed.
+- Publish waits on Muse's compatibility check (Claude Code, Codex, SDKs).
