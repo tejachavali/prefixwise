@@ -28,6 +28,9 @@ self-hosted engines (vLLM, SGLang, LMCache) validated live.
 - **HTTP API `/api/v1`** ([docs/API.md](docs/API.md)): `metrics` (the catalog), `summary`, `breakdown?by=`, `timeseries?bucket=`, `requests` (paginated), `requests/{id}`, `fixes`, `prices`, `POST tasks`, `POST explain`; filters and time windows; same token auth as the proxy.
 - **`prefixwise export`**: raw rows as JSONL or CSV.
 - **Summary** reports `failed_requests`.
+- **Fixed (agent compatibility check):** a session mixing Chat Completions and the Responses API on one model had its Responses calls rejected (400): Prefixwise chained a `chatcmpl-` id into `prompt_cache_options`. Diagnostics now chain only to an id from the same API (`resp_`, `msg_`).
+- **Fixed:** a short Anthropic prompt (below the model's minimum cacheable prefix: 512 tokens for Claude 5.x, up to 4,096 for older models) was reported as a misplaced cache breakpoint, with avoidable tokens and advice that could not help. It is now `below_min_prefix`, not waste.
+- Report wording: "1 request", not "1 requests".
 
 ## 0.3.1: 2026-11-07
 
