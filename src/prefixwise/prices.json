@@ -2,7 +2,7 @@
   "as_of": "2026-11-07",
   "currency": "USD",
   "unit": "per 1M tokens",
-  "note": "Only rates read from a provider's own pricing page, with the API model id confirmed. Batch, fast mode and data-residency multipliers are not modelled. Override or extend with your own file: PREFIXWISE_PRICES=/path/prices.json or --prices.",
+  "note": "Only rates read from a provider's own pricing page (OpenAI's read by Muse in a browser, since Claude's environment cannot reach it), with the API model id confirmed. Batch, fast mode and data-residency multipliers are not modelled. Override or extend with your own file: PREFIXWISE_PRICES=/path/prices.json or --prices.",
   "models": {
     "claude-haiku-5-5": {
       "provider": "anthropic",
@@ -56,6 +56,37 @@
       "cache_write_1h": 6.0,
       "cache_read": 0.3,
       "output": 15.0
+    },
+    "gpt-5.6-sol": {
+      "provider": "openai",
+      "source": "https://developers.openai.com/api/docs/pricing (read by Muse 2026-11-07: Flagship, standard speed, short context)",
+      "input": 4.0,
+      "cache_read": 0.4,
+      "cache_write": 5.0,
+      "cache_write_12h": 10.0,
+      "output": 20.0,
+      "valid_until": "2026-11-30",
+      "note": "Promotional price, available until November 30, 2026 (per the page); unpriced after. cache_write = the 30-minute write price (the default retention); cache_write_12h recorded, not yet applied"
+    },
+    "gpt-5.6-terra": {
+      "provider": "openai",
+      "source": "https://developers.openai.com/api/docs/pricing (read by Muse 2026-11-07: Flagship, standard speed, short context)",
+      "input": 2.0,
+      "cache_read": 0.2,
+      "cache_write": 2.5,
+      "cache_write_12h": 5.0,
+      "output": 12.0,
+      "note": "cache_write = the 30-minute write price (the default retention); cache_write_12h recorded, not yet applied"
+    },
+    "gpt-5.6-luna": {
+      "provider": "openai",
+      "source": "https://developers.openai.com/api/docs/pricing (read by Muse 2026-11-07: Flagship, standard speed, short context)",
+      "input": 0.2,
+      "cache_read": 0.02,
+      "cache_write": 0.25,
+      "cache_write_12h": 0.5,
+      "output": 1.2,
+      "note": "cache_write = the 30-minute write price (the default retention); cache_write_12h recorded, not yet applied"
     }
   }
 }

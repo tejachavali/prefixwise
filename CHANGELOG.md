@@ -6,6 +6,8 @@
 - **Replacing a one-shot request is not a history edit:** a single-message request followed by a different one (side calls) is judged on its shared-prefix cache reuse.
 - **E1-open harness fix:** Session B turns 8–10 now keep the compacted history. They had reverted to the pre-compaction history, hidden by the model switch until lanes exposed it.
 - **CLI:** `prefixwise report | head` exits quietly.
+- **OpenAI prices:** GPT-5.6 Luna, Terra and Sol are priced from OpenAI's own pricing page (read 2026-11-07; standard speed, short context). The cache-write column is OpenAI's 30-minute write; the 12-hour rate is recorded but not applied. Sol's price is promotional and expires after 2026-11-30, after which it shows `-` until updated. Plain `gpt-5.6` has no published row and stays unpriced.
+- **Price matching is stricter:** a table id matches only itself plus a dated snapshot or cloud version suffix, so `gpt-5.6-sol-pro` no longer borrows Sol's price.
 
 ## 0.3.0: 2026-11-07
 

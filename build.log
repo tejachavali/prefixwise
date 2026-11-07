@@ -390,3 +390,10 @@
   model_switch).
 - Tests: 139 passed. Mocks: E1-open 100%, E1-hosted 100%/100%, E4 99.8%.
 - Not yet: live E1 re-check under lanes (Muse).
+
+## 2026-11-07 OpenAI prices (claude/openai-prices)
+- Added GPT-5.6 Luna/Terra/Sol from OpenAI's pricing page (Muse task C).
+  Sol is promotional: valid_until 2026-11-30, then unpriced.
+- rates_for: exact id, or id + dated snapshot / cloud version suffix only;
+  gpt-5.6-sol-pro no longer matches gpt-5.6-sol.
+- Tests: 142 passed.

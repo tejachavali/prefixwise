@@ -174,9 +174,11 @@ def cmd_prices(args) -> int:
     print(f"Price table as of {table.as_of} (USD per 1M tokens), from: {' + '.join(table.sources)}")
     rows = [[name, r.get("provider", "-"), _rate(r.get("input")), _rate(r.get("cache_read")),
              _rate(r.get("cache_write_5m", r.get("cache_write"))), _rate(r.get("cache_write_1h")),
-             _rate(r.get("output")), "yes" if r.get("long_prompt") else ""]
+             _rate(r.get("output")), "yes" if r.get("long_prompt") else "", r.get("valid_until", "")]
             for name, r in sorted(table.models.items())]
-    print(_table(rows, ["model", "provider", "input", "cache read", "write 5m", "write 1h", "output", "tiered"]))
+    print(_table(rows, ["model", "provider", "input", "cache read", "cache write", "write 1h", "output",
+                        "tiered", "valid until"]))
+    print("\ncache write: Anthropic's 5-minute write, OpenAI's 30-minute write (the defaults).")
     print("\nModels not listed are unpriced: their cost shows as '-', never estimated. Add rates with\n"
           "PREFIXWISE_PRICES=/path/prices.json (same format as the built-in table; see `--json`).")
     return 0
