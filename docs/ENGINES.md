@@ -44,17 +44,20 @@ add little over inference.
      vLLM reports only *newly stored* blocks; in `full` mode it also reports the blocks a
      request *reused* (`kv_cache_manager.py`), so the whole prefix chain of each request is
      known, tagged with the session.
-   - When a session's next request is about to be sent, Prefixwise checks the blocks of its
-     **previous request** against the blocks still on the GPU:
-     - some gone: `evicted`, **confirmed**, with the count
-     - all still there: **not an eviction**, so `unknown`, with the two remaining
+   - When a session's next request is sent, the blocks its **previous request** used are
+     frozen as the chain to judge, in order. Removals of those blocks are recorded from then
+     until the response, so evictions while the request waits in vLLM's queue count.
+   - At the response, `cached_tokens` says where the cache read stopped: block
+     `cached_tokens // block_size` of the chain. **Only that block decides:**
+     - removed: `evicted`, **confirmed** (the eviction is what cut the hit short)
+     - still on the GPU: the engine held the block yet did not use it, so the request's
+       tokens changed at that point. **Not an eviction**: `unknown`, with the two remaining
        explanations (token-level divergence, DP routing)
-     - nothing known (first turn, or the window had no events): the inference stands
-   - The check runs at send time, not when the previous response arrives: the evictions
-     that matter happen between turns, and their events have arrived by then. (Checking at
-     response time races the event stream.)
-   - Only blocks of the previous request count. Older chains a session no longer uses
-     (after a template re-render, say) are evicted routinely and must not confirm anything.
+     - beyond the chain, or nothing known: the inference stands
+   - Judging only the stop point is what makes it robust: output blocks a template never
+     reuses, and older chains, get evicted routinely and cannot confirm anything.
+   - Before deciding, Prefixwise waits until the subscriber has drained the socket (at most
+     50 ms), so removals published before the response have been read.
    - Only full-attention block groups are tracked, keyed by (group, hash). On hybrid models,
      sliding-window blocks are freed routinely without breaking the prefix.
 3. **LMCache and HiCache need nothing extra.** vLLM's `cached_tokens` includes tokens loaded
@@ -82,15 +85,20 @@ counting (weak evidence), and metrics polling (engine-wide).
   Per session only the head of the previous request's chain is kept (4,096 blocks: the head
   is what decides a low cache read), for at most 1,000 sessions.
 
-An independent review of the first version found four of these failure modes (judging stale
-chains, hybrid models, the response-time race, and a session-id mismatch on retries); the
-design above is the result.
+- **Concurrent requests in one session** share a window, so a chain can mix two branches.
+  Agents rarely send parallel requests in one session; the effect is a wrong position at worst.
+
+Two rounds of independent review shaped this. The first version judged any removed block a
+session ever held (stale chains, output blocks), ignored hybrid models, raced the event
+stream, and mismatched session ids on retries; the second judged at send time and missed
+evictions while a request waits in vLLM's queue. The stop-point rule above answers all of them.
 
 ## How it is validated
 
 - `tests/test_engine_join.py` encodes events with vLLM's own struct definitions and sends
   them over a real ZMQ socket: confirmed eviction, blocks still resident, offload-restored
-  hit, stale chains, hybrid groups, malformed payload, restart, lost messages.
+  hit, queue-time eviction, output blocks and older chains, hybrid groups, duplicates,
+  malformed payload, restart, lost messages.
 - `experiments/e_evict` (live; on hold): floods an engine past its GPU KV capacity and
   checks T3, with and without LMCache/HiCache and with and without `--kv-events`.
 - Open: a live test of token-level divergence (a template that re-renders history), to

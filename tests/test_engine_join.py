@@ -59,52 +59,67 @@ def decoded(*events):
     return msgspec.msgpack.decode(ENC.encode(EventBatch(ts=time.time(), events=list(events))))
 
 
-def test_judges_only_the_blocks_of_the_previous_request():
+def turn(ev, session, cached, *events):
+    """Send the session's next request, deliver `events` while it is in flight,
+    and judge it with the cached_tokens the engine reported."""
+    token = ev.request_sent(session)
+    for e in events:
+        ev.handle(decoded(e))
+    return ev.request_done(token, cached)
+
+
+def test_judges_the_block_where_the_cache_read_stopped():
     ev = EngineEvents()
-    ev.request_sent("s")
-    ev.handle(decoded(stored([1, 2, 3], "s")))  # turn 1 used blocks 1-3
-    assert ev.request_sent("s") == (0, 3)  # turn 2 sent: all resident
-    ev.handle(decoded(stored([1, 2, 3, 4], "s")))  # turn 2 reused 1-3, stored 4 (report mode "full")
+    assert turn(ev, "s", 0, stored([1, 2, 3, 4], "s")) == (None, None)  # first turn: nothing to judge
+    # Turn 2 missed from block 0 (cached 0) and block 1 of turn 1 is gone, but
+    # block 0, where the read stopped, is still there: not an eviction.
+    ev.handle(decoded(BlockRemoved(block_hashes=[2], medium="GPU")))
+    assert turn(ev, "s", 0, stored([1, 2, 3, 4, 5], "s")) == (0, 3)
+    # Turn 3 stopped at block 2 (32 tokens of 16-token blocks) and block 2 was evicted.
     ev.handle(decoded(BlockRemoved(block_hashes=[3], medium="GPU")))
-    assert ev.request_sent("s") == (1, 3)  # turn 3 sent: one of turn 2's blocks gone
+    assert turn(ev, "s", 32) == (1, 0)
 
 
-def test_stale_blocks_from_older_turns_do_not_confirm_an_eviction():
-    # Review finding: after a template re-render, the old chain is orphaned and
-    # evicted normally; that must not be read as this turn's eviction.
+def test_eviction_while_the_request_waits_in_the_queue_counts():
+    # Review finding: removals after the send but before admission must count.
     ev = EngineEvents()
-    ev.request_sent("s")
-    ev.handle(decoded(stored([1, 2], "s")))
-    ev.request_sent("s")
-    ev.handle(decoded(stored([9, 10], "s")))  # turn 2 rendered differently: new chain
-    ev.handle(decoded(BlockRemoved(block_hashes=[1, 2], medium="GPU")))  # old chain evicted
-    assert ev.request_sent("s") == (0, 2)  # turn 2's blocks are all there: not an eviction
+    turn(ev, "s", 0, stored([1, 2, 3], "s"))
+    assert turn(ev, "s", 0, BlockRemoved(block_hashes=[1], medium="GPU")) == (1, 0)
+
+
+def test_output_blocks_and_older_chains_cannot_confirm_an_eviction():
+    # Review findings: a template that strips earlier output leaves those blocks
+    # unused; their routine eviction must not be read as this miss's cause.
+    ev = EngineEvents()
+    turn(ev, "s", 0, stored([1, 2], "s"), stored([3, 4], "s"))  # prompt blocks 1-2, output blocks 3-4
+    ev.handle(decoded(BlockRemoved(block_hashes=[3, 4], medium="GPU")))
+    assert turn(ev, "s", 16) == (0, 2)  # read stopped at block 1 (still there): not an eviction
 
 
 def test_hybrid_models_track_full_attention_only_and_offload_is_ignored():
     ev = EngineEvents()
-    ev.request_sent("s")
-    ev.handle(decoded(stored([5], "s", group=0, kind="full_attention"),
-                      stored([5], "s", group=1, kind="sliding_window")))
+    turn(ev, "s", 0, stored([5], "s", group=0, kind="full_attention"),
+         stored([5], "s", group=1, kind="sliding_window"))
     ev.handle(decoded(BlockRemoved(block_hashes=[5], medium="GPU", group_idx=1)))  # routine SW free
     ev.handle(decoded(BlockRemoved(block_hashes=[5], medium="CPU", group_idx=0)))  # LMCache tier
-    assert ev.request_sent("s") == (0, 1)
+    assert turn(ev, "s", 0) == (0, 1)
 
 
-def test_restart_lost_messages_and_bounds():
-    ev = EngineEvents(max_sessions=2, max_chain=2)
-    ev.request_sent("s")
-    ev.handle(decoded(stored([1, 2, 3], "s")), seq=10)
+def test_restart_lost_messages_duplicates_and_bounds():
+    ev = EngineEvents(max_sessions=2, max_chain=3)
+    token = ev.request_sent("s")
+    ev.handle(decoded(stored([1, 2], "s"), stored([1, 2, 3, 4], "s")), seq=10)  # re-reported while queued
+    ev.request_done(token, 0)
     ev.handle(decoded(), seq=1)  # sequence restarted: the engine restarted, its cache is gone
-    assert ev.request_sent("s") == (2, 0)  # chain capped at 2 blocks, both gone
-    ev.handle(decoded(stored([4], "s")), seq=2)
-    ev.handle(decoded(), seq=5)  # two messages lost: a removal may be among them
-    assert ev.request_sent("s") == (0, 0)  # residency unknown: no "not an eviction" claim
-    ev.handle(decoded(stored([6], "s")), seq=6)
-    assert ev.request_sent("s") == (0, 1)  # trust comes back for the next clean window
+    assert turn(ev, "s", 0) == (3, 0)  # chain deduplicated and capped at 3 blocks, all gone
+    ev.handle(decoded(stored([7], "s")), seq=2)
+    token = ev.request_sent("s")
+    ev.handle(decoded(), seq=5)  # two messages lost while in flight: a removal may be among them
+    assert ev.request_done(token, 0) == (None, None)  # no claim either way
     for name in ("a", "b", "c"):
-        ev.request_sent(name)
-    assert ev.snapshot()["sessions_tracked"] == 2
+        ev.handle(decoded(stored([9], name)), seq=6 + ord(name))
+    assert ev.snapshot()["sessions_tracked"] == 2  # windows are bounded even for clients we never saw
+    assert ev.request_done(12345, 0) == (None, None)  # unknown token
 
 
 BODY = {"model": "Qwen/Qwen3-4B", "messages": [{"role": "system", "content": "You are a careful assistant. " * 40},
@@ -209,3 +224,12 @@ def test_engine_settings_are_validated():
     assert "session_id" not in seen[0] and "vllm_xargs" not in seen[0]
     res = p.handle("openai", dict(NEXT), {"x-prefixwise-session-id": "x"})[0]
     assert res["cause"] == "evicted"  # one engine, no events: inferred
+
+
+def test_a_non_dict_vllm_xargs_is_forwarded_untouched(publisher):
+    p, seen = proxy_with(publisher.endpoint, [0])
+    try:
+        res = p.handle("openai", dict(BODY, vllm_xargs="client-value"), {"x-prefixwise-session-id": "z"})[0]
+        assert res["status"] == 200 and seen[0]["vllm_xargs"] == "client-value"
+    finally:
+        p.engine_events.stop()

@@ -485,14 +485,15 @@ class PrefixwiseProxy:
         # vLLM puts a body session_id on its KV events, so the engine join can
         # attribute blocks to sessions. Only vLLM: SGLang rejects session ids it
         # did not open, and hosted APIs reject unknown fields.
-        engine_turn = None
+        engine_token = None
         if self.engine == "vllm" and api == "chat":
             forward_body["session_id"] = session_id
-            if self.engine_events is not None:
-                # Report every block a request uses, reused ones too, so the blocks
-                # of this session's previous request are known (docs/ENGINES.md).
-                forward_body["vllm_xargs"] = {**(body.get("vllm_xargs") or {}), "kv_cache_report_mode": "full"}
-                engine_turn = self.engine_events.request_sent(session_id)
+            xargs = body.get("vllm_xargs")
+            if self.engine_events is not None and (xargs is None or isinstance(xargs, dict)):
+                # Report every block a request uses, reused ones too, in order, so the
+                # blocks of this session's previous request are known (docs/ENGINES.md).
+                forward_body["vllm_xargs"] = {**(xargs or {}), "kv_cache_report_mode": "full"}
+                engine_token = self.engine_events.request_sent(session_id)
         # Native diagnostics chaining. Anthropic: diagnostics object (GA,
         # no beta header). OpenAI: prompt_cache_options.comparison_response_id,
         # Responses API only (it does not exist on /v1/chat/completions). A
@@ -514,7 +515,7 @@ class PrefixwiseProxy:
         return {
             "provider": provider, "api": api, "body": body, "headers": headers,
             "forward_body": forward_body, "session_id": session_id,
-            "upstream_session_id": upstream_session_id, "engine_turn": engine_turn,
+            "upstream_session_id": upstream_session_id, "engine_token": engine_token,
             "agent_id": str(headers.get("x-prefixwise-agent-id") or body.get("agent_id") or "proxy"),
             "task_id": str(task_id) if task_id else None,
             "request_id": str(uuid.uuid4()), "model": str(body.get("model", "unknown")),
@@ -540,6 +541,8 @@ class PrefixwiseProxy:
         # Fingerprint what the provider actually received: with a fix on,
         # that is the rewritten request, not the client's original.
         fps = self.fingerprinter.fingerprint_blocks(extract_blocks(ctx["forward_body"], provider))
+        if ctx.get("engine_token") is not None:  # outside the lock: it may wait a few ms for events
+            ctx["engine_verdict"] = self.engine_events.request_done(ctx["engine_token"], cached)
         with self._lock:
             return self._finalize_locked(ctx, status, payload, usage, prompt_tokens, cached,
                                          native_reason, response_id, fps)
@@ -607,8 +610,8 @@ class PrefixwiseProxy:
                                fork_parent_session_id=ctx.get("fork_of"),
                                session_id=session_id)
         curr.engine = self.engine is not None
-        if ctx.get("engine_turn") is not None:
-            curr.evicted_blocks, curr.resident_blocks = ctx["engine_turn"]
+        if ctx.get("engine_verdict") is not None:
+            curr.evicted_blocks, curr.resident_blocks = ctx["engine_verdict"]
         if unknown_parent:
             result = Classification(MissCause.UNKNOWN, None,
                                     "previous_response_id points to a response this proxy never saw;"

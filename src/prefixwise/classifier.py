@@ -84,9 +84,9 @@ class RequestSnapshot:
     session_id: str | None = None
     # Self-hosted engine (vLLM, SGLang) behind the proxy: one cache, no routing.
     engine: bool = False
-    # From the engine's KV events (prefixwise.engines; None = no event stream):
-    # this session's blocks removed from GPU since its last turn, and its
-    # blocks still resident.
+    # From the engine's KV events (prefixwise.engines; None = nothing to judge):
+    # evicted_blocks > 0 when the block where the cache read stopped was removed;
+    # evicted_blocks == 0 and resident_blocks > 0 when that block is still on the GPU.
     evicted_blocks: int | None = None
     resident_blocks: int | None = None
     # Anthropic cache_control present anywhere in the request.
@@ -244,8 +244,8 @@ def classify(prev: RequestSnapshot | None, curr: RequestSnapshot,
     # Engine eviction events are direct evidence; they outrank inference.
     if curr.evicted_blocks:
         return Classification(MissCause.EVICTED, None,
-                              f"confirmed: the engine removed {curr.evicted_blocks} of this session's KV blocks "
-                              "from GPU memory since its last turn (KV events)",
+                              "confirmed: the block where the cache read stopped was removed from GPU memory "
+                              f"({curr.evicted_blocks} of the previous request's KV blocks removed; KV events)",
                               secondary, native_reason)
 
     # Identical replay within a short window is a retry, not a cache miss.
@@ -260,10 +260,10 @@ def classify(prev: RequestSnapshot | None, curr: RequestSnapshot,
     if curr.engine:
         if curr.evicted_blocks == 0 and curr.resident_blocks:
             return Classification(MissCause.UNKNOWN, None,
-                                  f"not an eviction: the engine still holds {curr.resident_blocks} of this "
-                                  "session's KV blocks and removed none since its last turn. The token prefix "
-                                  "probably differs from what the request shows (chat template rendering), or "
-                                  "the request went to another data-parallel rank",
+                                  "not an eviction: the engine still holds the block where the cache read stopped "
+                                  f"({curr.resident_blocks} of the previous request's blocks resident; KV events). "
+                                  "The token prefix changed there although the request did not (chat template "
+                                  "rendering), or the request went to another data-parallel rank",
                                   secondary, native_reason)
         return Classification(MissCause.EVICTED, None,
                               "inferred: one self-hosted engine, prefix unchanged but not reused. Usually the "
