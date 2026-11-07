@@ -12,9 +12,9 @@ T = PriceTable.load()
 
 
 def test_builtin_table_is_dated_and_sourced():
-    assert T.as_of == "2026-11-06"
+    assert T.as_of == "2026-11-07"
     for name, r in T.models.items():
-        assert "platform.claude.com" in r["source"], name
+        assert "platform.claude.com" in r["source"], name  # official page only
         assert all(isinstance(r[k], (int, float)) for k in ("input", "output", "cache_read")), name
 
 
@@ -84,7 +84,7 @@ def test_proxy_records_cost_and_report_shows_dollars(tmp_path, capsys):
             "system": [{"type": "text", "text": "x", "cache_control": {"type": "ephemeral"}}]}
     proxy.handle("anthropic", dict(body))
     _, entry = proxy.handle("anthropic", dict(body))
-    assert entry.cost is not None and entry.cost > 0 and entry.price_as_of == "2026-11-06"
+    assert entry.cost is not None and entry.cost > 0 and entry.price_as_of == "2026-11-07"
     proxy.handle("openai", {"model": "gpt-5.6-luna", "session_id": "o", "messages": []})
     main(["report", "--ledger", path])
     out = capsys.readouterr().out

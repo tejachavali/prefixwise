@@ -105,7 +105,7 @@ Avoidable tokens for a waste turn = the part of the previous turn's prompt that 
 | `prefixwise request REQUEST_ID [--json]` | One request's ledger entry (from `X-Prefixwise-Request-Id`). |
 | `prefixwise explain A.json B.json` / `explain SESSION.jsonl [--json] [--fail-on-waste]` | Offline diagnosis of saved request bodies, or `{"request": ..., "usage": ..., "session_id": ..., "gap_seconds": ...}` records. |
 
-**HTTP endpoints:** `POST /v1/chat/completions`, `POST /v1/responses`, `POST /v1/messages` (streaming supported on all three), `POST /tasks {"task_id", "success"}`, `GET /requests/<id>`, `GET /ledger`, `GET /health`.
+**HTTP endpoints:** `POST /v1/chat/completions`, `POST /v1/responses`, `POST /v1/messages` (streaming supported on all three; the same paths without `/v1` also work, and query strings are forwarded). Any other path, such as `GET /v1/models` or `count_tokens`, passes through to the upstream unchanged and is not recorded. Also: `POST /tasks {"task_id", "success"}`, `GET /requests/<id>`, `GET /ledger`, `GET /health`.
 
 **Request headers** (all optional; stripped before forwarding):
 
@@ -149,7 +149,7 @@ Found a vulnerability? See [SECURITY.md](SECURITY.md).
 - One proxy process keeps session state in memory: run one instance per agent fleet, or send all of a session's turns to the same instance.
 - `evicted` needs vLLM KV events, which the proxy does not consume yet.
 - OpenAI's default in-memory cache TTL is not a fixed number, so after a long gap a cold OpenAI cache is `unknown` unless you send `X-Prefixwise-Cache-Ttl`.
-- **Dollar costs:** only models in the dated price table are priced: Claude Haiku, Sonnet and Opus 5.5 and Fable 5.1, read from Anthropic's pricing page on 2026-11-06. Everything else, OpenAI included, shows `-` until you add rates with `PREFIXWISE_PRICES`. Batch, fast-mode and data-residency multipliers are not modelled.
+- **Dollar costs:** only models in the dated price table are priced: Claude Haiku, Sonnet and Opus 5.5, Fable 5.1 and Sonnet 4.6, read from Anthropic's pricing page (2026-11-06/07). Everything else, OpenAI included, shows `-` until you add rates with `PREFIXWISE_PRICES`. Batch, fast-mode and data-residency multipliers are not modelled.
 
 ## Working on Prefixwise
 

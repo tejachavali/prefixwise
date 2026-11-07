@@ -637,8 +637,42 @@ class PrefixwiseProxy:
             headers["authorization"] = f"Bearer {self.api_key}"
         path = ("/v1/messages" if provider == "anthropic"
                 else "/v1/responses" if api == "responses" else "/v1/chat/completions")
+        query = client_headers.get(QUERY_KEY)
+        if query:  # e.g. Anthropic SDK's ?beta=true: forwarded as the client sent it
+            path += "?" + query
         return urllib.request.Request(self.upstream_url + path, method="POST",
                                       data=json.dumps(body).encode(), headers=headers)
+
+    def passthrough(self, method: str, raw_path: str, body: bytes | None,
+                    client_headers: dict[str, str]) -> tuple[int, str, bytes]:
+        """Forward a request Prefixwise does not analyse (GET /v1/models,
+        count_tokens, ...) to the upstream unchanged. Nothing is recorded.
+        Returns (status, content type, body)."""
+        if self.mock:
+            return 404, "application/json", json.dumps(_error(
+                404, f"{raw_path} is not available in mock mode (no upstream)")).encode()
+        headers = {k: v for k, v in client_headers.items() if k in PASSTHROUGH_HEADERS}
+        if body:
+            headers["content-type"] = client_headers.get("content-type", "application/json")
+        anthropic = raw_path.startswith("/v1/messages") or "anthropic-version" in client_headers \
+            or "x-api-key" in client_headers
+        if self.api_key:
+            if anthropic:
+                headers["x-api-key"] = self.api_key
+                headers.pop("authorization", None)
+            else:
+                headers["authorization"] = f"Bearer {self.api_key}"
+        if anthropic:
+            headers.setdefault("anthropic-version", ANTHROPIC_VERSION)
+        req = urllib.request.Request(self.upstream_url + raw_path, method=method, data=body or None,
+                                     headers=headers)
+        try:
+            with urllib.request.urlopen(req, timeout=UPSTREAM_TIMEOUT) as resp:
+                return resp.status, resp.headers.get("Content-Type", "application/json"), resp.read()
+        except urllib.error.HTTPError as exc:
+            return exc.code, exc.headers.get("Content-Type", "application/json"), exc.read() or b""
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            return 502, "application/json", json.dumps(_error(502, f"upstream unreachable: {exc}")).encode()
 
     @staticmethod
     def _http_error(exc: urllib.error.HTTPError) -> tuple[int, dict]:
@@ -790,6 +824,22 @@ def validate_body(body: dict) -> None:
             raise ClientError(f"'{key}' is longer than {MAX_ID_CHARS} characters")
 
 
+# Endpoints Prefixwise classifies. Clients disagree on whether the base URL
+# includes /v1 (dogfood 2026-11-06: opencode posted to /messages), so the
+# bare forms are accepted too.
+CLASSIFIED_PATHS = ("/v1/chat/completions", "/v1/responses", "/v1/messages")
+_ALIASES = {p[len("/v1"):]: p for p in CLASSIFIED_PATHS}
+LOCAL_PATHS = ("/health", "/ledger", "/tasks")
+QUERY_KEY = "x-prefixwise-internal-query"  # carries the client's query string to the forwarder
+
+
+def route(raw_path: str) -> tuple[str, str]:
+    """(path, query): the query string split off, and /messages-style
+    paths mapped to their /v1 form."""
+    path, _, query = raw_path.partition("?")
+    return _ALIASES.get(path, path), query
+
+
 def _is_loopback(host: str) -> bool:
     return host in ("127.0.0.1", "::1", "localhost") or host.startswith("127.")
 
@@ -831,19 +881,60 @@ def make_handler(proxy: PrefixwiseProxy):
             self._json(401, _error(401, "missing or wrong X-Prefixwise-Token"))
             return False
 
+        def _client_headers(self) -> dict[str, str]:
+            # Our internal query carrier can never be set by the client.
+            headers = {k.lower(): v for k, v in self.headers.items() if k.lower() != QUERY_KEY}
+            _, query = route(self.path)
+            if query:
+                headers[QUERY_KEY] = query
+            return headers
+
+        def _passthrough(self, method: str):
+            if not self._authorized():
+                return
+            body = None
+            if method in ("POST", "PUT", "PATCH"):
+                try:
+                    length = int(self.headers.get("Content-Length", 0) or 0)
+                except ValueError:
+                    return self._json(400, _error(400, "Content-Length is not a number"))
+                if length < 0 or length > MAX_BODY_BYTES:
+                    return self._json(413 if length > 0 else 400, _error(400, "bad Content-Length"))
+                body = self.rfile.read(length)
+            status, ctype, data = proxy.passthrough(method, self.path, body, self._client_headers())
+            self.send_response(status)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            if method != "HEAD":
+                self.wfile.write(data)
+
         def do_GET(self):
-            if self.path == "/health":
+            path, _ = route(self.path)
+            if path == "/health":
                 return self._json(200, {"ok": True, "mock": proxy.mock})
             if not self._authorized():
                 return
-            if self.path == "/ledger":
+            if path == "/ledger":
                 return self._json(200, json.loads(proxy.ledger.to_json()))
-            if self.path.startswith("/requests/"):
-                row = proxy.ledger.get_request(self.path[len("/requests/"):])
+            if path.startswith("/requests/"):
+                row = proxy.ledger.get_request(path[len("/requests/"):])
                 if row is None:
                     return self._json(404, _error(404, "unknown request id (or not recorded yet)"))
                 return self._json(200, row)
-            return self._json(404, _error(404, "not found"))
+            return self._passthrough("GET")
+
+        def do_HEAD(self):
+            path, _ = route(self.path)
+            if path == "/health":
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                return
+            return self._passthrough("HEAD")
+
+        def do_DELETE(self):
+            return self._passthrough("DELETE")
 
         def _read_json(self):
             try:
@@ -861,8 +952,10 @@ def make_handler(proxy: PrefixwiseProxy):
             return body
 
         def do_POST(self):
-            if self.path not in ("/v1/chat/completions", "/v1/responses", "/v1/messages", "/tasks"):
-                return self._json(404, _error(404, f"unsupported path {self.path}"))
+            path, _ = route(self.path)
+            if path not in CLASSIFIED_PATHS and path != "/tasks":
+                # Not analysed (count_tokens, files, batches, ...): forwarded unchanged.
+                return self._passthrough("POST")
             if not self._authorized():
                 return
             try:
@@ -881,13 +974,14 @@ def make_handler(proxy: PrefixwiseProxy):
                 return self._json(500, _error(500, "internal error in the Prefixwise proxy"))
 
         def _dispatch(self, body: dict):
-            if self.path == "/tasks":
+            path, _ = route(self.path)
+            if path == "/tasks":
                 return self._task(body)
-            provider = "anthropic" if self.path == "/v1/messages" else "openai"
-            api = "responses" if self.path == "/v1/responses" else "chat"
+            provider = "anthropic" if path == "/v1/messages" else "openai"
+            api = "responses" if path == "/v1/responses" else "chat"
             if body.get("stream"):
                 return self._stream(provider, body, api)
-            result, _ = proxy.handle(provider, body, dict(self.headers.items()), api=api)
+            result, _ = proxy.handle(provider, body, self._client_headers(), api=api)
             # The client gets the upstream response unchanged; Prefixwise's
             # verdict rides in headers so drop-in clients are unaffected.
             extra = {"X-Prefixwise-Request-Id": result["request_id"]}
@@ -907,7 +1001,7 @@ def make_handler(proxy: PrefixwiseProxy):
             return self._json(200, {"ok": True, "task_id": task_id, "success": success})
 
         def _stream(self, provider: str, body: dict, api: str = "chat"):
-            ctx = proxy.prepare(provider, body, dict(self.headers.items()), api=api)
+            ctx = proxy.prepare(provider, body, self._client_headers(), api=api)
             status, lines, acc, err = proxy.open_stream(ctx)
             if lines is None:
                 return self._json(status, err, {"X-Prefixwise-Request-Id": ctx["request_id"]})
