@@ -1,6 +1,15 @@
 # Changelog
 
-## Unreleased
+## 0.5.0: 2026-11-07
+
+Built from research into what model labs, engine maintainers and agent users report about
+prompt caching, and the gaps they leave: Prefixwise now reaches Claude Code and Codex subscribers through their own logs, explains the
+2026 ways agents break the cache, and puts its numbers in Prometheus and Grafana. Each new rule
+was reviewed independently against the providers' docs before release.
+
+**Upgrading:** ledgers migrate in place (schema 4 adds `detail`). The published Anthropic
+agreement figure is restated as 32/32 named reasons (it counted 5 `unavailable` answers as
+agreement; see below). Nothing else to change.
 
 - **`prefixwise import codex`.** The same for Codex's rollout logs (`~/.codex/sessions` and `archived_sessions`), into `prefixwise-codex.db`: per-response usage from `token_usage_record` (older logs: `token_count` events), subagent threads (`parent_thread_id`) and forks labelled. Causes from what changes OpenAI's cached prefix: model switch, compaction, a changed tool catalog; expiry is never claimed (OpenAI's cache lifetime is not fixed), so other misses are `unknown`. Built from Codex's source (rollout format, Nov 2026) and checked on real Codex 0.167 logs. The import names models it has no prices for.
 - **`prefixwise import claude-code`: for Pro/Max subscribers, no proxy.** Reads Claude Code's own session logs (`~/.claude/projects`, subagents included), read-only, into `prefixwise-claude-code.db`, and reports the same way plus a line per agent (main conversation, each subagent type). A cause is named only from what the log shows changed in the cached prefix: model switch, compaction, Claude Code upgrade, a changed system prompt (compared by hash), an effort change where it breaks the cache, expiry against the TTL Anthropic actually granted (`ttl_shortened`), or Anthropic's own `cache_miss_reason`. Context Claude Code appends mid-conversation (deferred tools, MCP and skill updates, the date) is never blamed, per its docs; anything else is `unknown`. A first request or a switch back that read the cache is a hit. Errors (`<synthetic>`) are skipped, old in-log subagent entries form their own stream, unreadable files are skipped. Reviewed independently against Claude Code's docs and real logs before release. Stores counts and event types, never message text.
