@@ -154,6 +154,8 @@ class Ledger:
                     self.conn.execute(f"ALTER TABLE entries ADD COLUMN {col} {typ}")
             self.conn.execute("CREATE INDEX IF NOT EXISTS entries_task ON entries(task_id)")
             self.conn.execute("CREATE INDEX IF NOT EXISTS entries_request ON entries(request_id)")
+            self.conn.execute("CREATE INDEX IF NOT EXISTS entries_session ON entries(session_id)")
+            self.conn.execute("CREATE INDEX IF NOT EXISTS entries_time ON entries(recorded_at)")
             self.conn.execute(
                 """CREATE TABLE IF NOT EXISTS tasks (
                     task_id TEXT PRIMARY KEY, success INTEGER NOT NULL, recorded_at REAL
@@ -240,29 +242,22 @@ class Ledger:
         return dict(zip(names, row)) if row else None
 
     def summary(self) -> dict:
-        """Totals across the whole ledger, for reports."""
-        with self._lock:
-            n, prompt, cached, completion, avoidable = self.conn.execute(
-                """SELECT COUNT(*), COALESCE(SUM(prompt_tokens), 0), COALESCE(SUM(cached_tokens), 0),
-                          COALESCE(SUM(completion_tokens), 0), COALESCE(SUM(avoidable_tokens), 0)
-                   FROM entries WHERE error IS NULL""").fetchone()
-            priced, cost, avoidable_cost = self.conn.execute(
-                """SELECT COUNT(cost), COALESCE(SUM(cost), 0), COALESCE(SUM(avoidable_cost), 0)
-                   FROM entries WHERE error IS NULL""").fetchone()
-            failed = self.conn.execute("SELECT COUNT(*) FROM entries WHERE error IS NOT NULL").fetchone()[0]
-        # "requests" are the ones with a verdict; failed requests (no verdict, no
-        # tokens) are counted apart so every token rate keeps an honest denominator.
-        return {"requests": n, "failed_requests": failed, "prompt_tokens": prompt, "cached_tokens": cached,
-                "completion_tokens": completion, "avoidable_tokens": avoidable,
-                "cache_hit_rate": (cached / prompt) if prompt else None,
-                "avoidable_share": (avoidable / prompt) if prompt else None,
+        """Totals across the whole ledger, for reports. Defined in prefixwise.metrics."""
+        from . import metrics
+
+        m = metrics.summary(self)
+        priced = m["requests_priced"] or 0
+        return {"requests": m["requests"] or 0, "failed_requests": m["requests_failed"] or 0,
+                "prompt_tokens": m["prompt_tokens"] or 0, "cached_tokens": m["cached_tokens"] or 0,
+                "completion_tokens": m["completion_tokens"] or 0, "avoidable_tokens": m["avoidable_tokens"] or 0,
+                "cache_hit_rate": m["cache_hit_rate"], "avoidable_share": m["avoidable_share"],
                 "tasks": self.task_counts(),
-                "tokens_per_successful_task": self.tokens_per_successful_task(),
+                "tokens_per_successful_task": m["tokens_per_successful_task"],
                 # Dollars cover only priced requests; priced_requests says how many.
                 "priced_requests": priced,
-                "cost": cost if priced else None,
-                "avoidable_cost": avoidable_cost if priced else None,
-                "cost_per_successful_task": self.cost_per_successful_task()}
+                "cost": m["cost_usd"] if priced else None,
+                "avoidable_cost": (m["avoidable_cost_usd"] or 0) if priced else None,
+                "cost_per_successful_task": m["cost_per_successful_task_usd"]}
 
     def cost_per_successful_task(self) -> float | None:
         """Dollars on resolved tasks (failures included) / successful tasks.
@@ -281,32 +276,23 @@ class Ledger:
     ROLLUP_KEYS = ("cause", "session_id", "agent_id", "model", "provider", "task_id")
 
     def rollup(self, by: str = "cause") -> list[dict]:
-        """Requests and tokens grouped by one column, most avoidable first."""
+        """Requests and tokens grouped by one column, most avoidable first.
+        Defined in prefixwise.metrics; groups with no verdict (failures only) are left out."""
+        from . import metrics
+
         if by not in self.ROLLUP_KEYS:
             raise ValueError(f"rollup key must be one of {self.ROLLUP_KEYS}")
-        with self._lock:
-            rows = self.conn.execute(
-                f"""SELECT {by}, COUNT(*), COALESCE(SUM(prompt_tokens), 0),
-                           COALESCE(SUM(cached_tokens), 0), COALESCE(SUM(avoidable_tokens), 0),
-                           SUM(CASE WHEN legit = 0 THEN 1 ELSE 0 END),
-                           COUNT(cost), SUM(cost), SUM(avoidable_cost)
-                    FROM entries WHERE error IS NULL GROUP BY {by}
-                    ORDER BY SUM(avoidable_tokens) DESC, COUNT(*) DESC""").fetchall()
-            # Tokens per successful task within each group: tokens on resolved
-            # tasks (failures included) / distinct successful tasks.
-            per_task = {k: (tok, ok) for k, tok, ok in self.conn.execute(
-                f"""SELECT e.{by}, SUM(e.prompt_tokens + COALESCE(e.completion_tokens, 0)),
-                           COUNT(DISTINCT CASE WHEN t.success = 1 THEN t.task_id END)
-                    FROM entries e JOIN tasks t ON e.task_id = t.task_id
-                    GROUP BY e.{by}""").fetchall()}
-        out = []
-        for k, n, pt, ct, at, w, priced, cost, acost in rows:
-            tok, ok = per_task.get(k, (0, 0))
-            out.append({by: k, "requests": n, "prompt_tokens": pt, "cached_tokens": ct,
-                        "avoidable_tokens": at, "waste_requests": w or 0,
-                        "priced_requests": priced, "cost": cost, "avoidable_cost": acost,
-                        "successful_tasks": ok,
-                        "tokens_per_successful_task": (tok / ok) if ok else None})
+        dim = {"session_id": "session", "agent_id": "agent", "task_id": "task"}.get(by, by)
+        rows = metrics.query(self, ["requests", "prompt_tokens", "cached_tokens", "avoidable_tokens",
+                                    "requests_wasteful", "requests_priced", "cost_usd", "avoidable_cost_usd",
+                                    "tasks_successful", "tokens_per_successful_task"], by=dim)
+        out = [{by: r[dim], "requests": r["requests"], "prompt_tokens": r["prompt_tokens"],
+                "cached_tokens": r["cached_tokens"], "avoidable_tokens": r["avoidable_tokens"],
+                "waste_requests": r["requests_wasteful"] or 0, "priced_requests": r["requests_priced"] or 0,
+                "cost": r["cost_usd"], "avoidable_cost": r["avoidable_cost_usd"],
+                "successful_tasks": r["tasks_successful"],
+                "tokens_per_successful_task": r["tokens_per_successful_task"]} for r in rows if r["requests"]]
+        out.sort(key=lambda r: (-r["avoidable_tokens"], -r["requests"]))
         return out
 
     def recent(self, limit: int = 20) -> list[dict]:

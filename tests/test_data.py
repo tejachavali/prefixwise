@@ -73,3 +73,30 @@ def test_old_ledgers_gain_the_new_columns_and_old_rows_count_as_succeeded(tmp_pa
     db.commit()
     s = Ledger(path).summary()
     assert (s["requests"], s["failed_requests"], s["cached_tokens"]) == (1, 0, 900)
+
+
+def test_export_jsonl_and_csv(tmp_path):
+    import csv
+    import json
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    path = str(tmp_path / "l.db")
+    p = PrefixwiseProxy(upstream_url="http://unused", api_key="k", ledger_path=path)
+    queue = [anthropic_ok(100, 0, 3000), anthropic_ok(40, 3000, 60)]
+    p._forward = lambda *a, **k: queue.pop(0)
+    p.handle("anthropic", body("a"), {"x-prefixwise-session-id": "s1"})
+    p.handle("anthropic", body("a", "b"), {"x-prefixwise-session-id": "s2"})
+    env = {"PYTHONPATH": str(Path(__file__).resolve().parent.parent / "src")}
+    run = lambda *a: subprocess.run([sys.executable, "-m", "prefixwise", "export", "--ledger", path, *a],
+                                    capture_output=True, text=True, env={**__import__("os").environ, **env})
+    rows = [json.loads(line) for line in run().stdout.splitlines()]
+    assert [r["session_id"] for r in rows] == ["s1", "s2"] and rows[0]["cache_write_tokens"] == 3000
+    only = [json.loads(line) for line in run("--where", "session=s2").stdout.splitlines()]
+    assert len(only) == 1
+    out = tmp_path / "x.csv"
+    assert run("--format", "csv", "-o", str(out)).returncode == 0
+    table = list(csv.DictReader(out.open()))
+    assert len(table) == 2 and "evidence" in table[0]
+    assert run("--where", "colour=red").returncode == 2

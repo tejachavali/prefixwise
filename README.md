@@ -100,6 +100,7 @@ Avoidable tokens for a waste turn = the part of the previous turn's prompt that 
 | `prefixwise serve [--upstream URL] [--mock] [--fix canonical_tools] [--host H] [--port P] [--ledger FILE]` | Run the proxy. Ledger defaults to `./prefixwise.db`. `--fix` applies an opt-in, reversible rewrite to every request (see below). |
 | `prefixwise prices [--json]` | The dated price table behind dollar costs, and where each rate came from. |
 | `prefixwise prune --older-than 30d` | Delete ledger entries older than that (retention). Add `--include-undated` to also drop rows written before 0.3.1. |
+| `prefixwise export [--format jsonl\|csv] [--since 7d] [--where session=s1]` | Every ledger row (facts, never prompt text) for a spreadsheet, notebook or warehouse. |
 | `prefixwise fixes [--json]` | The fixes that would save the most, ranked by the avoidable tokens your own ledger attributes to each cause. |
 | `prefixwise report [--by cause\|session_id\|agent_id\|model\|provider\|task_id] [--json]` | Totals and a breakdown, most avoidable first. |
 | `prefixwise task ID --success\|--failure` | Record a task outcome (safe while the proxy runs). |
@@ -126,6 +127,10 @@ Avoidable tokens for a waste turn = the part of the previous turn's prompt that 
 **Dollar costs.** Each request is priced from the provider's own usage breakdown (uncached input, cache reads, cache writes by TTL, output), using a dated price table: `prefixwise prices` shows it. *Avoidable cost* is the avoidable tokens times (input price − cache-read price): what they would have cost as cache hits. A model with no rates shows `-`, never an estimate. To add other models or your negotiated rates, write a JSON file in the same format (`prefixwise prices --json` prints one) and set `PREFIXWISE_PRICES=/path/prices.json`. Your entries override the built-in ones. `prefixwise report` and `prefixwise fixes` then show dollars, and say how many requests were priced.
 
 **Fixes the proxy can apply.** `canonical_tools` sorts tools by name and sorts each tool's keys before forwarding, so a tool list that drifts between turns (plugin reload, dict rebuild) stops breaking the cache. It is off by default; with it off, requests pass through unchanged. Prefixwise classifies the request the provider actually received. Fixes that would change what the model reads, like moving a timestamp out of the system prompt, are advice only: `prefixwise fixes` lists them. `canonical_tools` is **proven**: in [E4](experiments/e4/runs/2026-11-06-live.md), turning it on realised 99.9% (Anthropic Haiku 5.5) and 97.5% (vLLM Qwen3-4B) of the savings Prefixwise predicted, with task success flat.
+
+## Data and API
+
+Every number Prefixwise shows is also data. Each request leaves a row of facts (verdict and its evidence, token breakdown, cost, latency, status; failed requests too), and every metric is defined once and served three ways: `prefixwise report`, the HTTP API at `/api/v1` (summary, breakdowns by cause, session, model, day..., request rows, fixes, prices, explain; [docs/API.md](docs/API.md)), and `prefixwise export`. `GET /api/v1/metrics` lists every metric and what it means. Design: [docs/DATA.md](docs/DATA.md).
 
 ## Security
 

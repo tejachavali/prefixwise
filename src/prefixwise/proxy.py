@@ -60,6 +60,7 @@ from .classifier import Classification, MissCause, RequestSnapshot, classify, fi
 from .diagnostics import AgreementScorer, anthropic_diagnostics, openai_comparison_options
 from .fingerprint import Fingerprinter
 from .fixes import apply_fixes, parse_fixes
+from . import api
 from .pricing import PriceTable, breakdown
 from .ledger import Ledger, LedgerEntry, avoidable_for_turn
 
@@ -1050,6 +1051,12 @@ def make_handler(proxy: PrefixwiseProxy):
                 return self._json(200, {"ok": True, "mock": proxy.mock})
             if not self._authorized():
                 return
+            if path.startswith(api.PREFIX + "/") or path == api.PREFIX:
+                try:
+                    return self._json(*api.get(proxy, path, route(self.path)[1]))
+                except Exception as exc:  # never drop the connection; never echo internals
+                    print(f"prefixwise: internal error on {path}: {type(exc).__name__}", file=sys.stderr)
+                    return self._json(500, _error(500, "internal error in the Prefixwise API"))
             if path == "/ledger":
                 return self._json(200, json.loads(proxy.ledger.to_json()))
             if path.startswith("/requests/"):
@@ -1088,6 +1095,22 @@ def make_handler(proxy: PrefixwiseProxy):
 
         def do_POST(self):
             path, _ = route(self.path)
+            if path.startswith(api.PREFIX + "/"):
+                if not self._authorized():
+                    return
+                try:
+                    return self._json(*api.post(proxy, path, self._read_json()))
+                except ClientError as exc:
+                    code = 413 if "larger than" in str(exc) else 400
+                    return self._json(code, _error(code, str(exc)))
+                except ValueError as exc:
+                    return self._json(400, _error(400, f"invalid JSON body: {exc}"))
+                except OSError:
+                    self.close_connection = True
+                    return
+                except Exception as exc:
+                    print(f"prefixwise: internal error on {path}: {type(exc).__name__}", file=sys.stderr)
+                    return self._json(500, _error(500, "internal error in the Prefixwise API"))
             if path not in CLASSIFIED_PATHS and path != "/tasks":
                 # Not analysed (count_tokens, files, batches, ...): forwarded unchanged.
                 return self._passthrough("POST")

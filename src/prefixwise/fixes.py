@@ -103,3 +103,32 @@ FIX_ADVICE: dict[str, dict] = {
                              "fix": "Anthropic: add a cache_control breakpoint after the stable prefix "
                                     "(tools and system)."},
 }
+
+
+def recommend(ledger) -> dict:
+    """Fixes ranked by the avoidable tokens this ledger attributes to their cause
+    (the data behind `prefixwise fixes` and GET /api/v1/fixes)."""
+    from . import metrics
+
+    total = metrics.query(ledger, ["prompt_tokens"])
+    prompt = total[0]["prompt_tokens"] if total else 0
+    rows = {r["cause"]: r for r in metrics.query(
+        ledger, ["requests", "avoidable_tokens", "avoidable_cost_usd", "requests_priced"], by="cause")}
+    with ledger._lock:
+        fixed = dict(ledger.conn.execute(
+            "SELECT fixes, COUNT(*) FROM entries WHERE fixes IS NOT NULL GROUP BY fixes").fetchall())
+    recs = []
+    for cause, advice in FIX_ADVICE.items():
+        r = rows.get(cause)
+        if not r or not r["avoidable_tokens"]:
+            continue
+        status = FIX_STATUS.get(advice["toggle"] or "", {})
+        recs.append({"cause": cause, "requests": r["requests"], "predicted_savings_tokens": r["avoidable_tokens"],
+                     "predicted_savings_usd": r["avoidable_cost_usd"],
+                     "unpriced_requests": r["requests"] - (r["requests_priced"] or 0),
+                     "share_of_prompt_tokens": (r["avoidable_tokens"] / prompt) if prompt else None,
+                     "fix": advice["fix"], "proxy_toggle": advice["toggle"],
+                     "status": status.get("status") or "recommended (predicted; prove it with experiments/e4)",
+                     "evidence": status.get("evidence")})
+    recs.sort(key=lambda x: -x["predicted_savings_tokens"])
+    return {"recommendations": recs, "requests_rewritten_by_fixes": fixed}

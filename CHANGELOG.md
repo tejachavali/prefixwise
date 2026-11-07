@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- **Data first** ([docs/DATA.md](docs/DATA.md)): every request leaves a row of facts, failures included. New per-request fields: status and error (upstream errors and cut-off streams are rows now, without a verdict, so rates keep honest denominators), api, stream, uncached and cache-write tokens, upstream latency, Prefixwise's own overhead, the gap since the previous turn, the verdict's evidence and secondary causes, and where the prompt first diverged. Existing ledgers migrate in place.
+- **Every metric defined once** (`prefixwise.metrics`): a catalog of names, units and definitions that the CLI, the API and exports all use. Ratios are ratios of sums. Token and cost metrics count requests with a verdict; failures count in `requests_failed` and `error_rate`.
+- **HTTP API `/api/v1`** ([docs/API.md](docs/API.md)): `metrics` (the catalog), `summary`, `breakdown?by=`, `timeseries?bucket=`, `requests` (paginated), `requests/{id}`, `fixes`, `prices`, `POST tasks`, `POST explain`; filters and time windows; same token auth as the proxy.
+- **`prefixwise export`**: raw rows as JSONL or CSV.
+- **Summary** reports `failed_requests`.
+
 ## 0.3.1: 2026-11-07
 
 Production hardening, found by a new benchmark; per-model lanes; OpenAI prices.
