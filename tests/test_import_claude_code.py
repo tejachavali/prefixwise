@@ -42,10 +42,12 @@ class Log:
         self.lines.append({"type": "system", "subtype": "compact_boundary", "timestamp": ts(t),
                            "compactMetadata": {"preTokens": 100000, "postTokens": 9000}})
 
-    def reply(self, t, u, model="claude-opus-5-5", split=True, ttl="1h"):
+    def reply(self, t, u, model="claude-opus-5-5", split=True, ttl="1h", **extra):
         self.n += 1
         msg = {"id": f"msg_{self.ids}{self.n}", "model": model, "usage": u, "content": [{"type": "text", "text": "y"}]}
-        base = {"type": "assistant", "timestamp": ts(t), "promptCacheRequested": ttl, "message": msg}
+        if "diagnostics" in extra:
+            msg["diagnostics"] = extra.pop("diagnostics")
+        base = {"type": "assistant", "timestamp": ts(t), "promptCacheRequested": ttl, "message": msg, **extra}
         if split:  # Claude Code logs one entry per content block; not every entry has requestId
             self.lines.append({**base, "requestId": f"req_{self.ids}{self.n}"})
             self.lines.append({**base, "timestamp": ts(t + 1), "message": {**msg, "usage": {**u, "output_tokens": 1}}})
@@ -64,7 +66,7 @@ def build(root: Path):
     main.user(60); main.attach(60, "deferred_tools_delta")
     main.reply(65, usage(w1h=21000))                                   # tool list changed
     main.compact(90); main.user(95); main.reply(100, usage(w1h=9000))  # compaction
-    main.user(130); main.reply(135, usage(read=9000, w5=300), model="claude-haiku-5-5")  # model switch
+    main.user(130); main.reply(135, usage(w5=9300), model="claude-haiku-5-5")  # model switch: its own cache
     main.user(160); main.reply(165, usage(read=9300, w5=200), model="claude-haiku-5-5")  # hit, 5m write
     main.user(165 + 900); main.reply(1070, usage(w5=9600), model="claude-haiku-5-5")     # 15 min later
     main.user(1100); main.reply(1105, usage(fresh=9000), model="claude-haiku-5-5")       # unexplained
@@ -91,10 +93,12 @@ def test_causes_from_the_log(tmp_path):
     stats = import_claude_code(tmp_path, led)
     assert stats["imported"] == 10 and stats["logs"] == 2
     main = [r for r in rows(led) if r[0] == "main"]
-    assert [r[1] for r in main] == ["first_write", "none", "tool_catalog_change", "compaction_rewrite",
+    # A deferred-tools load is appended after the cached prefix (Claude Code docs): no cause by itself.
+    assert [r[1] for r in main] == ["first_write", "none", "unknown", "compaction_rewrite",
                                     "model_switch", "none", "ttl_expired", "unknown"]
+    assert "deferred tools loaded" in main[2][5] and "appends after the cached prefix" in main[2][5]
     assert main[6][2] == "ttl_shortened"  # asked for 1h, the write was kept 5m, 15 minutes passed
-    assert "a prompt change Claude Code does not log" in main[7][5]
+    assert "a change Claude Code does not log" in main[7][5]
     assert all(r[5].startswith("from the log: ") for r in main)
     assert main[0][6] == "msg_a1" and len({r[6] for r in main}) == 8  # split responses counted once
     assert main[0][3] == 20050 and main[1][4] == 20000
@@ -141,3 +145,93 @@ def test_cli_import_prints_the_report(tmp_path):
     out = subprocess.run([sys.executable, "-m", "prefixwise", "import", "claude-code", "--path", str(tmp_path / "nope"),
                           "--ledger", str(db)], capture_output=True, text=True, env=ENV)
     assert out.returncode == 1 and "no Claude Code logs" in out.stderr
+
+
+
+def one_log(tmp_path, build_log):
+    log = Log()
+    build_log(log)
+    log.write(tmp_path / "-p" / "s.jsonl")
+    led = Ledger()
+    import_claude_code(tmp_path, led)
+    return [r for r in rows(led)]
+
+
+def test_review_findings(tmp_path):
+    # Errors and interrupts are logged as <synthetic> responses: no API call, never a "model switch".
+    def synth(log):
+        log.user(0); log.reply(5, usage(w1h=20000))
+        log.lines.append({"type": "assistant", "timestamp": ts(10), "isApiErrorMessage": True,
+                          "message": {"id": "msg_err", "model": "<synthetic>", "usage": usage(fresh=0, out=0)}})
+        log.user(20); log.reply(25, usage(read=20000, w1h=300))
+    r = one_log(tmp_path / "a", synth)
+    assert [x[1] for x in r] == ["first_write", "none"]
+
+    # Switching back to a model whose cache is warm is a hit; a first request that reads is a hit.
+    def warm(log):
+        log.user(0); log.reply(5, usage(read=19000, w1h=500))
+        log.user(10); log.reply(15, usage(w5=15000), model="claude-haiku-5-5")
+        log.user(20); log.reply(25, usage(read=19500, w1h=400))
+    assert [x[1] for x in one_log(tmp_path / "b", warm)] == ["none", "model_switch", "none"]
+
+    # An upgrade, a changed system prompt snapshot, an effort change (on a model where it matters).
+    def changes(log):
+        log.user(0); log.reply(5, usage(w1h=20000), version="2.1.318", perTurnEffort="medium",
+                               model="claude-opus-5")
+        log.user(10); log.reply(15, usage(w1h=20100), version="2.1.319", perTurnEffort="medium",
+                                model="claude-opus-5")
+        log.lines.append({"type": "attachment", "timestamp": ts(20), "attachment": {
+            "type": "prompt_snapshot", "systemPrompt": ["v1"]}})
+        log.user(21); log.reply(25, usage(read=20100, w1h=10), version="2.1.319", perTurnEffort="medium",
+                                model="claude-opus-5")
+        log.lines.append({"type": "attachment", "timestamp": ts(30), "attachment": {
+            "type": "prompt_snapshot", "systemPrompt": ["v2"]}})
+        log.user(31); log.reply(35, usage(w1h=20200), version="2.1.319", perTurnEffort="medium",
+                                model="claude-opus-5")
+        log.user(40); log.reply(45, usage(w1h=20300), version="2.1.319", perTurnEffort="high",
+                                model="claude-opus-5")
+    r = one_log(tmp_path / "c", changes)
+    assert [x[1] for x in r] == ["first_write", "system_edit", "none", "system_edit", "param_rendered"]
+    assert "upgraded (2.1.318 -> 2.1.319)" in r[1][5]
+
+    # Effort changes do not break the cache on 5.5 models.
+    def safe_effort(log):
+        log.user(0); log.reply(5, usage(w1h=20000), perTurnEffort="medium", model="claude-opus-5-5")
+        log.user(10); log.reply(15, usage(w1h=20100), perTurnEffort="high", model="claude-opus-5-5")
+    assert [x[1] for x in one_log(tmp_path / "d", safe_effort)] == ["first_write", "unknown"]
+
+    # Anthropic's own diagnosis, when present, names the cause; "not found" is no verdict.
+    def native(log):
+        log.user(0); log.reply(5, usage(w1h=20000))
+        log.user(10); log.reply(15, usage(w1h=20100), diagnostics={"cache_miss_reason": {"type": "tools_changed"}})
+        log.user(20); log.reply(25, usage(w1h=20200),
+                                diagnostics={"cache_miss_reason": {"type": "previous_message_not_found"}})
+    r = one_log(tmp_path / "e", native)
+    assert [x[1] for x in r] == ["first_write", "tool_catalog_change", "unknown"]
+    assert "Anthropic's own diagnosis" in r[1][5]
+
+    # Subagent entries inside an older main log are their own stream, not the main conversation's previous turn.
+    def sidechain(log):
+        log.user(0); log.reply(5, usage(w1h=20000))
+        log.lines.append({"type": "assistant", "timestamp": ts(7), "isSidechain": True, "requestId": "req_side",
+                          "message": {"id": "msg_side", "model": "claude-haiku-5-5", "usage": usage(w5=9000)}})
+        log.user(10); log.reply(15, usage(read=20000, w1h=100))
+    r = one_log(tmp_path / "f", sidechain)
+    assert sorted((x[0], x[1]) for x in r) == [("main", "first_write"), ("main", "none"),
+                                               ("subagent:unknown", "first_write")]
+
+
+def test_unreadable_files_are_skipped_not_fatal(tmp_path):
+    build(tmp_path)
+    (tmp_path / "-proj" / "dir.jsonl").mkdir()  # a directory named like a log
+    (tmp_path / "-proj" / "gone.jsonl").symlink_to(tmp_path / "nowhere")  # a dangling link
+    led = Ledger()
+    s = import_claude_code(tmp_path, led)
+    assert s["imported"] == 10
+
+
+def test_odd_field_types_do_not_crash(tmp_path):
+    def odd(log):
+        log.user(0); log.reply(5, {"input_tokens": "lots", "output_tokens": "x", "cache_read_input_tokens": None,
+                                   "cache_creation_input_tokens": 100, "cache_creation": "weird"})
+    assert len(one_log(tmp_path, odd)) == 1

@@ -402,14 +402,21 @@ def cmd_import(args) -> int:
         print(f"prefixwise: no Claude Code logs at {root} (Claude Code keeps them in ~/.claude/projects; "
               "pass --path)", file=sys.stderr)
         return 1
-    path = args.ledger or os.environ.get("PREFIXWISE_LEDGER_PATH") or DEFAULT_LEDGER
+    # Its own ledger by default: an API-key user who also proxies Claude Code keeps the two apart
+    # (the proxy cannot know the log's response ids, so one request would count twice).
+    path = args.ledger or "prefixwise-claude-code.db"
     led = Ledger(path)
     stats = import_claude_code(root, led, since=since)
     if args.json:
         print(json.dumps(stats, indent=2))
         return 0
+    if stats["unreadable"]:
+        print(f"prefixwise: skipped {stats['unreadable']} unreadable log file(s)", file=sys.stderr)
     if not stats["imported"]:
-        print(f"Nothing new: the {stats['logs']} logs hold {stats['skipped_known']:,} requests already in {path}.")
+        if not stats["in_window"]:
+            print(f"No requests in the {stats['logs']} logs" + (f" since {args.since}." if args.since else "."))
+        else:
+            print(f"Nothing new: the {stats['logs']} logs hold {stats['skipped_known']:,} requests already in {path}.")
         return 0
     day = lambda t: time.strftime("%Y-%m-%d", time.localtime(t))  # noqa: E731
     print(f"Imported {stats['imported']:,} requests from {stats['logs']} Claude Code logs "
@@ -586,7 +593,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--path", metavar="DIR", help="where the logs are (default ~/.claude/projects)")
     p.add_argument("--since", metavar="WHEN", help="only requests after this: unix seconds, or 24h, 7d")
     p.add_argument("--json", action="store_true", help="import counts as JSON, no report")
-    ledger_opt(p)
+    p.add_argument("--ledger", help="SQLite ledger file (default: ./prefixwise-claude-code.db, apart from a "
+                                    "proxy's ledger so nothing is counted twice)")
     p.set_defaults(func=cmd_import)
 
     p = sub.add_parser("prune", help="delete old ledger entries (retention)")
