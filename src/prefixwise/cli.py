@@ -281,6 +281,9 @@ def cmd_run(args) -> int:
                                 otel=args.otel)
     except ValueError as exc:
         sys.exit(f"prefixwise: {exc}")
+    if proxy.spans is not None:  # `run` is its own process: it sets up the exporter
+        from .otel import install_provider
+        install_provider()
     proxy.versioned = {"openai"}
     proxy.api_key = None  # the agent's own keys pass through; never replace them here
     proxy.default_session = f"run-{time.strftime('%Y%m%d-%H%M%S')}"

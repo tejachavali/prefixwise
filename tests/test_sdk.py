@@ -108,3 +108,70 @@ def test_wrap_is_idempotent_and_rejects_other_objects(server, tmp_path, monkeypa
 def test_fixes_are_never_applied_to_what_is_recorded(monkeypatch):
     monkeypatch.setenv("PREFIXWISE_FIXES", "canonical_tools")
     assert Recorder(":memory:").proxy.fixes == ()
+
+
+def causes(rec):
+    return [r[5] for r in rows(rec)]
+
+
+def test_sdk_objects_in_the_history_are_recorded(server):
+    """The documented tool-use patterns put SDK objects into the next request."""
+    rec = Recorder(":memory:")
+    oa = prefixwise.wrap(openai.OpenAI(base_url=server + "/v1", api_key="sk-test"), recorder=rec)
+    msgs = [{"role": "system", "content": SYSTEM + "objects"}, {"role": "user", "content": "hi"}]
+    with prefixwise.session("objs"):
+        r = oa.chat.completions.create(model="gpt-5.6", messages=msgs)
+        msgs += [r.choices[0].message, {"role": "user", "content": "more"}]  # a ChatCompletionMessage
+        oa.chat.completions.create(model="gpt-5.6", messages=msgs, timeout=30.0, extra_headers={"x-a": "1"})
+    an = prefixwise.wrap(anthropic.Anthropic(base_url=server, api_key="sk-ant-test"), recorder=rec)
+    body = dict(model="claude-haiku-5-5", max_tokens=16, messages=[{"role": "user", "content": "hi"}],
+                system=[{"type": "text", "text": SYSTEM + "anthropic objects", "cache_control": {"type": "ephemeral"}}])
+    with prefixwise.session("objs-a"):
+        r = an.messages.create(**body, tools=anthropic.NOT_GIVEN)
+        an.messages.create(**{**body, "messages": body["messages"] + [
+            {"role": "assistant", "content": r.content}, {"role": "user", "content": "go"}]})  # TextBlocks
+    assert causes(rec) == ["first_write", "none", "first_write", "none"]
+
+
+def test_recorded_request_is_what_went_on_the_wire(server):
+    """extra_body is sent as part of the body; extra_headers, timeout and NOT_GIVEN are not."""
+    rec = Recorder(":memory:")
+    seen = []
+    prepare = rec.proxy.prepare
+    rec.proxy.prepare = lambda provider, body, *a, **k: (seen.append(body), prepare(provider, body, *a, **k))[1]
+    client = prefixwise.wrap(openai.OpenAI(base_url=server + "/v1", api_key="sk-test"), recorder=rec)
+    client.chat.completions.create(model="gpt-5.6", messages=[{"role": "user", "content": "hi"}],
+                                   extra_body={"prompt_cache_key": "k1"}, extra_headers={"x-a": "1"},
+                                   timeout=30.0, temperature=openai.NOT_GIVEN)
+    assert seen[0] == {"model": "gpt-5.6", "messages": [{"role": "user", "content": "hi"}],
+                       "prompt_cache_key": "k1"}
+
+
+def test_raw_response_parse_and_beta_are_recorded(server):
+    rec = Recorder(":memory:")
+    oa = prefixwise.wrap(openai.OpenAI(base_url=server + "/v1", api_key="sk-test"), recorder=rec)
+    raw = oa.chat.completions.with_raw_response.create(model="gpt-5.6", messages=[{"role": "user", "content": "hi"}])
+    assert raw.parse().usage.prompt_tokens == 2000  # the caller can still parse it
+    oa.chat.completions.parse(model="gpt-5.6", messages=[{"role": "user", "content": "hi"}])
+    an = prefixwise.wrap(anthropic.Anthropic(base_url=server, api_key="sk-ant-test"), recorder=rec)
+    an.beta.messages.create(model="claude-haiku-5-5", max_tokens=8, messages=[{"role": "user", "content": "hi"}])
+    assert [r[0] for r in rows(rec)] == ["openai", "openai", "anthropic"]
+
+
+def test_recorder_ignores_the_proxys_engine_settings(monkeypatch):
+    monkeypatch.setenv("PREFIXWISE_ENGINE", "vllm")
+    monkeypatch.setenv("PREFIXWISE_KV_EVENTS", "tcp://127.0.0.1:1")
+    rec = Recorder(":memory:")
+    assert rec.proxy.engine is None and rec.proxy.engine_events is None
+
+
+def test_a_classifier_failure_warns_once_and_still_leaves_a_row(server, capsys):
+    rec = Recorder(":memory:")
+    rec.proxy._finalize_locked = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("bug"))
+    client = prefixwise.wrap(openai.OpenAI(base_url=server + "/v1", api_key="sk-test"), recorder=rec)
+    for _ in range(3):
+        client.chat.completions.create(model="gpt-5.6", messages=[{"role": "user", "content": "hi"}])
+    err = capsys.readouterr().err
+    assert err.count("prefixwise:") == 1 and "could not record a call" in err
+    with rec.ledger.reader() as c:
+        assert [r[0] for r in c.execute("SELECT error FROM entries")] == ["not_recorded"] * 3

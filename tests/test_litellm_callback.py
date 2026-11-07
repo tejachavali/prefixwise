@@ -86,14 +86,6 @@ def test_session_falls_back_to_user(base, cb):
     assert rows(cb, 1)[0][1] == "u-7"
 
 
-def test_injected_breakpoints_are_not_called_missing(base, cb):
-    """LiteLLM may add cache_control itself: a call with injection points is never 'no breakpoint'."""
-    msgs = [{"role": "system", "content": SYSTEM}, {"role": "user", "content": "hi"}]
-    call(base, "anthropic/claude-haiku-5-5", msgs, litellm_session_id="inj",
-         cache_control_injection_points=[{"location": "message", "role": "system"}])
-    assert rows(cb, 1)[0][4] != "breakpoint_missing"
-
-
 def test_async_path(base, cb):
     async def go():
         await litellm.acompletion(model="openai/gpt-5.6", api_base=base + "/v1", api_key="sk-test",
@@ -130,3 +122,120 @@ def test_proxy_server_config_loads_one_shared_callback(tmp_path, monkeypatch):
     assert isinstance(first, PrefixwiseCallback) and first.recorder.agent_id == "litellm"
     assert get_instance_fn("prefixwise.litellm_callback.prefixwise_callback") is first
     assert (tmp_path / "ledger.db").exists()
+
+
+def causes(cb, n):
+    return [r[4] for r in rows(cb, n)]
+
+
+def test_answers_from_litellms_own_cache_are_not_recorded(base, cb):
+    from litellm.caching.caching import Cache
+    saved = litellm.cache
+    litellm.cache = Cache(type="local")
+    try:
+        msgs = [{"role": "user", "content": "cache me " + SYSTEM}]
+        for _ in range(3):
+            call(base, "anthropic/claude-haiku-5-5", msgs, caching=True, litellm_session_id="lc")
+    finally:
+        litellm.cache = saved
+    time.sleep(0.5)
+    assert causes(cb, 1) == ["first_write"]  # one call reached the provider, not three
+
+
+def test_parameters_and_injected_breakpoints_reach_the_classifier(base, cb):
+    """With real LiteLLM: the recorded body is the one it sent, `thinking` and the breakpoint
+    it injected (cache_control_injection_points) included."""
+    bodies = []
+    record = cb.recorder.record
+    cb.recorder.record = lambda provider, body, *a, **k: (bodies.append(body), record(provider, body, *a, **k))[1]
+    call(base, "anthropic/claude-haiku-5-5", [{"role": "system", "content": SYSTEM + "params"},
+                                              {"role": "user", "content": "hi"}],
+         thinking={"type": "enabled", "budget_tokens": 2048},
+         cache_control_injection_points=[{"location": "message", "role": "system"}])
+    deadline = time.monotonic() + 10
+    while not bodies and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert "thinking" in bodies[0]
+    assert bodies[0]["system"][-1]["cache_control"] == {"type": "ephemeral"}
+
+
+def test_a_changed_tool_result_is_named_as_such(base, cb):
+    tool_turn = [{"role": "assistant", "content": None, "tool_calls": [
+                     {"id": "t1", "type": "function", "function": {"name": "read", "arguments": "{}"}}]},
+                 {"role": "tool", "tool_call_id": "t1", "content": "file contents " * 200}]
+    tools = [{"type": "function", "function": {"name": "read", "parameters": {"type": "object", "properties": {}}}}]
+    head = [{"role": "system", "content": [{"type": "text", "text": SYSTEM + "tools",
+                                            "cache_control": {"type": "ephemeral"}}]},
+            {"role": "user", "content": "read it"}]
+    call(base, "anthropic/claude-haiku-5-5", head + tool_turn, tools=tools, litellm_session_id="tr")
+    edited = [tool_turn[0], {**tool_turn[1], "content": "[cleared]"}]
+    call(base, "anthropic/claude-haiku-5-5", head + edited + [{"role": "user", "content": "next"}],
+         tools=tools, litellm_session_id="tr")
+    assert causes(cb, 2)[1] == "tool_result_mutation"
+
+
+class _Spy:
+    def __init__(self):
+        self.calls = []
+
+    def record(self, provider, body, response, **kw):
+        self.calls.append((provider, body, response, kw))
+
+
+def _kwargs(**over):
+    kw = {"model": "claude-haiku-5-5", "messages": [{"role": "user", "content": "hi"}],
+          "litellm_params": {"custom_llm_provider": "anthropic", "metadata": {}}, "call_type": "completion"}
+    kw.update(over)
+    return kw
+
+
+def _response(usage, model="claude-haiku-5-5"):
+    return {"id": "r1", "model": model, "usage": usage}
+
+
+def test_the_body_litellm_sent_is_what_is_classified():
+    spy = _Spy()
+    c = PrefixwiseCallback(recorder=spy)
+    sent = {"model": "claude-haiku-5-5", "system": [{"type": "text", "text": "s", "cache_control": {"type": "ephemeral"}}],
+            "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}], "thinking": {"type": "adaptive"}}
+    c._record(_kwargs(additional_args={"complete_input_dict": sent}),
+              _response({"prompt_tokens": 10, "completion_tokens": 1}), None, None)
+    provider, body, _, _ = spy.calls[0]
+    assert provider == "anthropic" and body == sent  # injected breakpoints and every parameter included
+
+
+def test_claude_on_bedrock_is_classified_by_anthropics_rules():
+    spy = _Spy()
+    c = PrefixwiseCallback(recorder=spy)
+    usage = {"prompt_tokens": 3010, "completion_tokens": 5, "cache_creation_input_tokens": 3000,
+             "cache_read_input_tokens": 0,
+             "prompt_tokens_details": {"cache_creation_token_details": {"ephemeral_5m_input_tokens": 0,
+                                                                        "ephemeral_1h_input_tokens": 3000}}}
+    c._record(_kwargs(model="bedrock/anthropic.claude-haiku-5-5",
+                      litellm_params={"custom_llm_provider": "bedrock", "metadata": {"session_id": "b1"}}),
+              _response(usage, "anthropic.claude-haiku-5-5"), None, None)
+    provider, body, response, kw = spy.calls[0]
+    assert provider == "anthropic" and body["model"] == "anthropic.claude-haiku-5-5"
+    assert response["usage"] == {"input_tokens": 10, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 3000,
+                                 "output_tokens": 5, "cache_creation": {"ephemeral_5m_input_tokens": 0,
+                                                                        "ephemeral_1h_input_tokens": 3000}}
+    assert kw["genai_provider"] == "aws.bedrock" and kw["session_id"] == "b1" and not kw["session_is_user"]
+
+
+def test_redacted_messages_without_a_body_are_not_recorded(capsys):
+    spy = _Spy()
+    c = PrefixwiseCallback(recorder=spy)
+    for _ in range(2):
+        c._record(_kwargs(messages=[{"role": "user", "content": "redacted-by-litellm"}]),
+                  _response({"prompt_tokens": 10, "completion_tokens": 1}), None, None)
+    assert spy.calls == [] and capsys.readouterr().err.count("redacted") == 1
+
+
+def test_a_user_id_is_a_session_but_not_a_conversation():
+    spy = _Spy()
+    c = PrefixwiseCallback(recorder=spy)
+    c._record(_kwargs(model="gpt-5.6", user="alice", litellm_params={"custom_llm_provider": "groq", "metadata": {}}),
+              _response({"prompt_tokens": 10, "completion_tokens": 1}, "gpt-5.6"), None, None)
+    provider, _, _, kw = spy.calls[0]
+    assert provider == "openai" and kw["session_id"] == "alice" and kw["session_is_user"]
+    assert kw["genai_provider"] == "groq"
