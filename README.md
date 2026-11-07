@@ -133,6 +133,35 @@ prefixwise serve --upstream http://127.0.0.1:8000        # vLLM / any OpenAI-com
 docker build -t prefixwise . && docker run -p 127.0.0.1:8080:8080 -v pw:/data prefixwise   # mock in Docker
 ```
 
+### In your own code, or behind LiteLLM: no proxy
+
+Wrap the SDK client you already have. Calls go straight to the provider, unchanged; each completed call is classified and recorded exactly as the proxy would:
+
+```python
+import prefixwise
+from anthropic import Anthropic                       # or OpenAI(), AsyncOpenAI(), AsyncAnthropic()
+
+client = prefixwise.wrap(Anthropic())                 # ledger: ./prefixwise.db (or PREFIXWISE_LEDGER_PATH)
+with prefixwise.session("fix-bug-42", task_id="fix-bug-42"):
+    client.messages.create(...)                       # then `prefixwise report`, as above
+```
+
+Every call through **LiteLLM** (the SDK or its proxy server), with no change to your calls:
+
+```python
+import litellm
+from prefixwise.litellm_callback import PrefixwiseCallback
+litellm.callbacks = [PrefixwiseCallback()]
+```
+
+```yaml
+# LiteLLM proxy server, config.yaml
+litellm_settings:
+  callbacks: prefixwise.litellm_callback.prefixwise_callback
+```
+
+Sessions come from LiteLLM's `litellm_session_id`, else `metadata={"session_id": ..., "task_id": ..., "agent_id": ...}`, else `user`. What is classified is the request LiteLLM actually sent the provider, after its translation and with the cache breakpoints it injects; Claude through Anthropic, Vertex AI or Bedrock is judged by Anthropic's rules and prices. Answers from LiteLLM's own response cache reached no provider and are not recorded. `wrap` covers `create` and `parse` (and `with_raw_response`), Anthropic's `beta.messages` too. Both record non-streamed calls for now (streams pass through unrecorded), never change a request (fixes are a proxy feature), and can never break a call: a recording failure is reported once and ignored.
+
 **More: [docs/USE_CASES.md](docs/USE_CASES.md)** walks through eight concrete scenarios: a bill that jumped, a CI gate on prompt changes, A/B-testing prompt versions per successful task, Anthropic TTL choice, self-hosted vLLM, and more.
 
 ## What it tells you
@@ -221,6 +250,8 @@ Every number Prefixwise shows is also data. Each request leaves a row of facts (
 
 **Prometheus and Grafana:** `GET /metrics` exports requests, tokens, avoidable tokens and dollars by provider, model and miss cause, plus Prefixwise's own latency and the KV-event stream's health. Import the Grafana dashboard ([`deploy/grafana/prefixwise.json`](deploy/grafana/prefixwise.json)) and the alert rules (hit rate below 80%, avoidable share above 10%, failures, lost KV events: [`deploy/prometheus/prefixwise-rules.yml`](deploy/prometheus/prefixwise-rules.yml)). Setup and queries: [docs/prometheus.md](docs/prometheus.md).
 
+**OpenTelemetry:** `PREFIXWISE_OTEL=1` (or `prefixwise serve --otel`) exports a span per request, following OpenTelemetry's GenAI semantic conventions (`chat {model}`, `gen_ai.usage.cache_read.input_tokens` and `cache_write.input_tokens`), with Prefixwise's verdict on it: `prefixwise.cache.cause`, `.detail`, `.avoidable_tokens`, `.avoidable_cost_usd`. Works the same from the proxy, `prefixwise.wrap` and the LiteLLM callback. Inside your app, spans go to the tracer provider your app sets up (Prefixwise never installs one there); `serve` and `run` export OTLP themselves, configured by the standard `OTEL_*` variables (`pip install 'prefixwise[otel]'`). Through the proxy, a `traceparent` header puts the span in the caller's trace and is passed on upstream. Already tracing your LLM calls? `PREFIXWISE_OTEL=cause` emits a separate span with only Prefixwise's attributes, so tokens are not counted twice. Details: [docs/opentelemetry.md](docs/opentelemetry.md).
+
 ## Security
 
 - **What it stores:** the ledger keeps fingerprints of prompt blocks (hashes), token counts, causes, and your session, task and agent labels. It never stores prompt text or API keys. The ledger file is created readable by its owner only. Set `PREFIXWISE_HMAC_KEY` so hashes of short, guessable blocks are keyed.
@@ -308,7 +339,7 @@ Measured by [`benchmarks/bench.py`](benchmarks/README.md) (results in [`benchmar
 - **Timeouts:** a client connection idle for `PREFIXWISE_CLIENT_TIMEOUT` seconds (default 120) is closed, so idle or half-sent connections cannot pin threads. Upstream calls time out after 600 s (long generations stream for minutes).
 - **Shutdown:** on SIGTERM (`docker stop`, systemd, Kubernetes) the proxy stops accepting connections, lets in-flight requests and streams finish for up to `PREFIXWISE_DRAIN_SECONDS` (default 8), then exits 0.
 - **Ledger growth and retention:** about 450 bytes per request (a million requests is about 450 MB); `prefixwise report` takes about 2 s at a million rows. Delete old rows with `prefixwise prune --older-than 30d`, e.g. from a daily cron. Back it up while the proxy runs with `sqlite3 prefixwise.db ".backup backup.db"`.
-- **Not built yet:** shared session state across processes, a metrics endpoint, and request logging (the proxy logs only errors).
+- **Not built yet:** shared session state across processes, and request logging (the proxy logs only errors; metrics: `GET /metrics`, traces: OpenTelemetry, above).
 
 ## Limits
 

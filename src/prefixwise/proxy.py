@@ -224,7 +224,9 @@ PASSTHROUGH_HEADERS = ("authorization", "x-api-key", "anthropic-version", "anthr
                        # Codex: session and thread identity, sticky routing (x-codex-turn-state),
                        # subagent and client ids. Dropping them could cost cache hits.
                        "session-id", "thread-id", "originator", "version", "x-openai-subagent",
-                       "x-client-request-id", "chatgpt-account-id")
+                       "x-client-request-id", "chatgpt-account-id",
+                       # W3C trace context: the upstream (a traced vLLM or gateway) joins the trace.
+                       "traceparent", "tracestate")
 PASSTHROUGH_PREFIXES = ("x-codex-",)
 ANTHROPIC_VERSION = "2023-06-01"
 UPSTREAM_TIMEOUT = 600  # seconds; long generations stream for minutes
@@ -427,20 +429,43 @@ class StreamAccumulator:
             self.saw_usage = True
 
 
+def _spans(setting):
+    """OpenTelemetry export (prefixwise.otel), or None when off or unavailable."""
+    from .otel import mode_from
+
+    try:
+        mode = mode_from(setting)
+    except ValueError as exc:  # telemetry settings never stop the proxy or an app from working
+        print(f"prefixwise: {exc}; OpenTelemetry export is off", file=sys.stderr)
+        return None
+    if mode is None:
+        return None
+    try:
+        from .otel import Spans
+        return Spans(mode)
+    except ImportError:
+        print("prefixwise: PREFIXWISE_OTEL is set but OpenTelemetry is not installed; "
+              "pip install 'prefixwise[otel]'", file=sys.stderr)
+        return None
+
+
 class PrefixwiseProxy:
     def __init__(self, ledger_path: str = ":memory:", hmac_key: bytes | None = None,
                  upstream_url: str | None = None, api_key: str | None = None,
                  mock: bool | None = None, fixes: str | list[str] | tuple[str, ...] | None = None,
                  prices: str | None = None, engine: str | None = None, kv_events: str | None = None,
-                 upstreams: dict[str, str] | None = None, full_attention: bool | None = None):
+                 upstreams: dict[str, str] | None = None, full_attention: bool | None = None,
+                 otel: bool | str | None = None):
         self.ledger = Ledger(ledger_path)
         self.metrics = Metrics()  # GET /metrics (Prometheus), fed by every recorded row
+        self.spans = _spans(otel if otel is not None else os.environ.get("PREFIXWISE_OTEL"))
         # Self-hosted engine behind the proxy (vllm, sglang), and its KV-event
         # stream for the engine join (prefixwise.engines).
-        self.engine = engine or os.environ.get("PREFIXWISE_ENGINE") or None
+        # None: from the environment; "" pins it off (prefixwise.sdk.Recorder).
+        self.engine = (engine if engine is not None else os.environ.get("PREFIXWISE_ENGINE")) or None
         if self.engine not in (None, "vllm", "sglang"):
             raise ValueError(f"unknown engine {self.engine!r}: expected vllm or sglang")
-        kv_events = kv_events or os.environ.get("PREFIXWISE_KV_EVENTS") or None
+        kv_events = (kv_events if kv_events is not None else os.environ.get("PREFIXWISE_KV_EVENTS")) or None
         if kv_events and self.engine not in ("vllm", "sglang"):
             raise ValueError("--kv-events needs --engine vllm or --engine sglang")
         if full_attention is None:
@@ -579,7 +604,9 @@ class PrefixwiseProxy:
         for h in ("x-prefixwise-session-id", "x-prefixwise-agent-id", "x-prefixwise-task-id"):
             if headers.get(h) and len(headers[h]) > MAX_ID_CHARS:
                 raise ClientError(f"{h} is longer than {MAX_ID_CHARS} characters")
-        session_id = str(headers.get("x-prefixwise-session-id") or body.get("session_id")
+        given = headers.get("x-prefixwise-session-id") or body.get("session_id")
+        session_is_user = not given and bool((body.get("metadata") or {}).get("user_id"))
+        session_id = str(given
                          or (body.get("metadata") or {}).get("user_id")
                          or headers.get("thread-id") or headers.get("session-id")  # Codex
                          or self.default_session)
@@ -681,6 +708,7 @@ class PrefixwiseProxy:
             "t0": time.perf_counter(),  # for latency and Prefixwise's own overhead
             "fixes_applied": fixes_applied,
             "fork_of": headers.get("x-prefixwise-fork-of"),
+            "session_is_user": session_is_user,  # a user id, not a conversation id (OpenTelemetry)
             "ttl_seconds": cache_ttl_seconds(provider, body, headers),
         }
 
@@ -705,8 +733,12 @@ class PrefixwiseProxy:
             ctx["engine_verdict"] = self.engine_events.request_done(
                 ctx["engine_token"], cached if reported else None, prompt_tokens)
         with self._lock:
-            return self._finalize_locked(ctx, status, payload, usage, prompt_tokens, cached,
-                                         native_reason, response_id, fps)
+            result = self._finalize_locked(ctx, status, payload, usage, prompt_tokens, cached,
+                                           native_reason, response_id, fps)
+        if self.spans is not None:  # outside the lock; never raises
+            self.spans.export(ctx, result[1], payload, default_session=self.default_session,
+                              upstream=self._span_upstream(ctx))
+        return result
 
     def finalize_safely(self, ctx: dict, status: int, payload: dict) -> tuple[dict, LedgerEntry | None]:
         """finalize(), failing open: the client already paid for this response,
@@ -893,6 +925,9 @@ class PrefixwiseProxy:
             status=status, error=str(kind)[:80], api=ctx.get("api"), stream=ctx.get("stream"),
             latency_ms=ctx.get("upstream_ms"), overhead_ms=self._overhead_ms(ctx))
         self.metrics.observe(entry)  # counted even if the ledger write fails
+        if self.spans is not None:
+            self.spans.export(ctx, entry, payload if isinstance(payload, dict) else None,
+                              default_session=self.default_session, upstream=self._span_upstream(ctx))
         with self._lock:
             self._release_prefix(ctx)
         try:
@@ -986,6 +1021,13 @@ class PrefixwiseProxy:
             path += "?" + query
         return urllib.request.Request(self.target(provider, path), method="POST",
                                       data=json.dumps(body).encode(), headers=headers)
+
+    def _span_upstream(self, ctx: dict) -> str | None:
+        """The upstream base URL a request went to, for span attributes; None in mock mode."""
+        if self.mock:
+            return None
+        key = "anthropic" if ctx.get("provider") == "anthropic" else "openai"
+        return self.upstreams.get(key, self.upstream_url) or None
 
     def target(self, provider: str, path: str) -> str:
         """The upstream URL for a request path like /v1/chat/completions."""
@@ -1542,13 +1584,19 @@ def serve(host: str = "127.0.0.1", port: int = 8080, *, ledger_path: str | None 
           upstream_url: str | None = None, mock: bool | None = None, quiet: bool = False,
           fixes: str | list[str] | None = None, auth_token: str | None = None,
           allow_unauthenticated: bool = False, prices: str | None = None,
-          engine: str | None = None, kv_events: str | None = None, full_attention: bool | None = None):
+          engine: str | None = None, kv_events: str | None = None, full_attention: bool | None = None,
+          otel: bool | str | None = None):
     """Run the proxy until interrupted. Settings fall back to PREFIXWISE_* env vars."""
     hmac_key = os.environ.get("PREFIXWISE_HMAC_KEY")
     ledger_path = ledger_path or os.environ.get("PREFIXWISE_LEDGER_PATH", ":memory:")
     proxy = PrefixwiseProxy(ledger_path=ledger_path, upstream_url=upstream_url, mock=mock,
                             hmac_key=hmac_key.encode() if hmac_key else None, fixes=fixes,
-                            prices=prices, engine=engine, kv_events=kv_events, full_attention=full_attention)
+                            prices=prices, engine=engine, kv_events=kv_events, full_attention=full_attention,
+                            otel=otel)
+    otel_where = None
+    if proxy.spans is not None:  # Prefixwise is the application here: it sets up the exporter
+        from .otel import install_provider
+        otel_where = install_provider()
     proxy.auth_token = auth_token or os.environ.get("PREFIXWISE_AUTH_TOKEN") or None
     exposed = not _is_loopback(host)
     if exposed and not proxy.auth_token and proxy.api_key and not proxy.mock and not allow_unauthenticated:
@@ -1578,6 +1626,8 @@ def serve(host: str = "127.0.0.1", port: int = 8080, *, ledger_path: str | None 
             print(f"  note:     start {proxy.engine} with {flag}, or every turn looks like a miss")
         print(f"  auth:     {'X-Prefixwise-Token required' if proxy.auth_token else 'none'}"
               + ("  (WARNING: listening beyond localhost without a token)" if exposed and not proxy.auth_token else ""))
+        if proxy.spans is not None:
+            print(f"  otel:     a span per request ({proxy.spans.mode}) -> {otel_where}")
         if not os.environ.get("PREFIXWISE_HMAC_KEY"):
             print("  note:     set PREFIXWISE_HMAC_KEY so hashes of short prompt blocks cannot be guessed")
         print("  POST /v1/chat/completions  POST /v1/responses  POST /v1/messages  POST /tasks")

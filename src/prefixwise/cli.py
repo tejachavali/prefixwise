@@ -68,8 +68,8 @@ def cmd_serve(args) -> int:
               upstream_url=args.upstream, mock=True if args.mock else None,
               fixes=args.fix or None, allow_unauthenticated=args.allow_unauthenticated,
               prices=args.prices, engine=args.engine, kv_events=args.kv_events,
-              full_attention=args.full_attention)
-    except ValueError as exc:  # unknown --fix or --engine name
+              full_attention=args.full_attention, otel=args.otel)
+    except ValueError as exc:  # unknown --fix, --engine or --otel value
         sys.exit(f"prefixwise: {exc}")
     return 0
 
@@ -277,9 +277,13 @@ def cmd_run(args) -> int:
     ledger = args.ledger or os.environ.get("PREFIXWISE_LEDGER_PATH") or DEFAULT_LEDGER
     try:
         proxy = PrefixwiseProxy(ledger_path=ledger, mock=True if args.mock else None, fixes=args.fix or None,
-                                upstreams=None if args.mock else {"anthropic": anthropic, "openai": openai})
+                                upstreams=None if args.mock else {"anthropic": anthropic, "openai": openai},
+                                otel=args.otel)
     except ValueError as exc:
         sys.exit(f"prefixwise: {exc}")
+    if proxy.spans is not None:  # `run` is its own process: it sets up the exporter
+        from .otel import install_provider
+        install_provider()
     proxy.versioned = {"openai"}
     proxy.api_key = None  # the agent's own keys pass through; never replace them here
     proxy.default_session = f"run-{time.strftime('%Y%m%d-%H%M%S')}"
@@ -545,6 +549,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--full-attention", action="store_true", default=None,
                    help="SGLang: the model has no sliding-window or Mamba layers, so KV events can also "
                         "rule an eviction out (vLLM detects this itself)")
+    p.add_argument("--otel", action="store_const", const="genai", default=None,
+                   help="export a span per request over OpenTelemetry (OTLP, configured by OTEL_* variables; "
+                        "needs: pip install 'prefixwise[otel]'). Default: $PREFIXWISE_OTEL (1, or cause for "
+                        "Prefixwise's attributes only), else off")
     p.set_defaults(func=cmd_serve)
 
     p = sub.add_parser("report", help="summarise the ledger")
@@ -584,6 +592,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--mock", action="store_true", help="synthetic responses, no API calls")
     p.add_argument("--fix", action="append", metavar="NAME", help="apply a fix (repeatable): canonical_tools")
     ledger_opt(p)
+    p.add_argument("--otel", action="store_const", const="genai", default=None,
+                   help="export a span per request over OpenTelemetry (OTLP, configured by OTEL_* variables; "
+                        "needs: pip install 'prefixwise[otel]'). Default: $PREFIXWISE_OTEL (1, or cause for "
+                        "Prefixwise's attributes only), else off")
     p.add_argument("agent_command", nargs=argparse.REMAINDER, metavar="-- COMMAND")
     p.set_defaults(func=cmd_run)
 
