@@ -1,6 +1,10 @@
 # Changelog
 
-## Unreleased
+## 0.3.1: 2026-11-07
+
+Production hardening, found by a new benchmark; per-model lanes; OpenAI prices.
+**Upgrading:** existing ledgers are migrated in place on first start. Rows written before
+0.3.1 have no timestamp, so `prefixwise prune` keeps them unless you add `--include-undated`.
 
 - **SGLang and LMCache:** E1-open takes `--engine vllm | vllm-lmcache | sglang | sglang-hicache`, with launch scripts `sglang_server.sh` and `vllm_lmcache_server.sh` (flags checked against each project's source). The proxy no longer forwards `session_id` to engines that reject it (SGLang reads it as its own session handle).
 - **E-evict** (`experiments/e_evict`): floods an engine past its GPU KV capacity and checks whether the session's prefix survives, with and without an offload tier, and what Prefixwise names. In mock it shows the known gap: an engine eviction is reported as `routing_miss` until the engine join exists.

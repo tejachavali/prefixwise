@@ -218,3 +218,27 @@ def test_prune_by_age_keeps_recent_and_undated_by_default(tmp_path):
     assert db.execute("SELECT count(*) FROM tasks WHERE task_id='t0'").fetchone()[0] == 0  # orphan gone
     assert "deleted 1" in run("--older-than", "30d", "--include-undated").stdout
     assert run("--older-than", "soon").returncode == 2
+
+
+def test_live_overhead_script_runs_against_fake_upstream():
+    """benchmarks/live_overhead.py end to end (fake upstream, dummy keys): one
+    cache breakpoint per Anthropic request, every proxied request in the ledger.
+    A live run once failed at pair 5: breakpoints piled up in the session history."""
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    sys.path.insert(0, str(root / "benchmarks"))
+    from bench import Upstream
+
+    up = Upstream()
+    try:
+        for provider, var in (("anthropic", "ANTHROPIC_API_KEY"), ("openai", "OPENAI_API_KEY")):
+            r = subprocess.run([sys.executable, str(root / "benchmarks" / "live_overhead.py"), "--provider", provider,
+                                "--pairs", "8", "--url", f"http://127.0.0.1:{up.port}"],
+                               capture_output=True, text=True, env={**os.environ, var: "dummy"})
+            assert "ledger rows: 8/8" in r.stdout, r.stdout[-500:] + r.stderr[-500:]
+    finally:
+        up.stop()

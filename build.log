@@ -417,3 +417,8 @@
 - proxy.forward_session_id; E1-open --engine; sglang_server.sh,
   vllm_lmcache_server.sh; experiments/e_evict (mock: gap = routing_miss).
 - Tests: 152 passed.
+## 2026-11-07 Release 0.3.1 (claude/release-0.3.1)
+- Version 0.3.1 in pyproject.toml and __init__.py; CHANGELOG dated, with an
+  upgrade note (ledger migrates in place; pre-0.3.1 rows undated).
+- Wheel builds and includes prices.json. Tests: 149 passed.
+- Muse publishes the GitHub release v0.3.1 after the merge.
