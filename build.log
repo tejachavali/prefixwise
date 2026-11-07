@@ -422,3 +422,13 @@
   upgrade note (ledger migrates in place; pre-0.3.1 rows undated).
 - Wheel builds and includes prices.json. Tests: 149 passed.
 - Muse publishes the GitHub release v0.3.1 after the merge.
+
+## 2026-11-07 Engine join (claude/engine-join, stacked on claude/engines)
+- prefixwise/engines.py: ZMQ SUB to vLLM/SGLang KV events (msgpack
+  [ts, events, rank]; tagged BlockStored/BlockRemoved/AllBlocksCleared).
+  Per-session attribution via BlockStored.session_id (vLLM); engine-wide
+  count otherwise (SGLang). GPU removals only; offload counted apart.
+- Classifier: attributed eviction > retry > engine-wide eviction > TTL/routing.
+- serve --engine/--kv-events, GET /engine, extra prefixwise[engines].
+- vllm_server.sh: enable_kv_cache_events (old key not in current vLLM).
+- Tests: 162 passed (9 engine-join, incl. vLLM wire format over real ZMQ).

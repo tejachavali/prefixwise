@@ -82,8 +82,11 @@ class RequestSnapshot:
     compaction_event: bool = False
     fork_parent_session_id: str | None = None
     session_id: str | None = None
-    # vLLM KV events for this session between the two turns.
+    # Engine KV events between the two turns (prefixwise.engines): this
+    # session's GPU blocks the engine removed (vLLM, attributed by session id),
+    # and, where blocks cannot be attributed (SGLang), all GPU blocks removed.
     evicted_block_hashes: list[str] = field(default_factory=list)
+    engine_evicted_blocks: int = 0
     # Anthropic cache_control present anywhere in the request.
     has_breakpoint: bool = False
     breakpoint_after_volatile: bool = False
@@ -238,8 +241,10 @@ def classify(prev: RequestSnapshot | None, curr: RequestSnapshot,
     # From here the prefix was reusable but cache_read was low.
     # Engine eviction events are direct evidence; they outrank inference.
     if curr.evicted_block_hashes:
+        n = len(curr.evicted_block_hashes)
         return Classification(MissCause.EVICTED, None,
-                              "BlockRemoved events for this session's blocks between the two turns",
+                              f"the engine removed {n} of this session's KV blocks from GPU memory "
+                              "between the two turns (BlockRemoved events)",
                               secondary, native_reason)
 
     # Identical replay within a short window is a retry, not a cache miss.
@@ -248,6 +253,14 @@ def classify(prev: RequestSnapshot | None, curr: RequestSnapshot,
        curr.gap_seconds is not None and curr.gap_seconds < 60 and curr.cached_tokens == 0:
         return Classification(MissCause.RETRY_REPLAY, False,
                               "identical request within the retry window", secondary, native_reason)
+
+    # Engine-wide evictions (blocks not attributable to sessions, e.g. SGLang):
+    # weaker evidence, so it ranks below a retry and says so.
+    if curr.engine_evicted_blocks:
+        return Classification(MissCause.EVICTED, None,
+                              f"the engine evicted {curr.engine_evicted_blocks} KV blocks from GPU memory since "
+                              "this session's last turn (engine-wide; not attributed to sessions)",
+                              secondary, native_reason)
 
     gap, ttl = curr.gap_seconds, curr.ttl_seconds
     if ttl is not None and gap is not None and gap > ttl:

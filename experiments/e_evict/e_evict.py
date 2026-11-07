@@ -10,9 +10,9 @@ Per repetition, through the real Prefixwise proxy (in-process, like E1-open):
 
 Expected on T3:
   vllm / sglang (GPU cache only)      cached ~0: the prefix was evicted.
-                                      Correct cause: evicted. Prefixwise without engine
-                                      events cannot see an eviction, so this run measures
-                                      what it says instead (the engine-join gap).
+                                      Correct cause: evicted. With --kv-events (the engine
+                                      join) Prefixwise should say so; without it, it cannot
+                                      see an eviction and says routing_miss.
   vllm-lmcache / sglang-hicache       cached high: the prefix came back from CPU memory.
                                       Correct cause: none.
 
@@ -79,7 +79,9 @@ def flood(url: str, model: str, total_tokens: int, each: int, seed: int, mock_st
 
 
 def run(args) -> dict:
-    proxy = PrefixwiseProxy(upstream_url=args.url, api_key="sk-dummy") if not args.mock else PrefixwiseProxy()
+    engine = "vllm" if args.engine.startswith("vllm") else "sglang"
+    proxy = (PrefixwiseProxy(upstream_url=args.url, api_key="sk-dummy", engine=engine, kv_events=args.kv_events)
+             if not args.mock else PrefixwiseProxy())
     proxy.forward_session_id = args.engine.startswith("vllm")
     mock_state = None
     if args.mock:
@@ -133,7 +135,10 @@ def run(args) -> dict:
     verdicts: dict[str, int] = {}
     for x in reps:
         verdicts[x["t3"]["cause"]] = verdicts.get(x["t3"]["cause"], 0) + 1
+    if proxy.engine_events is not None:
+        proxy.engine_events.stop()
     return {"engine": args.engine, "model": args.model, "mock": args.mock, "repeats": args.repeats,
+            "kv_events": args.kv_events,
             "prefix_tokens": args.prefix_tokens, "gpu_kv_tokens": args.gpu_kv_tokens,
             "flood_tokens": flood_tokens, "control_hits": control_ok,
             "t3_hits": t3_hits, "engine_behaved_as_expected": control_ok and (
@@ -175,6 +180,8 @@ def main() -> int:
     ap.add_argument("--prefix-tokens", type=int, default=4000)
     ap.add_argument("--repeats", type=int, default=5)
     ap.add_argument("--mock", action="store_true", help="simulated engine, no GPU")
+    ap.add_argument("--kv-events", help="the engine's KV-event endpoint (e.g. tcp://127.0.0.1:5557): with it, "
+                    "Prefixwise should name the GPU-only eviction 'evicted' (the engine join)")
     ap.add_argument("--output-dir", default=str(Path(__file__).resolve().parent / "results"))
     args = ap.parse_args()
     res = run(args)

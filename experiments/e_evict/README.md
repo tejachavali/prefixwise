@@ -53,6 +53,12 @@ MODEL=Qwen/Qwen3-4B MAX_TOTAL_TOKENS=32768 HICACHE=1 ./experiments/e1_open/sglan
 python experiments/e_evict/e_evict.py --engine sglang-hicache --url http://127.0.0.1:30000 --model Qwen/Qwen3-4B
 ```
 
+**With the engine join** (the point of the experiment): repeat runs 1 and 3 with the engine's
+KV events on and `--kv-events tcp://127.0.0.1:5557` added to `e_evict.py` (`pip install -e ".[engines]"`
+first). vLLM: `vllm_server.sh` already publishes events. SGLang: `KV_EVENTS=1 ./experiments/e1_open/sglang_server.sh`.
+Expected: Prefixwise names the T3 miss `evicted` (vLLM: attributed to the session; SGLang:
+engine-wide), where without events it says `routing_miss`.
+
 Each run writes `results/*.md` and `.json`. If a server flag is rejected, check
 `--help` for that release and note the change; don't change the harness to make a run pass.
 

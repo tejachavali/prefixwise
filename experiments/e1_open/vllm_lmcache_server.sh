@@ -39,6 +39,9 @@ sleep 5
 
 KV='{"kv_connector":"LMCacheMPConnector","kv_role":"kv_both","kv_connector_module_path":"lmcache.integration.vllm.lmcache_mp_connector","kv_connector_extra_config":{"lmcache.mp.host":"127.0.0.1","lmcache.mp.port":5555}}'
 EXTRA=()
+if [[ "${KV_EVENTS:-0}" == 1 ]]; then   # for the engine join: prefixwise ... --kv-events tcp://127.0.0.1:5557
+  EXTRA+=(--kv-events-config '{"enable_kv_cache_events": true, "publisher": "zmq", "topic": "kv-events", "endpoint": "tcp://*:5557"}')
+fi
 if [[ -n "${GPU_BLOCKS:-}" ]]; then
   EXTRA+=(--block-size 16 --num-gpu-blocks-override "$GPU_BLOCKS" --max-model-len "${MAX_MODEL_LEN:-16384}")
 fi

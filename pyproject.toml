@@ -34,7 +34,8 @@ prefixwise = "prefixwise.cli:main"
 prefixwise-proxy = "prefixwise.proxy:serve"
 
 [project.optional-dependencies]
-dev = ["pytest"]
+engines = ["pyzmq>=25", "msgspec>=0.18"]
+dev = ["pytest", "pyzmq>=25", "msgspec>=0.18"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/prefixwise"]
