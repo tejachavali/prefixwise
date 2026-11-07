@@ -98,6 +98,10 @@ def main():
                 b.pop("user", None)
                 b.pop("metadata", None)
                 b["max_tokens" if a.provider == "anthropic" else "max_completion_tokens"] = 16
+                if a.provider == "openai":
+                    # GPT-5.6 on /v1/chat/completions rejects function tools unless
+                    # reasoning is off (live run 2026-11-07, gpt-5.6-luna).
+                    b["reasoning_effort"] = "none"
             if a.provider == "anthropic":  # explicit breakpoint on the last message
                 for b in (bd, bp):
                     last = b["messages"][-1]

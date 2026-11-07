@@ -89,6 +89,10 @@ class H(BaseHTTPRequestHandler):
                                    b'"message":"A maximum of 4 blocks with cache_control may be provided."}}')
         if DELAY:
             time.sleep(DELAY)
+        if (not anthropic and model.startswith("gpt-5.6-luna") and body.get("tools")
+                and body.get("reasoning_effort") != "none"):  # OpenAI's rule, seen live 2026-11-07
+            return self._send(400, b'{"error":{"type":"invalid_request_error","message":'
+                                   b'"Function tools with reasoning_effort are not supported in /v1/chat/completions."}}')
         if model == "bench-fault-500":
             return self._send(500, b'{"error":{"type":"server_error","message":"upstream boom"}}')
         if model == "bench-fault-429":
