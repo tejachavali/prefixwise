@@ -210,6 +210,8 @@ skew, failed requests), fixed above. The rules above answer all of them.
 - `tests/test_sglang_events.py` does the same with SGLang's structs (v0.5.23): confirmed and
   ruled-out evictions, a prefix stored by another session, split nodes, paged blocks, host-tier
   events, cache flush, restart, concurrency, lost messages, overflow, and the `/server_info`
-  checks. **Not yet run against a live SGLang**: E-evict with `--kv-events` is the test.
+  checks. **Live:** E-evict on SGLang 0.5.23 with KV events, Qwen3-4B on an L4: `evicted`, confirmed, 5 of
+  5, with no lost messages; E1-open still 120/120 with session ids sent
+  (`experiments/e_evict/runs/2026-11-07-colab-l4-sglang-events.md`).
 - Open: a live test of token-level divergence (a template that re-renders history), to
   measure how often "not an eviction" occurs in real agent traffic.

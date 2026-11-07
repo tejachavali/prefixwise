@@ -19,14 +19,14 @@ Every number below is from a live run against real models; each links to its rec
 |---|---|---|
 | Agrees with Anthropic's own miss reason | Claude Haiku 5.5, 7 kinds of miss, Anthropic's diagnostics chained | **37 of 37** misses ([1](experiments/e1_hosted/runs/2026-11-06-anthropic-claude-haiku-5-5.md), [2](experiments/e1_hosted/runs/2026-11-06-round4.md)) |
 | Names injected causes on open models | 120 turns, 9 causes, Qwen3-4B on vLLM 0.33, vLLM + LMCache, SGLang 0.5.23 | **120 of 120** on each ([vLLM](experiments/e1_open/runs/2026-11-06-colab-l4-qwen3-4b.md), [LMCache and SGLang](experiments/e_evict/runs/2026-11-07-colab-l4.md)) |
-| Tells engine eviction from everything else | GPU KV cache flooded 3x; vLLM, SGLang, with and without LMCache / HiCache | evictions **5 of 5**, confirmed from vLLM's KV events; prefixes restored from CPU counted as hits **5 of 5** ([record](experiments/e_evict/runs/2026-11-07-colab-l4.md)) |
+| Tells engine eviction from everything else | GPU KV cache flooded 3x; vLLM, SGLang, with and without LMCache / HiCache | evictions **5 of 5**, confirmed from the KV events of vLLM and of SGLang; prefixes restored from CPU counted as hits **5 of 5** ([record](experiments/e_evict/runs/2026-11-07-colab-l4.md), [SGLang events](experiments/e_evict/runs/2026-11-07-colab-l4-sglang-events.md)) |
 | A fix pays what it predicts | `--fix canonical_tools` on 60 paired requests with tool-order drift | **99.9%** (Claude) and **97.5%** (vLLM) of predicted savings realised, task success unchanged ([record](experiments/e4/runs/2026-11-06-live.md)) |
 | Works with real agents | `prefixwise run` with Claude Code, Codex CLI, opencode, Anthropic and OpenAI SDKs | all five ([record](experiments/compat/2026-11-07.md)); opencode building a small CLI: 92% cached, 0 avoidable tokens ([record](experiments/dogfood/2026-11-07-opencode-2.md)) |
 | Costs almost nothing | proxy overhead and throughput, measured on a VM | **3 ms** per request at 2k tokens, 13 ms at 120k; 185 requests/s per process ([record](benchmarks/runs/2026-11-07-vm.md)) |
 
 Not yet measured live: agreement with OpenAI's own miss reason (its diagnostics returned
-`unavailable` on every call we made), TTL expiry and routing misses in real traffic, and
-SGLang's KV events. [Limits](#limits) has the full list.
+`unavailable` on every call we made), TTL expiry and routing misses in real traffic, and how
+often "not an eviction" occurs in real agent traffic. [Limits](#limits) has the full list.
 
 ### Turning on a fix: what Prefixwise predicted, and what it saved
 
@@ -235,6 +235,8 @@ python -m sglang.launch_server --model-path MODEL --enable-cache-report \
 prefixwise serve --upstream http://127.0.0.1:30000 --engine sglang --kv-events tcp://127.0.0.1:5557 --full-attention
 ```
 
+Live on SGLang 0.5.23 (Qwen3-4B, L4): evictions confirmed 5 of 5 ([record](experiments/e_evict/runs/2026-11-07-colab-l4-sglang-events.md)).
+
 `--full-attention` says the model has no sliding-window or Mamba layers (Qwen3, Llama, most dense models). SGLang frees those layers without an event, so without the flag a missing block still confirms an eviction, but Prefixwise never says "not an eviction". At startup Prefixwise reads SGLang's `/server_info` (with `PREFIXWISE_API_KEY` if SGLang has `--api-key`) and judges only when it is safe: SGLang 0.5.20 or later, events on, one data-parallel rank, no `--enable-session-radix-cache`; otherwise it says why and keeps the inference. Memory: about 80 bytes per token in SGLang's GPU cache at its default `--page-size 1` (80 MB per million tokens; `--page-size 16` cuts it 16-fold).
 
 **LMCache and HiCache need nothing extra.** A prefix restored from CPU memory counts as a hit (vLLM's `cached_tokens` includes tokens loaded from LMCache), so only prefixes lost from every tier are evictions. Why it works this way, the alternatives considered and the known limits (several replicas, lost events): [docs/ENGINES.md](docs/ENGINES.md).
@@ -245,14 +247,14 @@ with three times its capacity ([record](experiments/e_evict/runs/2026-11-07-cola
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/figures/evict-dark.svg">
-  <img alt="Prefix served from cache after a GPU flood: vLLM 0% (evicted, confirmed from KV events), vLLM + LMCache 98% (hit, restored from CPU), SGLang 0% (evicted, inferred), SGLang + HiCache 99% (hit, restored from host memory)" src="docs/figures/evict-light.svg" width="720">
+  <img alt="Prefix served from cache after a GPU flood: vLLM 0% (evicted, confirmed from KV events), vLLM + LMCache 98% (hit, restored from CPU), SGLang 0% (evicted, confirmed from KV events), SGLang + HiCache 99% (hit, restored from host memory)" src="docs/figures/evict-light.svg" width="720">
 </picture>
 
 | engine | prefix cached after the flood | correct cause | Prefixwise |
 |---|---:|---|---|
 | vLLM | 0 of 3,404 | evicted | `evicted` 5 of 5; with KV events, confirmed ("211 of the previous request's KV blocks removed") |
 | vLLM + LMCache | 3,328 of 3,404 | none (restored from CPU) | `none` 5 of 5 |
-| SGLang | 3 of 3,404 | evicted | `evicted` 5 of 5 (inferred) |
+| SGLang | 3 of 3,404 | evicted | `evicted` 5 of 5 (inferred); with KV events, confirmed ("3,382 of the previous request's KV blocks removed", [record](experiments/e_evict/runs/2026-11-07-colab-l4-sglang-events.md)) |
 | SGLang + HiCache | 3,382 of 3,404 | none (restored from host memory) | `none` 5 of 5 |
 
 ## Running in production
@@ -288,7 +290,7 @@ Measured by [`benchmarks/bench.py`](benchmarks/README.md) (results in [`benchmar
   - **OpenAI native agreement.** OpenAI's `prompt_cache_diagnostics` returned `unavailable` for every comparison on gpt-5.6, -luna and -sol. That held with turn delays of 1 s, 30 s and 120 s, and on a minimal standalone call with a completed baseline. OpenAI's dashboard shows 0 diagnosed responses. Prefixwise still classifies OpenAI traffic; only the cross-check against OpenAI's own verdict is missing.
   - **Causes E1 does not inject:** TTL expiry, routing, eviction, tool-result mutation.
   - **Real agent traffic,** which is messier than scripted turns.
-- **Self-hosted engines:** with `--engine`, an engine eviction is inferred from one cache and no routing; on vLLM and SGLang, `--kv-events` confirms it or rules it out (SGLang's events not yet validated live). Validated live on vLLM 0.33 and SGLang 0.5.23 (Colab L4): evictions named 5/5 (confirmed with KV events), LMCache and HiCache restores counted as hits 5/5 ([record](experiments/e_evict/runs/2026-11-07-colab-l4.md)). Not yet measured live: how often the "not an eviction" verdict (token-level divergence) occurs in real agent traffic. Several replicas need one Prefixwise each.
+- **Self-hosted engines:** with `--engine`, an engine eviction is inferred from one cache and no routing; on vLLM and SGLang, `--kv-events` confirms it or rules it out. Validated live on vLLM 0.33 and SGLang 0.5.23 (Colab L4): evictions named 5/5, confirmed with KV events on both ([vLLM](experiments/e_evict/runs/2026-11-07-colab-l4.md), [SGLang](experiments/e_evict/runs/2026-11-07-colab-l4-sglang-events.md)), LMCache and HiCache restores counted as hits 5/5 ([record](experiments/e_evict/runs/2026-11-07-colab-l4.md)). Not yet measured live: how often the "not an eviction" verdict (token-level divergence) occurs in real agent traffic. Several replicas need one Prefixwise each.
 - **Divergence is located per block, not per token.** An edit at the very end of a long system prompt is reported as `system_edit`, even if the provider could have reused everything before it. In one live OpenAI call, appending three words to 2,100 tokens of instructions gave 0 cached tokens, which looks more like routing than the edit itself.
 - One proxy process keeps session state in memory: run one instance per agent fleet, or send all of a session's turns to the same instance.
 - OpenAI's default in-memory cache TTL is not a fixed number, so after a long gap a cold OpenAI cache is `unknown` unless you send `X-Prefixwise-Cache-Ttl`.
