@@ -139,3 +139,20 @@ def test_report_tokens_per_successful_task_by_agent(tmp_path, capsys):
     rows = {r["agent_id"]: r for r in json.loads(capsys.readouterr().out)["rows"]}
     assert rows["prompt-v1"]["tokens_per_successful_task"] == 5000.0
     assert rows["prompt-v2"]["tokens_per_successful_task"] == 6000.0  # cheaper calls, worse per success
+
+
+def test_closed_pipe_exits_quietly(tmp_path):
+    """`prefixwise report | head`: no traceback when the reader leaves early (smoke test, 2026-11-07)."""
+    import subprocess
+    import sys
+
+    db = tmp_path / "l.db"
+    led = Ledger(str(db))
+    for i in range(400):
+        led.record(LedgerEntry(session_id=f"s{i}", agent_id="a", provider="openai", model="m", cause="none",
+                               prompt_tokens=10, cached_tokens=0, avoidable_tokens=0, avoidable_cost=None))
+    cmd = f"{sys.executable} -m prefixwise report --by session_id --limit 400 --ledger {db} | head -1"
+    out = subprocess.run(cmd, shell=True, capture_output=True, text=True,
+                         env={"PYTHONPATH": str(__import__("pathlib").Path(__file__).resolve().parents[1] / "src"),
+                              "PATH": "/usr/bin:/bin"})
+    assert "Traceback" not in out.stderr and out.stdout.startswith("Requests")

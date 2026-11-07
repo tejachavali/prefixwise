@@ -331,7 +331,15 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    return args.func(args)
+    try:
+        return args.func(args)
+    except BrokenPipeError:
+        # `prefixwise report | head`: the reader left early. Exit quietly, like
+        # standard Unix tools, instead of printing a traceback.
+        import os
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, sys.stdout.fileno())
+        return 1  # as Python's docs recommend for SIGPIPE in CLIs
 
 
 if __name__ == "__main__":

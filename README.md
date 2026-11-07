@@ -29,7 +29,7 @@ none                       790  5,925,000   84.0%          0           0        
 ## Quickstart
 
 ```bash
-pip install "git+https://github.com/tejachavali/prefixwise"
+pip install prefixwise
 prefixwise serve --mock                      # no API key, synthetic responses; try it first
 ```
 

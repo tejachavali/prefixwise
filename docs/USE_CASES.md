@@ -5,7 +5,7 @@ Eight situations where Prefixwise answers a question your provider dashboard can
 Setup for all of them:
 
 ```bash
-pip install "git+https://github.com/tejachavali/prefixwise"
+pip install prefixwise
 ```
 
 ---
@@ -55,7 +55,7 @@ prefixwise explain examples/session.jsonl --fail-on-waste    # exit code 2 on an
 
 ```yaml
 # .github/workflows/cache-gate.yml
-- run: pip install "git+https://github.com/tejachavali/prefixwise"
+- run: pip install prefixwise
 - run: python scripts/record_golden_session.py > session.jsonl   # your harness, offline or mocked
 - run: prefixwise explain session.jsonl --fail-on-waste
 ```
