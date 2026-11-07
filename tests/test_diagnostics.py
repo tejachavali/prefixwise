@@ -44,7 +44,11 @@ def test_native_agreement_accepts_refinements_not_wrong_places():
     # A different block, or a different kind of change, does not.
     assert s.record(C.SYSTEM_EDIT, "tools_changed", "anthropic") is False
     assert s.record(C.TOOL_RESERIALIZE, "input_changed", "openai") is False
-    assert s.record(C.HISTORY_EDIT, "unavailable", "anthropic") is False
+    # No verdict (could not compare, or baseline gone): not scored either way, so a
+    # long-conversation "unavailable" can neither inflate nor deflate agreement.
+    for reason in ("unavailable", "previous_message_not_found", "comparison_response_not_found"):
+        assert s.record(C.HISTORY_EDIT, reason, "anthropic") is None
+        assert s.record(C.PARAM_RENDERED, reason, "openai") is None
     assert s.record(C.ROUTING_MISS, "model_changed", "openai") is False
     assert s.record(C.NONE, "not_a_real_reason", "openai") is None  # unmapped: not scored
 

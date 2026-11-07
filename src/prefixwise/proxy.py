@@ -58,7 +58,7 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from .classifier import Classification, MissCause, RequestSnapshot, classify, first_divergence
-from .diagnostics import AgreementScorer, anthropic_diagnostics, openai_comparison_options
+from .diagnostics import AgreementScorer, anthropic_diagnostics
 from .fingerprint import Fingerprinter
 from .fixes import apply_fixes, parse_fixes
 from . import api
@@ -192,6 +192,11 @@ def _extract_responses_blocks(body: dict) -> list[tuple[str, object]]:
         blocks.append((role, item))
     return blocks
 
+
+_MISSING = object()  # a field the client did not send
+# The keys Prefixwise puts inside the fields it adds: an upstream may name either in its error.
+_INNER_KEYS = {"prompt_cache_options": ("comparison_response_id",), "diagnostics": ("previous_message_id",),
+               "stream_options": ("include_usage",), "vllm_xargs": ("kv_cache_report_mode",)}
 
 # Body fields Prefixwise reads but upstream APIs do not accept. Stripped
 # before forwarding (OpenAI rejects unknown fields with a 400). vLLM, and
@@ -458,6 +463,10 @@ class PrefixwiseProxy:
             not (self.upstream_url or self.upstreams) or os.environ.get("PREFIXWISE_MOCK_UPSTREAM") == "1")
         self.default_session = "default"  # for requests that carry no session id
         self.engine_notes: list[str] = []  # what the engine check found; printed by serve()
+        # Fields Prefixwise adds to requests that an upstream rejected, by provider: they are
+        # not sent again (a gateway or compatible server that rejects unknown fields).
+        self.rejected_fields: set[tuple[str, str]] = set()
+        self._rejections: dict[tuple[str, str], int] = {}  # a field is dropped for good on its second rejection
         if self.engine == "sglang" and self.engine_events is not None and not self.mock:
             self._check_sglang()
         # Per-session state, shared across the threaded server's handlers.
@@ -569,17 +578,25 @@ class PrefixwiseProxy:
         # vLLM and SGLang put a body session_id on their KV events, so the engine
         # join can attribute blocks to sessions. Hosted APIs reject unknown fields.
         engine_token = None
+        injected: dict = {}  # field -> the client's own value (_MISSING if none): undone if rejected
+
+        def inject(field: str, value) -> bool:
+            if (provider, field) in self.rejected_fields:
+                return False
+            injected.setdefault(field, forward_body.get(field, _MISSING))
+            forward_body[field] = value
+            return True
         if (self.engine == "sglang" and api == "chat" and self.engine_events is not None and self.sglang_join
                 and body.get("n") in (None, 1)):  # n > 1: the choices' stores would mix
-            forward_body["session_id"] = session_id
-            engine_token = self.engine_events.request_sent(session_id)
-        if self.engine == "vllm" and api == "chat":
-            forward_body["session_id"] = session_id
+            if inject("session_id", session_id):
+                engine_token = self.engine_events.request_sent(session_id)
+        if self.engine == "vllm" and api == "chat" and inject("session_id", session_id):
             xargs = body.get("vllm_xargs")
-            if self.engine_events is not None and (xargs is None or isinstance(xargs, dict)):
+            if (self.engine_events is not None and (xargs is None or isinstance(xargs, dict))
+                    and ("vllm", "vllm_xargs") not in self.rejected_fields):
                 # Report every block a request uses, reused ones too, in order, so the
                 # blocks of this session's previous request are known (docs/ENGINES.md).
-                forward_body["vllm_xargs"] = {**(xargs or {}), "kv_cache_report_mode": "full"}
+                inject("vllm_xargs", {**(xargs or {}), "kv_cache_report_mode": "full"})
                 engine_token = self.engine_events.request_sent(session_id)
         # Native diagnostics chaining. Anthropic: diagnostics object (GA,
         # no beta header). OpenAI: prompt_cache_options.comparison_response_id,
@@ -594,19 +611,21 @@ class PrefixwiseProxy:
         # Chain only to an id from the same API: a session can mix Chat Completions
         # (chatcmpl-...) and Responses (resp_...) on one model, and OpenAI rejects a
         # foreign id with a 400 (found by the compatibility check, 2026-11-07).
-        if provider == "anthropic":
+        if provider == "anthropic" and "diagnostics" not in body:
             same_api = previous_id if previous_id and previous_id.startswith("msg") else None
-            forward_body.update(anthropic_diagnostics(same_api))
+            inject("diagnostics", anthropic_diagnostics(same_api)["diagnostics"])
         elif api == "responses" and previous_id and previous_id.startswith("resp"):
             # Merge into the client's own prompt_cache_options; a comparison
             # id the client chose wins.
             opts = dict(body.get("prompt_cache_options") or {})
-            opts.setdefault("comparison_response_id", previous_id)
-            forward_body["prompt_cache_options"] = opts
+            if "comparison_response_id" not in opts:
+                opts["comparison_response_id"] = previous_id
+                inject("prompt_cache_options", opts)
         return {
             "provider": provider, "api": api, "body": body, "headers": headers,
             "forward_body": forward_body, "session_id": session_id,
             "upstream_session_id": upstream_session_id, "engine_token": engine_token,
+            "injected": injected,
             "agent_id": str(headers.get("x-prefixwise-agent-id") or body.get("agent_id") or "proxy"),
             "task_id": str(task_id) if task_id else None,
             "request_id": str(uuid.uuid4()), "model": str(body.get("model", "unknown")),
@@ -807,6 +826,10 @@ class PrefixwiseProxy:
         status, payload = self._forward(provider, ctx["forward_body"], ctx["request_id"],
                                         ctx["upstream_session_id"] or ctx["session_id"],
                                         ctx["headers"], api=api)
+        if status >= 400 and self._undo_rejected(ctx, status, payload):
+            status, payload = self._forward(provider, ctx["forward_body"], ctx["request_id"],
+                                            ctx["upstream_session_id"] or ctx["session_id"],
+                                            ctx["headers"], api=api)
         ctx["upstream_ms"] = (time.perf_counter() - sent) * 1000
         upstream_headers = getattr(self._upstream, "headers", {}) or {}
         if status >= 400:
@@ -913,6 +936,37 @@ class PrefixwiseProxy:
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             return 502, "application/json", json.dumps(_error(502, f"upstream unreachable: {exc}")).encode()
 
+    def _undo_rejected(self, ctx: dict, status: int, payload) -> bool:
+        """The upstream rejected a field Prefixwise added (a gateway or compatible server
+        that refuses unknown fields): put the client's request back as it was, and stop
+        adding that field for this provider once it is rejected twice. True if the request
+        should be sent again. Prefixwise must never turn a working request into an error."""
+        injected = ctx.get("injected") or {}
+        if status not in (400, 422) or not injected:
+            return False
+        text = (payload if isinstance(payload, str) else json.dumps(payload)).lower()
+        rejected = [f for f in injected if any(name in text for name in (f, *_INNER_KEYS.get(f, ())))]
+        if not rejected:
+            return False
+        for field in rejected:
+            original = injected.pop(field)
+            if original is _MISSING:
+                ctx["forward_body"].pop(field, None)
+            else:
+                ctx["forward_body"][field] = original
+            key = (ctx["provider"], field)
+            with self._lock:
+                self._rejections[key] = n = self._rejections.get(key, 0) + 1
+                if n >= 2:  # twice: the upstream does not take it (once could be a bad id)
+                    self.rejected_fields.add(key)
+            if n == 2:
+                print(f"prefixwise: the {ctx['provider']} upstream rejects the `{field}` field Prefixwise adds; "
+                      "requests are resent without it, and it is no longer added", file=sys.stderr)
+            if field in ("session_id", "vllm_xargs") and self.engine_events is not None:
+                self.engine_events.discard(ctx.get("engine_token"))
+                ctx["engine_token"] = None
+        return True
+
     @staticmethod
     def _http_error(exc: urllib.error.HTTPError) -> tuple[int, dict]:
         raw = exc.read() or b""
@@ -952,27 +1006,35 @@ class PrefixwiseProxy:
         """
         provider, fwd, api = ctx["provider"], ctx["forward_body"], ctx.get("api", "chat")
         injected = False
-        if provider != "anthropic" and api != "responses":  # Responses always report usage
+        if (provider != "anthropic" and api != "responses"  # Responses always report usage
+                and (provider, "stream_options") not in self.rejected_fields):
             opts = dict(fwd.get("stream_options") or {})
             if not opts.get("include_usage"):
+                ctx.setdefault("injected", {}).setdefault("stream_options", fwd.get("stream_options", _MISSING))
                 opts["include_usage"] = True
                 fwd["stream_options"] = opts
                 injected = True
         acc = StreamAccumulator(provider, suppress_usage_chunk=injected, api=api)
         if self.mock:
             return 200, iter(self._mock_stream(ctx)), acc, None
-        req = self._upstream_request(provider, fwd, ctx["request_id"],
-                                     ctx["upstream_session_id"] or ctx["session_id"],
-                                     ctx["headers"], api)
-        try:
-            resp = urllib.request.urlopen(req, timeout=UPSTREAM_TIMEOUT)
-            ctx["upstream_headers"] = relay_headers(resp.headers)
-        except urllib.error.HTTPError as exc:
-            ctx["upstream_headers"] = relay_headers(exc.headers)
-            status, payload = self._http_error(exc)
-            return status, None, acc, payload
-        except (urllib.error.URLError, TimeoutError, OSError) as exc:
-            return 502, None, acc, _error(502, f"upstream unreachable: {exc}")
+        for attempt in (1, 2):
+            req = self._upstream_request(provider, ctx["forward_body"], ctx["request_id"],
+                                         ctx["upstream_session_id"] or ctx["session_id"],
+                                         ctx["headers"], api)
+            try:
+                resp = urllib.request.urlopen(req, timeout=UPSTREAM_TIMEOUT)
+                ctx["upstream_headers"] = relay_headers(resp.headers)
+                break
+            except urllib.error.HTTPError as exc:
+                ctx["upstream_headers"] = relay_headers(exc.headers)
+                status, payload = self._http_error(exc)
+                if attempt == 1 and self._undo_rejected(ctx, status, payload):
+                    if "stream_options" not in (ctx.get("injected") or {}):
+                        acc = StreamAccumulator(provider, suppress_usage_chunk=False, api=api)
+                    continue
+                return status, None, acc, payload
+            except (urllib.error.URLError, TimeoutError, OSError) as exc:
+                return 502, None, acc, _error(502, f"upstream unreachable: {exc}")
 
         def lines():
             with resp:

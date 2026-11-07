@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- **Prefixwise never turns a working request into an error.** It adds a few fields to requests (Anthropic `diagnostics`, OpenAI `prompt_cache_options` and `stream_options.include_usage`, the engine join's `session_id` and `vllm_xargs`). If an upstream answers 400/422 naming one of them (a gateway or compatible server that refuses unknown fields), the request is resent exactly as the client sent it, the client's own values restored; after a second rejection the field is no longer added, with a one-line notice.
+- **"No verdict" is no evidence.** Anthropic's and OpenAI's `unavailable`, `previous_message_not_found` and `comparison_response_not_found` are no longer scored as agreement or disagreement, nor counted in `native_compared`. `unavailable` also covers long conversations and unready comparisons, so scoring it only ever added hits. Restated: Prefixwise agreed with Anthropic on **32 of 32** misses Anthropic named (6 causes); the 5 parameter changes it called `unavailable` are reported separately (previously counted as 37 of 37).
+- A client's own `diagnostics` object is no longer overwritten.
+
 ## 0.4.1: 2026-11-07
 
 SGLang's KV events now confirm or rule out evictions, as vLLM's do, validated live. Nothing to
