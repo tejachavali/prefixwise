@@ -35,8 +35,8 @@ Prefixwise named the cause (`tool_reserialize`) and predicted the saving; turnin
 `--fix canonical_tools` then realised almost exactly that, with task success unchanged.
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/figures/fix-dark.svg">
-  <img alt="Share of prompt tokens served from cache with the fix off and on: Claude Haiku 5.5 from 51% to 97%, Qwen3-4B on vLLM from 88% to 97%" src="docs/figures/fix-light.svg" width="720">
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/tejachavali/prefixwise/main/docs/figures/fix-dark.svg">
+  <img alt="Share of prompt tokens served from cache with the fix off and on: Claude Haiku 5.5 from 51% to 97%, Qwen3-4B on vLLM from 88% to 97%" src="https://raw.githubusercontent.com/tejachavali/prefixwise/main/docs/figures/fix-light.svg" width="720">
 </picture>
 
 | | cached, fix off | cached, fix on | predicted saving | realised |
@@ -246,8 +246,8 @@ Live on SGLang 0.5.23 (Qwen3-4B, L4): evictions confirmed 5 of 5 ([record](exper
 with three times its capacity ([record](experiments/e_evict/runs/2026-11-07-colab-l4.md)):
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/figures/evict-dark.svg">
-  <img alt="Prefix served from cache after a GPU flood: vLLM 0% (evicted, confirmed from KV events), vLLM + LMCache 98% (hit, restored from CPU), SGLang 0% (evicted, confirmed from KV events), SGLang + HiCache 99% (hit, restored from host memory)" src="docs/figures/evict-light.svg" width="720">
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/tejachavali/prefixwise/main/docs/figures/evict-dark.svg">
+  <img alt="Prefix served from cache after a GPU flood: vLLM 0% (evicted, confirmed from KV events), vLLM + LMCache 98% (hit, restored from CPU), SGLang 0% (evicted, confirmed from KV events), SGLang + HiCache 99% (hit, restored from host memory)" src="https://raw.githubusercontent.com/tejachavali/prefixwise/main/docs/figures/evict-light.svg" width="720">
 </picture>
 
 | engine | prefix cached after the flood | correct cause | Prefixwise |
@@ -264,8 +264,8 @@ Measured by [`benchmarks/bench.py`](benchmarks/README.md) (results in [`benchmar
 - **Added latency:** about 3 ms per request at a 2k-token prompt, 6 ms at 30k, 13 ms at 120k (p50; p95 under 22 ms). Streaming adds the same to time to first byte. A model call takes seconds, so this is well under 1%.
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/figures/overhead-dark.svg">
-  <img alt="Latency Prefixwise adds per request: median 2.7 ms at 2k prompt tokens, 5.6 ms at 30k, 13.3 ms at 120k; p95 3.8, 7.5 and 18.8 ms" src="docs/figures/overhead-light.svg" width="720">
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/tejachavali/prefixwise/main/docs/figures/overhead-dark.svg">
+  <img alt="Latency Prefixwise adds per request: median 2.7 ms at 2k prompt tokens, 5.6 ms at 30k, 13.3 ms at 120k; p95 3.8, 7.5 and 18.8 ms" src="https://raw.githubusercontent.com/tejachavali/prefixwise/main/docs/figures/overhead-light.svg" width="720">
 </picture>
 
   | prompt | added p50 | added p95 | added p99 |

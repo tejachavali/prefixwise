@@ -1,8 +1,14 @@
 # Changelog
 
-## Unreleased
+## 0.4.1: 2026-11-07
+
+SGLang's KV events now confirm or rule out evictions, as vLLM's do, validated live. Nothing to
+change when upgrading: SGLang users add `--kv-events` (and `--full-attention` for a dense model)
+to opt in.
 
 - **SGLang KV events:** `prefixwise serve --engine sglang --kv-events tcp://host:5557` confirms evictions on SGLang 0.5.20 or later, as on vLLM. SGLang writes a request's body `session_id` on the blocks it stores (an attribution label; it does not change the prompt), but reports only new blocks, so Prefixwise keeps a compact copy of SGLang's tree of GPU blocks (about 80 bytes per cached token) and walks each session's chain through parent links. A removed block where the cache read stopped is a confirmed eviction on any model; "not an eviction" needs `--full-attention`, because SGLang frees sliding-window and Mamba layers without events. At startup Prefixwise reads SGLang's `/server_info` and judges only when it is safe (0.5.20 or later, events on, one data-parallel rank, no `--enable-session-radix-cache`); otherwise it says why and keeps the inference. "Not an eviction" waits for the request's own store event, which SGLang publishes after every eviction made to admit it. Validated live on SGLang 0.5.23 (Qwen3-4B, L4): evictions confirmed 5 of 5, E1-open unchanged at 120/120. **Correction:** 0.4.0 said SGLang rejects session ids it did not open; that is true only of `session_params`, SGLang's stateful sessions.
+- **README leads with measured results:** a table of live results with a link to each record, and charts (a fix's predicted vs realised saving, evictions per engine, overhead by prompt size) drawn from the records by `docs/figures/make_figures.py`. The original design notes moved to `docs/DESIGN.md`.
+- **E-evict** reports Prefixwise's engine check and KV-event stream stats. SGLang 0.5.23 needs Python 3.12 or lower (its `outlines_core` has no 3.13 wheel); the experiment README shows the install.
 
 ## 0.4.0: 2026-11-07
 
