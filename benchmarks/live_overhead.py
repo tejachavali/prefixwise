@@ -16,6 +16,7 @@ Haiku 5.5: well under $0.10. Keys come from the environment only.
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import os
 import sqlite3
@@ -90,7 +91,9 @@ def main():
     rows = []
     try:
         for i in range(a.pairs):
-            bd, bp = sd.next_body(model=model), sp.next_body(model=model)
+            # Deep copies: the breakpoint below must not leak into the sessions'
+            # stored history, or breakpoints pile up (Anthropic allows 4).
+            bd, bp = copy.deepcopy(sd.next_body(model=model)), copy.deepcopy(sp.next_body(model=model))
             for b in (bd, bp):
                 b.pop("user", None)
                 b.pop("metadata", None)
@@ -100,6 +103,7 @@ def main():
                     last = b["messages"][-1]
                     last["content"] = [{"type": "text", "text": last["content"],
                                         "cache_control": {"type": "ephemeral"}}]
+                    assert json.dumps(b).count('"cache_control"') == 1, "exactly one breakpoint per request"
             first, second = (("direct", cfg["url"], bd, {}),
                              ("proxy", f"http://127.0.0.1:{px.port}", bp, {"x-prefixwise-session-id": "live-proxy"}))
             if i % 2:  # alternate order so neither side always goes first

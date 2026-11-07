@@ -84,6 +84,9 @@ class H(BaseHTTPRequestHandler):
         body = json.loads(raw or b"{}")
         model = str(body.get("model", ""))
         anthropic = self.path.rstrip("/").endswith("/messages")
+        if anthropic and raw.count(b'"cache_control"') > 4:  # Anthropic's own limit
+            return self._send(400, b'{"type":"error","error":{"type":"invalid_request_error",'
+                                   b'"message":"A maximum of 4 blocks with cache_control may be provided."}}')
         if DELAY:
             time.sleep(DELAY)
         if model == "bench-fault-500":
