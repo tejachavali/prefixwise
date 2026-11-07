@@ -90,11 +90,11 @@ DEFAULT = ("requests", "requests_failed", "prompt_tokens", "cached_tokens", "cac
 DIMENSIONS = {
     "cause": "cause", "session": "session_id", "agent": "agent_id", "model": "model",
     "provider": "provider", "task": "task_id", "api": "api", "status": "COALESCE(status, 200)", "error": "error",
-    "divergence": "divergence_role",
+    "divergence": "divergence_role", "detail": "detail",
     "day": "strftime('%Y-%m-%d', recorded_at, 'unixepoch')",
     "hour": "strftime('%Y-%m-%dT%H:00Z', recorded_at, 'unixepoch')",
 }
-FILTERS = {"cause", "session", "agent", "model", "provider", "task", "api", "error", "status"}
+FILTERS = {"cause", "session", "agent", "model", "provider", "task", "api", "error", "status", "detail"}
 
 
 def catalog() -> list[dict]:

@@ -44,6 +44,7 @@ against current LMCache (its import path breaks; pin unverified).
 
 from __future__ import annotations
 
+import hashlib
 import hmac
 import json
 import os
@@ -58,6 +59,7 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from .classifier import Classification, MissCause, RequestSnapshot, classify, first_divergence
+from .details import Facts, body_facts, detail_for, keeps_thinking, usage_facts
 from .diagnostics import AgreementScorer, anthropic_diagnostics
 from .fingerprint import Fingerprinter
 from .fixes import apply_fixes, parse_fixes
@@ -77,7 +79,18 @@ def extract_blocks(body: dict, provider: str) -> list[tuple[str, object]]:
     blocks = [(role, _strip_cache_markers(value)) for role, value in _extract_blocks_raw(body, provider)]
     if provider == "anthropic":
         blocks = [(role, _anthropic_text_blocks(role, value)) for role, value in blocks]
+        if not keeps_thinking(str(body.get("model") or "")):
+            # Older models drop earlier turns' thinking from the prompt themselves, so a client
+            # that sends or omits it renders the same prompt: it must not look like an edit.
+            blocks = [(role, _without_thinking(value)) for role, value in blocks]
     return blocks
+
+
+def _without_thinking(value: object) -> object:
+    if isinstance(value, dict) and value.get("role") == "assistant" and isinstance(value.get("content"), list):
+        return {**value, "content": [b for b in value["content"]
+                                     if not (isinstance(b, dict) and b.get("type") in ("thinking", "redacted_thinking"))]}
+    return value
 
 
 def _anthropic_text_blocks(role: str, value: object) -> object:
@@ -469,6 +482,12 @@ class PrefixwiseProxy:
         # not sent again (a gateway or compatible server that rejects unknown fields).
         self.rejected_fields: set[tuple[str, str]] = set()
         self._rejections: dict[tuple[str, str], int] = {}  # a field is dropped for good on its second rejection
+        # Sub-reasons (prefixwise.details): request facts per lane and session, requests in
+        # flight by tools+system prefix, and when another session last finished one.
+        self.lane_facts: dict[tuple, Facts] = _SessionMap(MAX_SESSIONS)
+        self.session_facts: dict[str, Facts] = _SessionMap(MAX_SESSIONS)
+        self.prefix_inflight: dict[str, dict[str, float]] = _SessionMap(MAX_SESSIONS)
+        self.prefix_done: dict[str, tuple[float, str]] = _SessionMap(MAX_SESSIONS)
         if self.engine == "sglang" and self.engine_events is not None and not self.mock:
             self._check_sglang()
         # Per-session state, shared across the threaded server's handlers.
@@ -623,14 +642,36 @@ class PrefixwiseProxy:
             if "comparison_response_id" not in opts:
                 opts["comparison_response_id"] = previous_id
                 inject("prompt_cache_options", opts)
+        # Caches are per model and per workspace (credentials), so both are in the prefix key.
+        credential = hashlib.sha256((headers.get("x-api-key") or headers.get("authorization")
+                                     or self.api_key or "").encode()).hexdigest()[:12]
+        facts = body_facts(provider, forward_body, model=str(body.get("model", "")), credential=credential)
+        request_id = str(uuid.uuid4())
+        sent = time.time()
+        facts.sent_at = sent
+        if facts.prefix_key:
+            with self._lock:
+                flying = self.prefix_inflight.get(facts.prefix_key)
+                if flying is None:
+                    flying = self.prefix_inflight[facts.prefix_key] = {}
+                for rid, t in list(flying.items()):
+                    if sent - t > 60:  # only the last second matters; drop what never completed
+                        flying.pop(rid, None)
+                if flying:
+                    facts.fanout_age = sent - max(flying.values())
+                flying[request_id] = sent
+                done = self.prefix_done.get(facts.prefix_key)
+                if done is not None and done[1] != session_id:
+                    facts.shared_age, facts.shared_write_pos = sent - done[0], done[2]
         return {
             "provider": provider, "api": api, "body": body, "headers": headers,
+            "facts": facts, "sent_at": sent,
             "forward_body": forward_body, "session_id": session_id,
             "upstream_session_id": upstream_session_id, "engine_token": engine_token,
             "injected": injected,
             "agent_id": str(headers.get("x-prefixwise-agent-id") or body.get("agent_id") or "proxy"),
             "task_id": str(task_id) if task_id else None,
-            "request_id": str(uuid.uuid4()), "model": str(body.get("model", "unknown")),
+            "request_id": request_id, "model": str(body.get("model", "unknown")),
             # E1-open / hooks: a PreCompact/compaction event fired before
             # this turn, so the classifier can tell COMPACTION_REWRITE from
             # HISTORY_EDIT. Never forwarded.
@@ -740,6 +781,26 @@ class PrefixwiseProxy:
                                     native_reason=native_reason)
         else:
             result = classify(prev, curr, native_reason=native_reason)
+        # The why behind the cause, where the evidence allows (prefixwise.details).
+        parts = breakdown(provider, usage)
+        facts = usage_facts(ctx.get("facts") or Facts(provider=provider), usage,
+                            parts.cache_write_5m + parts.cache_write_1h + parts.cache_write)
+        facts.done_at = now
+        prev_facts = self.lane_facts.get(lane) if lane in self.lane_facts else self.session_facts.get(session_id)
+        if prev is None or (ctx.get("api") == "responses" and body.get("previous_response_id")):
+            prev_facts = None  # a stitched branch: the lane's latest request may be another branch
+        new_cause, detail, why = detail_for(result.cause.value, prev_facts, facts,
+                                            prompt_tokens=prompt_tokens, cached_tokens=cached)
+        if new_cause:
+            cause_name, legit = new_cause
+            result = Classification(MissCause(cause_name), legit,
+                                    f"{why} (classifier: {result.cause.value}, {result.evidence})",
+                                    result.secondary + [result.cause], native_reason)
+        elif why:
+            result.evidence = f"{result.evidence}; {why}"
+        self._release_prefix(ctx, done_session=session_id)
+        self.lane_facts[lane] = facts
+        self.session_facts[session_id] = facts
         self.scorer.record(result.cause, native_reason, provider)
         self.last_snapshot[session_id] = curr
         self.lane_snapshot[lane] = curr
@@ -749,7 +810,6 @@ class PrefixwiseProxy:
             if ctx.get("api") == "responses":
                 self.snapshot_by_response[response_id] = curr
 
-        parts = breakdown(provider, usage)
         div = first_divergence(prev.blocks, curr.blocks) if prev is not None else None
         entry = LedgerEntry(
             session_id=session_id, agent_id=ctx["agent_id"],
@@ -769,6 +829,7 @@ class PrefixwiseProxy:
             evidence=result.evidence,
             secondary_causes=",".join(c.value for c in result.secondary) or None,
             divergence_role=div["role"] if div else None, divergence_index=div["index"] if div else None,
+            detail=detail,
         )
         priced_model = str(payload.get("model") or ctx["model"])
         entry.avoidable_cost = self.prices.avoidable_cost(priced_model, entry.avoidable_tokens, prompt_tokens)
@@ -791,6 +852,33 @@ class PrefixwiseProxy:
             return None
         return max(0.0, (time.perf_counter() - ctx["t0"]) * 1000 - ctx["upstream_ms"])
 
+    def _release_prefix(self, ctx: dict, done_session: str | None = None) -> None:
+        """The request is no longer in flight; if it succeeded, its prefix is now cached
+        (as far as this proxy knows) for other sessions to reuse. Caller holds the lock
+        when called from _finalize_locked; record_failure takes it."""
+        facts = ctx.get("facts")
+        if facts is None or not facts.prefix_key:
+            return
+        flying = self.prefix_inflight.get(facts.prefix_key)
+        if flying is not None:
+            flying.pop(ctx.get("request_id"), None)
+        # Writes happen only at breakpoints: other sessions can reuse this request's entry for
+        # tools+system only if it wrote one ending there.
+        inside = [b for b in facts.breakpoints if b < facts.sys_end]
+        if done_session is not None and facts.cache_write > 0 and inside:
+            self.prefix_done[facts.prefix_key] = (time.time(), done_session, max(inside))
+
+    def response_started(self, ctx: dict) -> None:
+        """The upstream began answering: the request's prefill is done and its cache entry
+        exists, so it no longer counts as a request other requests are waiting on."""
+        facts = ctx.get("facts")
+        if facts is None or not facts.prefix_key:
+            return
+        with self._lock:
+            flying = self.prefix_inflight.get(facts.prefix_key)
+            if flying is not None:
+                flying.pop(ctx.get("request_id"), None)
+
     def record_failure(self, ctx: dict, status: int, payload: dict | None = None,
                        error: str | None = None) -> None:
         """A request that produced no verdict (upstream error, cut-off stream) is a
@@ -805,6 +893,8 @@ class PrefixwiseProxy:
             status=status, error=str(kind)[:80], api=ctx.get("api"), stream=ctx.get("stream"),
             latency_ms=ctx.get("upstream_ms"), overhead_ms=self._overhead_ms(ctx))
         self.metrics.observe(entry)  # counted even if the ledger write fails
+        with self._lock:
+            self._release_prefix(ctx)
         try:
             self.ledger.record(entry)
         except Exception as exc:
@@ -824,6 +914,7 @@ class PrefixwiseProxy:
         """
         ctx = self.prepare(provider, body, headers, api=api)
         if ctx["stream"]:
+            self.response_started(ctx)  # not sent at all: nothing in flight
             return {"request_id": ctx["request_id"], "status": 400, "cause": None,
                     "response": _error(400, "use handle_stream for stream=true")}, None
         self._upstream.headers = {}
@@ -835,6 +926,7 @@ class PrefixwiseProxy:
             status, payload = self._forward(provider, ctx["forward_body"], ctx["request_id"],
                                             ctx["upstream_session_id"] or ctx["session_id"],
                                             ctx["headers"], api=api)
+        self.response_started(ctx)
         ctx["upstream_ms"] = (time.perf_counter() - sent) * 1000
         upstream_headers = getattr(self._upstream, "headers", {}) or {}
         if status >= 400:
@@ -1029,6 +1121,7 @@ class PrefixwiseProxy:
             try:
                 resp = urllib.request.urlopen(req, timeout=UPSTREAM_TIMEOUT)
                 ctx["upstream_headers"] = relay_headers(resp.headers)
+                self.response_started(ctx)
                 break
             except urllib.error.HTTPError as exc:
                 ctx["upstream_headers"] = relay_headers(exc.headers)
@@ -1396,6 +1489,12 @@ def make_handler(proxy: PrefixwiseProxy):
 
         def _stream(self, provider: str, body: dict, api: str = "chat"):
             ctx = proxy.prepare(provider, body, self._client_headers(), api=api)
+            try:
+                return self._stream_ctx(ctx, provider, api)
+            finally:  # whatever happened (cut-off upstream, client gone), it is not in flight now
+                proxy.response_started(ctx)
+
+        def _stream_ctx(self, ctx: dict, provider: str, api: str):
             sent = time.perf_counter()
             status, lines, acc, err = proxy.open_stream(ctx)
             relayed = ctx.get("upstream_headers") or {}
