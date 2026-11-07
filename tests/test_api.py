@@ -78,6 +78,8 @@ def test_errors_and_auth():
         assert get(port, "/api/v1/breakdown?by=colour")[0] == 400
         assert get(port, "/api/v1/summary?metrics=vibes")[0] == 400
         assert get(port, "/api/v1/summary?since=yesterday")[0] == 400
+        assert get(port, "/api/v1/summary?since=%20")[0] == 200  # blank means "no bound", never a 500
+        assert get(port, "/api/v1/breakdown?by=status&status=abc")[0] == 400
         assert get(port, "/api/v1/timeseries?bucket=week")[0] == 400
         assert get(port, "/api/v1/nope")[0] == 404
         assert post(port, "/api/v1/tasks", {"task_id": "x"})[0] == 400

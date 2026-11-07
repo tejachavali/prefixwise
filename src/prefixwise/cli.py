@@ -213,9 +213,12 @@ def cmd_export(args) -> int:
     except (ValueError, api.ApiError) as exc:
         print(f"prefixwise: {exc}", file=sys.stderr)
         return 2
-    out = open(args.output, "w", newline="") if args.output else sys.stdout
-    with led._lock:
-        cur = led.conn.execute(f"SELECT * FROM entries{where} ORDER BY id", params)
+    if args.output:  # owner-only, like the ledger itself
+        out = os.fdopen(os.open(args.output, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w", newline="")
+    else:
+        out = sys.stdout
+    with led.reader() as conn:
+        cur = conn.execute(f"SELECT * FROM entries{where} ORDER BY id", params)
         names = [d[0] for d in cur.description]
         writer = csv.writer(out) if args.format == "csv" else None
         if writer:

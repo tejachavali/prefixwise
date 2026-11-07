@@ -534,6 +534,7 @@ class PrefixwiseProxy:
         except Exception as exc:
             print(f"prefixwise: request {ctx['request_id']} passed through unrecorded: "
                   f"{type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
+            self.record_failure(ctx, status, error="not_recorded")  # at least a row, if the ledger works
             return {"request_id": ctx["request_id"], "status": status, "cause": None,
                     "recorded": False, "response": payload}, None
 
@@ -1189,15 +1190,17 @@ def make_handler(proxy: PrefixwiseProxy):
                         self.wfile.flush()
             except (BrokenPipeError, ConnectionResetError):
                 failure = "client_disconnected"  # client went away mid-stream
+                status = 499  # client closed request (not an upstream error)
             except (TimeoutError, OSError):
                 failure = "upstream_dropped"  # upstream stalled or dropped
             ctx["upstream_ms"] = (time.perf_counter() - sent) * 1000
-            # A verdict needs the stream's usage: a cut-off stream has partial or
-            # none, and a guess is worse than none. It is still recorded, as a failure.
-            if failure is None and acc.saw_usage:
+            # A cut-off stream has partial usage at best, and a guess is worse than
+            # none: it is recorded as a failure. A stream that completed is a
+            # response like any other, usage or not (no usage: verdict unknown).
+            if failure is None:
                 proxy.finalize_safely(ctx, status, acc.payload)
             else:
-                proxy.record_failure(ctx, status, error=failure or "no_usage")
+                proxy.record_failure(ctx, status, error=failure)
             self.close_connection = True
     return Handler
 

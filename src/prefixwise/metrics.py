@@ -40,10 +40,14 @@ CATALOG: tuple[Metric, ...] = (
            f"COALESCE(SUM(CASE WHEN {OK} THEN prompt_tokens END), 0)"),
     Metric("cached_tokens", "{token}", "Prompt tokens read from the cache.",
            f"COALESCE(SUM(CASE WHEN {OK} THEN cached_tokens END), 0)"),
-    Metric("uncached_tokens", "{token}", "Prompt tokens neither read from nor written to the cache "
-           "(rows from before schema 3 are not counted).", f"SUM(CASE WHEN {OK} THEN uncached_tokens END)"),
-    Metric("cache_write_tokens", "{token}", "Prompt tokens written to the cache "
-           "(rows from before schema 3 are not counted).", f"SUM(CASE WHEN {OK} THEN cache_write_tokens END)"),
+    Metric("uncached_tokens", "{token}", "Prompt tokens neither read from nor written to the cache. "
+           "null when any row in the group predates schema 3 (a partial sum would mislead).",
+           f"CASE WHEN SUM(CASE WHEN {OK} AND uncached_tokens IS NULL THEN 1 ELSE 0 END) > 0 THEN NULL "
+           f"ELSE COALESCE(SUM(CASE WHEN {OK} THEN uncached_tokens END), 0) END"),
+    Metric("cache_write_tokens", "{token}", "Prompt tokens written to the cache. null when any row in "
+           "the group predates schema 3.",
+           f"CASE WHEN SUM(CASE WHEN {OK} AND cache_write_tokens IS NULL THEN 1 ELSE 0 END) > 0 THEN NULL "
+           f"ELSE COALESCE(SUM(CASE WHEN {OK} THEN cache_write_tokens END), 0) END"),
     Metric("completion_tokens", "{token}", "Output tokens.",
            f"COALESCE(SUM(CASE WHEN {OK} THEN completion_tokens END), 0)"),
     Metric("cache_hit_rate", "1", "cached_tokens / prompt_tokens.", ratio=("cached_tokens", "prompt_tokens")),
@@ -57,8 +61,9 @@ CATALOG: tuple[Metric, ...] = (
     Metric("cost_usd", "USD", "Dollars for priced requests.", f"SUM(CASE WHEN {OK} THEN cost END)"),
     Metric("avoidable_cost_usd", "USD", "What the avoidable tokens cost as uncached input rather than "
            "cache reads (priced requests).", f"SUM(CASE WHEN {OK} THEN avoidable_cost END)"),
-    Metric("latency_ms_p50", "ms", "Median upstream latency (all requests).", percentile=("latency_ms", 0.50)),
-    Metric("latency_ms_p95", "ms", "95th percentile upstream latency (all requests).",
+    Metric("latency_ms_p50", "ms", "Median upstream latency of requests with a verdict (streams: to the "
+           "last byte delivered).", percentile=("latency_ms", 0.50)),
+    Metric("latency_ms_p95", "ms", "95th percentile upstream latency of requests with a verdict.",
            percentile=("latency_ms", 0.95)),
     Metric("overhead_ms_p50", "ms", "Median time Prefixwise itself added.", percentile=("overhead_ms", 0.50)),
     Metric("overhead_ms_p95", "ms", "95th percentile time Prefixwise itself added.",
@@ -82,12 +87,12 @@ DEFAULT = ("requests", "requests_failed", "prompt_tokens", "cached_tokens", "cac
 # 0.3.1 have none and fall in a null bucket.
 DIMENSIONS = {
     "cause": "cause", "session": "session_id", "agent": "agent_id", "model": "model",
-    "provider": "provider", "task": "task_id", "api": "api", "status": "status", "error": "error",
+    "provider": "provider", "task": "task_id", "api": "api", "status": "COALESCE(status, 200)", "error": "error",
     "divergence": "divergence_role",
     "day": "strftime('%Y-%m-%d', recorded_at, 'unixepoch')",
     "hour": "strftime('%Y-%m-%dT%H:00Z', recorded_at, 'unixepoch')",
 }
-FILTERS = {"cause", "session", "agent", "model", "provider", "task", "api", "error"}
+FILTERS = {"cause", "session", "agent", "model", "provider", "task", "api", "error", "status"}
 
 
 def catalog() -> list[dict]:
@@ -104,6 +109,11 @@ def _where(filters: dict | None, since: float | None, until: float | None) -> tu
     for k, v in (filters or {}).items():
         if k not in FILTERS:
             raise ValueError(f"cannot filter on {k!r}; filters: {sorted(FILTERS)}")
+        if k == "status":
+            try:
+                v = int(v)
+            except (TypeError, ValueError):
+                raise ValueError(f"status must be an integer, not {v!r}") from None
         clauses.append(f"{DIMENSIONS[k]} = ?")
         args.append(v)
     if since is not None:
@@ -115,14 +125,15 @@ def _where(filters: dict | None, since: float | None, until: float | None) -> tu
     return (" WHERE " + " AND ".join(clauses)) if clauses else "", args
 
 
-def _percentile(values: list[float], q: float) -> float | None:
-    if not values:
+def _interpolate(got: dict | None, q: float) -> float | None:
+    """The q-quantile from the two order statistics around it (rank (n-1)q)."""
+    if not got:
         return None
-    values = sorted(values)
-    k = (len(values) - 1) * q
-    lo = int(k)
-    hi = min(lo + 1, len(values) - 1)
-    return values[lo] + (values[hi] - values[lo]) * (k - lo)
+    pos = (got["n"] - 1) * q
+    lo = int(pos) + 1
+    a = got.get(lo)
+    b = got.get(min(lo + 1, got["n"]), a)
+    return None if a is None else a + (b - a) * (pos - int(pos))
 
 
 def query(ledger, metrics=None, by: str | None = None, filters: dict | None = None,
@@ -152,27 +163,39 @@ def query(ledger, metrics=None, by: str | None = None, filters: dict | None = No
     key = DIMENSIONS[by] if by else "NULL"
     sql = (f"SELECT {key} AS k, COUNT(*)" + "".join(", " + BY_NAME[n].sql for n in sums)
            + f" FROM entries{where} GROUP BY k")
-    with ledger._lock:
-        rows = {r[0]: dict(zip(sums, r[2:])) for r in ledger.conn.execute(sql, args).fetchall()}
+    with ledger.reader() as conn:
+        rows = {r[0]: dict(zip(sums, r[2:])) for r in conn.execute(sql, args).fetchall()}
         task_rows: dict = {}
         if any(BY_NAME[n].task for n in needed):
-            # Per group: requests on resolved tasks, joined to the outcomes.
-            for k, tok, ok, resolved, n_req, priced, cost in ledger.conn.execute(
-                    f"""SELECT e.k, SUM(e.prompt_tokens + COALESCE(e.completion_tokens, 0)),
+            # A task belongs to a group if it has any request there; its tokens and
+            # cost come from the requests that got a verdict.
+            for k, tok, ok, resolved, n_req, priced, cost in conn.execute(
+                    f"""SELECT e.k, SUM(CASE WHEN e.ok THEN e.prompt_tokens + COALESCE(e.completion_tokens, 0) END),
                                COUNT(DISTINCT CASE WHEN t.success = 1 THEN t.task_id END),
-                               COUNT(DISTINCT t.task_id), COUNT(*), COUNT(e.cost), SUM(e.cost)
-                        FROM (SELECT {key} AS k, prompt_tokens, completion_tokens, cost, task_id
-                              FROM entries{where}{' AND' if where else ' WHERE'} {OK}) e
+                               COUNT(DISTINCT t.task_id), SUM(e.ok),
+                               SUM(CASE WHEN e.ok AND e.cost IS NOT NULL THEN 1 ELSE 0 END),
+                               SUM(CASE WHEN e.ok THEN e.cost END)
+                        FROM (SELECT {key} AS k, prompt_tokens, completion_tokens, cost, task_id,
+                                     ({OK}) AS ok FROM entries{where}) e
                         JOIN tasks t ON e.task_id = t.task_id GROUP BY e.k""", args):
                 task_rows[k] = {"tasks_resolved": resolved, "tasks_successful": ok,
-                                "tokens_per_successful_task": (tok / ok) if ok else None,
-                                "cost_per_successful_task_usd": (cost / ok) if ok and priced == n_req else None}
-        pct_cols = {BY_NAME[n].percentile[0] for n in needed if BY_NAME[n].percentile}
+                                "tokens_per_successful_task": ((tok or 0) / ok) if ok else None,
+                                "cost_per_successful_task_usd": ((cost or 0) / ok) if ok and priced == n_req
+                                else None}
         samples: dict = {}
-        for col in pct_cols:
-            extra = f" AND {col} IS NOT NULL" if where else f" WHERE {col} IS NOT NULL"
-            for k, v in ledger.conn.execute(f"SELECT {key}, {col} FROM entries{where}{extra}", args):
-                samples.setdefault((k, col), []).append(v)
+        for col, q in {BY_NAME[n].percentile for n in needed if BY_NAME[n].percentile}:
+            # Exact, interpolated percentiles computed inside SQLite (window functions):
+            # two rows per group come back, never the whole column.
+            cond = f"{' AND' if where else ' WHERE'} {OK} AND {col} IS NOT NULL"
+            for k, rn, n, v in conn.execute(
+                    f"""SELECT k, rn, n, v FROM (
+                          SELECT {key} AS k, {col} AS v,
+                                 ROW_NUMBER() OVER (PARTITION BY {key} ORDER BY {col}) AS rn,
+                                 COUNT(*) OVER (PARTITION BY {key}) AS n
+                          FROM entries{where}{cond})
+                        WHERE rn = CAST((n - 1) * ? AS INTEGER) + 1
+                           OR rn = MIN(CAST((n - 1) * ? AS INTEGER) + 2, n)""", (*args, q, q)):
+                samples.setdefault((k, col, q), {"n": n})[rn] = v
     out = []
     for k, vals in rows.items():
         row = {by: k} if by else {}
@@ -182,18 +205,17 @@ def query(ledger, metrics=None, by: str | None = None, filters: dict | None = No
                 num, den = vals.get(m.ratio[0]), vals.get(m.ratio[1])
                 row[n] = (num / den) if num is not None and den else None
             elif m.percentile:
-                row[n] = _percentile(samples.get((k, m.percentile[0]), []), m.percentile[1])
+                row[n] = _interpolate(samples.get((k, *m.percentile)), m.percentile[1])
             elif m.task:
                 row[n] = task_rows.get(k, {}).get(n, 0 if n.startswith("tasks_") else None)
             else:
                 row[n] = vals.get(n)
         out.append(row)
     if order:
-        desc = order.startswith("-")
-        field = order.lstrip("-")
-        out.sort(key=lambda r: (r.get(field) is None, r.get(field) or 0), reverse=desc)
-        if desc:  # keep missing values last when descending
-            out.sort(key=lambda r: r.get(field) is None)
+        desc, field = order.startswith("-"), order.lstrip("-")
+        present = [r for r in out if r.get(field) is not None]
+        present.sort(key=lambda r: r[field], reverse=desc)
+        out = present + [r for r in out if r.get(field) is None]  # missing values last
     elif by in ("day", "hour"):
         out.sort(key=lambda r: (r[by] is None, r[by] or ""))
     return out[:limit] if limit else out

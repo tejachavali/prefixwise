@@ -11,19 +11,24 @@ Design note, 2026-11-07.
    tokens) are kept only as "as computed then", with the price-table date.
 2. **Record every request, failures included.** A ledger of successful requests only
    biases every rate (survivorship). Failed requests get a row with their status and no
-   verdict.
+   verdict: an upstream error, an unreachable upstream, a stream cut off by the upstream, or
+   by the client (status 499). A response that arrived without usage is not a failure: it is a
+   verdict row (`unknown`), streamed or not.
 3. **One definition per metric.** Each metric has a name, formula, unit, valid groupings
    and caveats, in one module (`prefixwise.metrics`). The CLI, the HTTP API, exports and
    any future UI call it; none computes its own. The catalog is served by the API, so the
    data documents itself.
-4. **Ratios are ratios of sums.** A cache hit rate over a group is
+4. **Never a silently partial number.** A sum over a group where some rows lack the field
+   (rows written before schema 3) is null, not a partial total. Dollars say how many requests
+   were priced.
+5. **Ratios are ratios of sums.** A cache hit rate over a group is
    `sum(cached) / sum(prompt)`, never a mean of per-request rates (which overweights
    small requests and can reverse across groups).
-5. **Get the data out in standard shapes.** Raw rows as JSONL/CSV; operational metrics in
+6. **Get the data out in standard shapes.** Raw rows as JSONL/CSV; operational metrics in
    Prometheus format; per-request telemetry as OpenTelemetry GenAI conventions, so it lands
    in the tools teams already run. Prefixwise is not a second observability platform; it
    is the part that knows *why* a cache missed.
-6. **Never prompt text.** Rows hold counts, causes, hashes and the caller's own labels.
+7. **Never prompt text.** Rows hold counts, causes, hashes and the caller's own labels.
    Exports never include block hashes.
 
 ## Facts per request (schema 3)
@@ -57,7 +62,8 @@ task, day/hour:
 - cost, avoidable cost, priced requests (dollars cover priced requests only, and say so)
 - waste requests (verdict says the miss was avoidable)
 - tokens per successful task, cost per successful task
-- latency p50/p95, Prefixwise overhead p50/p95
+- latency p50/p95, Prefixwise overhead p50/p95 (requests with a verdict; exact, computed in
+  SQLite, so a query never loads a whole column)
 - native agreement (where a provider gives its own reason)
 
 ## Interfaces
@@ -84,3 +90,14 @@ task, day/hour:
 
 No dashboards beyond a report, no prompt storage, no streaming bus. Data leaves through
 documented, versioned shapes.
+
+## Reads never slow the proxy
+
+Metrics, the API and exports read through their own read-only SQLite connection (WAL lets
+readers and the writer run together), so a large query never holds the lock the proxy
+records requests under.
+
+An independent review of the first version found the task metrics defined twice (so the
+report, the API and `/ledger` could disagree), percentiles that loaded every value under the
+writer's lock, silently partial sums, and a response without usage counted two ways. All are
+fixed above, each with a test that replays the case.

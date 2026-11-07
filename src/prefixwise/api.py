@@ -41,10 +41,10 @@ class ApiError(ValueError):
 
 def _time(value: str | None, name: str) -> float | None:
     """Unix seconds, or a duration back from now (30m, 24h, 7d, 2w)."""
-    if not value:
+    v = (value or "").strip().lower()
+    if not v:
         return None
     units = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}
-    v = value.strip().lower()
     try:
         if v[-1] in units:
             return time.time() - float(v[:-1]) * units[v[-1]]
@@ -125,8 +125,8 @@ def _requests(led, p: dict) -> dict:
         where += (" AND" if where else " WHERE") + " id < ?"
         args.append(before)
     limit = _limit(p, 100)
-    with led._lock:
-        cur = led.conn.execute(f"SELECT * FROM entries{where} ORDER BY id DESC LIMIT ?", (*args, limit + 1))
+    with led.reader() as conn:
+        cur = conn.execute(f"SELECT * FROM entries{where} ORDER BY id DESC LIMIT ?", (*args, limit + 1))
         names = [d[0] for d in cur.description]
         rows = [dict(zip(names, r)) for r in cur.fetchall()]
     more = len(rows) > limit
