@@ -409,3 +409,9 @@
 - After: +3 / +6 / +13 ms p50 at 2k / 30k / 120k tokens; ~185 req/s per
   process; 0 errors at c=128; 1M-row report 2.2 s.
 - Tests: 149 passed. CI: fault suite + docker stop exit 0.
+
+## 2026-11-07 Release 0.3.1 (claude/release-0.3.1)
+- Version 0.3.1 in pyproject.toml and __init__.py; CHANGELOG dated, with an
+  upgrade note (ledger migrates in place; pre-0.3.1 rows undated).
+- Wheel builds and includes prices.json. Tests: 149 passed.
+- Muse publishes the GitHub release v0.3.1 after the merge.
