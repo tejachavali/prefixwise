@@ -1,8 +1,6 @@
 # Changelog
 
-## 0.3.0: unreleased
-
-Tag `v0.3.0` to publish (see CONTRIBUTING.md, "Releasing").
+## 0.3.0: 2026-11-07
 
 - **Fixes the proxy can apply:** `prefixwise serve --fix canonical_tools` sorts tools so a drifting tool list stops breaking the cache. It is opt-in and reversible, and the ledger records which requests it rewrote.
 - **`prefixwise fixes`:** ranks fixes by the tokens your own ledger says they would save.
