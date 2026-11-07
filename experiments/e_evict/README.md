@@ -40,8 +40,13 @@ python experiments/e1_open/e1_open.py --engine vllm-lmcache --vllm-url http://12
 
 **Runtime 2: SGLang, then SGLang + HiCache**
 
+SGLang 0.5.23 pins `outlines==0.1.11`, whose `outlines_core 0.1.26` has prebuilt wheels only
+for Python 3.9-3.12. On a Python 3.13 runtime pip tries to compile it from Rust source and fails,
+so run SGLang in a Python 3.12 environment:
+
 ```bash
-pip install -e . "sglang[all]"
+pip install -q uv && uv venv -p 3.12 /content/sg312 && source /content/sg312/bin/activate
+uv pip install --prerelease=allow --only-binary outlines_core "sglang==0.5.23" -e ".[engines]"
 # 3. SGLang alone
 MODEL=Qwen/Qwen3-4B MAX_TOTAL_TOKENS=32768 ./experiments/e1_open/sglang_server.sh &
 python experiments/e1_open/e1_open.py --engine sglang --vllm-url http://127.0.0.1:30000 --model Qwen/Qwen3-4B

@@ -136,6 +136,8 @@ def run(args) -> dict:
     verdicts: dict[str, int] = {}
     for x in reps:
         verdicts[x["t3"]["cause"]] = verdicts.get(x["t3"]["cause"], 0) + 1
+    engine = {"notes": proxy.engine_notes,  # what Prefixwise's startup check of the engine found
+              "events": proxy.engine_events.snapshot() if proxy.engine_events is not None else None}
     if proxy.engine_events is not None:
         proxy.engine_events.stop()
     return {"engine": args.engine, "model": args.model, "mock": args.mock, "repeats": args.repeats,
@@ -145,7 +147,7 @@ def run(args) -> dict:
             "t3_hits": t3_hits, "engine_behaved_as_expected": control_ok and (
                 t3_hits == len(reps) if offload else t3_hits == 0),
             "correct_cause": correct, "prefixwise_t3": verdicts,
-            "prefixwise_correct": verdicts.get(correct, 0), "reps": reps}
+            "prefixwise_correct": verdicts.get(correct, 0), "engine_check": engine, "reps": reps}
 
 
 def write(res: dict, out: Path) -> Path:
@@ -166,6 +168,10 @@ def write(res: dict, out: Path) -> Path:
     for x in res["reps"]:
         lines.append(f"| {x['rep']} | {x['t2']['share']:.0%} | {x['flood_requests']} req, {x['flood_seconds']} s | "
                      f"{x['t3']['cached']}/{x['t3']['prompt']} | `{x['t3']['cause']}`: {x['t3'].get('evidence') or ''} |")
+    eng = res.get("engine_check") or {}
+    if eng.get("events") is not None or eng.get("notes"):
+        lines += ["", f"Engine check notes: {'; '.join(eng.get('notes') or []) or 'none'}",
+                  f"KV-event stream at the end: `{json.dumps(eng.get('events'))}`"]
     stem.with_suffix(".md").write_text("\n".join(lines) + "\n")
     return stem.with_suffix(".md")
 
