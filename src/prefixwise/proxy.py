@@ -542,7 +542,13 @@ class PrefixwiseProxy:
         # that is the rewritten request, not the client's original.
         fps = self.fingerprinter.fingerprint_blocks(extract_blocks(ctx["forward_body"], provider))
         if ctx.get("engine_token") is not None:  # outside the lock: it may wait a few ms for events
-            ctx["engine_verdict"] = self.engine_events.request_done(ctx["engine_token"], cached)
+            reported = "prompt_tokens_details" in usage  # vLLM needs --enable-prompt-tokens-details
+            if not reported and not getattr(self, "_warned_details", False):
+                self._warned_details = True
+                print("prefixwise: vLLM is not reporting cached tokens; start it with "
+                      "--enable-prompt-tokens-details, or every request looks like a miss", file=sys.stderr)
+            ctx["engine_verdict"] = self.engine_events.request_done(
+                ctx["engine_token"], cached if reported else None, prompt_tokens)
         with self._lock:
             return self._finalize_locked(ctx, status, payload, usage, prompt_tokens, cached,
                                          native_reason, response_id, fps)

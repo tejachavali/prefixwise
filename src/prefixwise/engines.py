@@ -8,22 +8,22 @@ separate them (docs/ENGINES.md):
 
 1. With `--engine vllm` and `--kv-events`, Prefixwise sends its session id in the
    request body and `vllm_xargs: {"kv_cache_report_mode": "full"}`, so vLLM
-   reports every block a request uses, reused or new, in order, tagged with the
-   session (vllm/v1/core/kv_cache_manager.py, block_pool.py, 2026-11-06).
+   reports every block a request uses, reused or new, tagged with the session
+   (vllm/v1/core/kv_cache_manager.py, block_pool.py, 2026-11-06). A block's
+   position comes from its parent (`parent_block_hash`), not from arrival order.
 2. When a session's next request is sent, the blocks of its previous request are
-   frozen as the chain to judge. Removals of those blocks are recorded from then
-   until the response, so evictions while the request waits in vLLM's queue count.
-3. At the response, `cached_tokens` says where the cache read stopped: block
-   cached_tokens // block_size of the chain. If that block was removed, the miss
-   is a confirmed eviction. If it is still on the GPU, the cache stopped at a block
-   it still holds, so the token prefix changed there: not an eviction. Only that
-   block matters, so output blocks a template never reuses, or older chains, cannot
-   confirm anything.
+   frozen as the chain to judge. Removals are recorded from then until the
+   response, so evictions while the request waits in vLLM's queue count.
+3. At the response, `cached_tokens` says where the cache read stopped: position
+   cached_tokens // block_size. Only that block decides. Removed: a confirmed
+   eviction. Still on the GPU: the token prefix changed there, so not an
+   eviction. That negative claim is made only when nothing can make it wrong: the
+   event stream caught up with the response, lost no messages, the model has
+   full attention only, and the session had one request in flight.
 
-Only full-attention block groups are tracked: hybrid models free sliding-window
-blocks routinely. Offload tiers (LMCache) are not tracked; a prefix they restore
-is a hit and never examined. Known limit: concurrent requests in one session
-share a window, so a chain can mix branches (docs/ENGINES.md).
+Every other case returns nothing, and the classifier keeps its inference.
+Offload tiers (LMCache) are not tracked; a prefix they restore is a hit and never
+examined.
 
 Wire format (vllm/distributed/kv_events.py): ZMQ PUB, multipart [topic, seq
 (8 bytes, big-endian), msgpack [ts, events, dp_rank?]], each event a map tagged
@@ -39,17 +39,18 @@ from collections import OrderedDict
 
 GPU = (None, "GPU")
 FULL_KINDS = (None, "full_attention", "mla_attention", "sink_full_attention")
+NOTHING = (None, None)
 
 
 class _Window:
-    """The blocks one session's requests reported since its last send, in order."""
+    """Blocks one session's requests reported since its last send, by position."""
 
-    __slots__ = ("keys", "seen", "block_size")
+    __slots__ = ("at", "block_size", "mixed")
 
-    def __init__(self):
-        self.keys: list = []
-        self.seen: set = set()
+    def __init__(self, mixed: bool = False):
+        self.at: dict = {}  # position -> (group, hash); a later report of a position wins
         self.block_size: int | None = None
+        self.mixed = mixed  # concurrent requests reported into it
 
 
 class EngineEvents:
@@ -59,13 +60,15 @@ class EngineEvents:
         self.max_sessions, self.max_chain, self.max_alive = max_sessions, max_chain, max_alive
         self.settle_seconds = settle_seconds
         self._lock = threading.Lock()
-        self._alive: set = set()  # (group, block hash) on the GPU, full-attention groups only
+        self._alive: dict = {}  # (group, hash) on the GPU -> its position, full-attention groups only
         self._windows: OrderedDict = OrderedDict()  # session -> _Window
         self._checks: OrderedDict = OrderedDict()  # token -> in-flight check
         self._tokens = itertools.count(1)
+        self.hybrid = False  # the model has non-full-attention groups: no negative claims
         self.stats = {"batches": 0, "stored": 0, "removed": 0, "cleared": 0, "engine_restarts": 0,
                       "dropped_messages": 0, "decode_errors": 0, "overflows": 0}
         self._last_seq: int | None = None
+        self._latest_ts = 0.0  # engine timestamp of the last batch read
         self._drained_at = 0.0  # last time the subscriber found the socket empty
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -90,8 +93,11 @@ class EngineEvents:
             self.stats["batches"] += 1
             for ev in batch[1]:
                 kind = ev.get("type")
-                if kind == "BlockStored" and ev.get("medium") in GPU and ev.get("kv_cache_spec_kind") in FULL_KINDS:
-                    self._store(ev)
+                if kind == "BlockStored" and ev.get("medium") in GPU:
+                    if ev.get("kv_cache_spec_kind") in FULL_KINDS:
+                        self._store(ev)
+                    else:
+                        self.hybrid = True
                 elif kind == "BlockRemoved" and ev.get("medium") in GPU:
                     group = ev.get("group_idx") or 0
                     for h in ev.get("block_hashes") or []:
@@ -99,33 +105,39 @@ class EngineEvents:
                 elif kind == "AllBlocksCleared":
                     self.stats["cleared"] += 1
                     self._clear()
+            if isinstance(batch[0], (int, float)):
+                self._latest_ts = max(self._latest_ts, float(batch[0]))
 
     def _store(self, ev: dict) -> None:
         group, hashes, session = ev.get("group_idx") or 0, ev.get("block_hashes") or [], ev.get("session_id")
         self.stats["stored"] += len(hashes)
-        keys = [(group, h) for h in hashes]
-        self._alive.update(keys)
+        parent = ev.get("parent_block_hash")
+        parent_pos = self._alive.get((group, parent)) if parent is not None else -1
+        pos = None if parent_pos is None else parent_pos + 1  # unknown parent: unplaced
+        w = self._window(session) if session else None
+        if w is not None:
+            w.block_size = w.block_size or ev.get("block_size")
+        for h in hashes:
+            key = (group, h)
+            self._alive[key] = pos
+            if w is not None and pos is not None and pos < self.max_chain:
+                w.at[pos] = key
+            pos = None if pos is None else pos + 1
         if len(self._alive) > self.max_alive:  # removals were missed: stop trusting residency
             self._alive.clear()
             self.stats["overflows"] += 1
-        if session:
-            w = self._window(session)
-            w.block_size = w.block_size or ev.get("block_size")
-            for k in keys:  # in order; a request re-reported while queued adds nothing new
-                if k not in w.seen and len(w.keys) < self.max_chain:
-                    w.seen.add(k)
-                    w.keys.append(k)
 
     def _remove(self, key) -> None:
         self.stats["removed"] += 1
-        self._alive.discard(key)
+        self._alive.pop(key, None)
         for check in self._checks.values():
-            if key in check["chain_set"]:
+            if key in check["keys"]:
                 check["lost"].add(key)
 
     def _clear(self) -> None:
-        for key in list(self._alive):
-            self._remove(key)
+        for check in self._checks.values():
+            check["lost"].update(check["keys"])
+        self._alive.clear()
 
     def _window(self, session: str) -> _Window:
         w = self._windows.get(session)
@@ -143,52 +155,71 @@ class EngineEvents:
         blocks of its previous request as the chain to judge, starts a new window,
         and returns a token for request_done."""
         with self._lock:
+            concurrent = False
+            for check in self._checks.values():
+                if check["session"] == session_id:  # another request of this session in flight
+                    check["concurrent"] = concurrent = True
             prev = self._windows.pop(session_id, None)
-            self._window(session_id)
+            self._windows[session_id] = _Window(mixed=concurrent)
             token = next(self._tokens)
-            chain = prev.keys if prev else []
-            self._checks[token] = {"chain": chain, "chain_set": set(chain),
-                                   "lost": {k for k in chain if k not in self._alive},
+            at = dict(prev.at) if prev else {}
+            keys = set(at.values())
+            self._checks[token] = {"session": session_id, "at": at, "keys": keys,
+                                   "lost": {k for k in keys if k not in self._alive},
                                    "block_size": prev.block_size if prev else None,
-                                   "errors": self._errors(), "sent": time.time()}
+                                   "concurrent": concurrent or bool(prev and prev.mixed),
+                                   "errors": self._errors()}
             while len(self._checks) > self.max_sessions:  # requests that never completed
                 self._checks.popitem(last=False)
             return token
 
-    def request_done(self, token: int, cached_tokens: int) -> tuple[int | None, int | None]:
+    def request_done(self, token: int, cached_tokens: int | None,
+                     prompt_tokens: int | None = None) -> tuple[int | None, int | None]:
         """At the response: (evicted_blocks, resident_blocks) for the classifier.
 
         (n > 0, 0): the block where the cache read stopped was removed: a confirmed
-        eviction (n: previous-request blocks removed). (0, n > 0): that block is still
-        on the GPU: not an eviction. (None, None): nothing to judge, or the event
-        stream lost messages meanwhile; the classifier keeps its inference."""
-        self._settle()
+        eviction (n: blocks of the previous request removed). (0, n > 0): that block
+        is still on the GPU: not an eviction. (None, None): nothing to judge, or the
+        negative claim is not safe; the classifier keeps its inference."""
         with self._lock:
-            check = self._checks.pop(token, None)
-            if not check or not check["chain"] or not check["block_size"]:
-                return None, None
-            idx = max(0, cached_tokens) // check["block_size"]
-            if idx >= len(check["chain"]):
-                return None, None
-            if check["chain"][idx] in check["lost"]:
+            check = self._checks.get(token)
+            if check is None or cached_tokens is None or not check["at"] or not check["block_size"]:
+                self._checks.pop(token, None)
+                return NOTHING
+            if prompt_tokens and cached_tokens >= prompt_tokens * 0.5:  # a hit: never examined
+                self._checks.pop(token, None)
+                return NOTHING
+            key = check["at"].get(max(0, cached_tokens) // check["block_size"])
+        if key is None:
+            self._checks.pop(token, None)
+            return NOTHING
+        settled = key in check["lost"] or self._settle()  # removals published before the response
+        with self._lock:
+            self._checks.pop(token, None)
+            if key in check["lost"]:
                 return len(check["lost"]), 0
-            if self._errors() != check["errors"]:
-                return None, None
-            return 0, len(check["chain"]) - len(check["lost"])
+            if not settled or self.hybrid or check["concurrent"] or self._errors() != check["errors"]:
+                return NOTHING
+            return 0, len(check["keys"] - check["lost"])
 
-    def _settle(self) -> None:
-        """Wait until the subscriber has drained the socket (events published before
-        the response have been read), at most settle_seconds."""
+    def _settle(self) -> bool:
+        """Wait until the stream has caught up with now: a batch stamped later
+        than now was read (busy engine), or the socket was found empty (idle
+        engine). False if that did not happen within settle_seconds."""
         if self._thread is None:
-            return
-        asked, end = time.time(), time.time() + self.settle_seconds
-        while self._drained_at < asked and time.time() < end:
+            return True
+        asked = time.time()
+        end = asked + self.settle_seconds
+        while time.time() < end:
+            if self._drained_at >= asked or self._latest_ts >= asked:
+                return True
             time.sleep(0.002)
+        return False
 
     def snapshot(self) -> dict:
         with self._lock:
             alive = self._thread is not None and self._thread.is_alive()
-            return {"endpoint": self.endpoint, "connected": alive, **self.stats,
+            return {"endpoint": self.endpoint, "connected": alive, **self.stats, "hybrid_model": self.hybrid,
                     "gpu_blocks_tracked": len(self._alive), "sessions_tracked": len(self._windows),
                     "requests_in_flight": len(self._checks)}
 

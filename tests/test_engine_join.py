@@ -49,8 +49,8 @@ class AllBlocksCleared(KVCacheEvent):
 ENC = msgspec.msgpack.Encoder()
 
 
-def stored(hashes, session=None, medium="GPU", group=None, kind=None):
-    return BlockStored(block_hashes=hashes, parent_block_hash=None, token_ids=[1] * 16 * len(hashes),
+def stored(hashes, session=None, medium="GPU", group=None, kind=None, parent=None):
+    return BlockStored(block_hashes=hashes, parent_block_hash=parent, token_ids=[1] * 16 * len(hashes),
                        block_size=16, lora_id=None, medium=medium, lora_name=None, group_idx=group,
                        kv_cache_spec_kind=kind, session_id=session)
 
@@ -59,13 +59,13 @@ def decoded(*events):
     return msgspec.msgpack.decode(ENC.encode(EventBatch(ts=time.time(), events=list(events))))
 
 
-def turn(ev, session, cached, *events):
+def turn(ev, session, cached, *events, prompt=None):
     """Send the session's next request, deliver `events` while it is in flight,
     and judge it with the cached_tokens the engine reported."""
     token = ev.request_sent(session)
     for e in events:
-        ev.handle(decoded(e))
-    return ev.request_done(token, cached)
+        ev.handle(decoded(e) if not isinstance(e, list) else e)
+    return ev.request_done(token, cached, prompt)
 
 
 def test_judges_the_block_where_the_cache_read_stopped():
@@ -91,18 +91,52 @@ def test_output_blocks_and_older_chains_cannot_confirm_an_eviction():
     # Review findings: a template that strips earlier output leaves those blocks
     # unused; their routine eviction must not be read as this miss's cause.
     ev = EngineEvents()
-    turn(ev, "s", 0, stored([1, 2], "s"), stored([3, 4], "s"))  # prompt blocks 1-2, output blocks 3-4
+    turn(ev, "s", 0, stored([1, 2], "s"), stored([3, 4], "s", parent=2))  # prompt blocks 1-2, output 3-4
     ev.handle(decoded(BlockRemoved(block_hashes=[3, 4], medium="GPU")))
     assert turn(ev, "s", 16) == (0, 2)  # read stopped at block 1 (still there): not an eviction
 
 
-def test_hybrid_models_track_full_attention_only_and_offload_is_ignored():
+def test_offload_tier_removals_are_ignored():
+    ev = EngineEvents()
+    turn(ev, "s", 0, stored([5, 6], "s"))
+    ev.handle(decoded(BlockRemoved(block_hashes=[5], medium="CPU")))  # LMCache tier, not the GPU
+    assert turn(ev, "s", 0) == (0, 2)
+
+
+def test_hybrid_models_get_no_negative_claim():
+    # Review finding: the hit length is the minimum over groups, so a sliding-window
+    # eviction can stop the read while the full-attention block is still there.
     ev = EngineEvents()
     turn(ev, "s", 0, stored([5], "s", group=0, kind="full_attention"),
          stored([5], "s", group=1, kind="sliding_window"))
-    ev.handle(decoded(BlockRemoved(block_hashes=[5], medium="GPU", group_idx=1)))  # routine SW free
-    ev.handle(decoded(BlockRemoved(block_hashes=[5], medium="CPU", group_idx=0)))  # LMCache tier
-    assert turn(ev, "s", 0) == (0, 1)
+    assert ev.snapshot()["hybrid_model"]
+    assert turn(ev, "s", 0) == (None, None)
+    ev.handle(decoded(stored([7], "s", group=0, kind="full_attention")))
+    ev.handle(decoded(BlockRemoved(block_hashes=[7], medium="GPU", group_idx=0)))
+    assert turn(ev, "s", 0) == (1, 0)  # a removal actually seen is still a confirmed eviction
+
+
+def test_positions_come_from_parents_not_arrival_order():
+    # Review finding: a late event from the previous request must not shift positions.
+    ev = EngineEvents()
+    turn(ev, "s", 0, stored([1, 2], "s"))
+    token = ev.request_sent("s")
+    ev.handle(decoded(stored([3], "s", parent=2)))  # late tail of request 1
+    ev.handle(decoded(stored([1, 2, 3, 9], "s")))  # request 2 (full report), diverges at block 3
+    ev.request_done(token, 48)
+    ev.handle(decoded(BlockRemoved(block_hashes=[3], medium="GPU")))
+    assert turn(ev, "s", 48) == (0, 3)  # position 3 is block 9 (request 2's), still there
+
+
+def test_concurrent_requests_and_unreported_cache_get_no_claim():
+    ev = EngineEvents()
+    turn(ev, "s", 0, stored([1, 2], "s"))
+    a, b = ev.request_sent("s"), ev.request_sent("s")  # two in flight in one session
+    assert ev.request_done(a, 0) == (None, None) and ev.request_done(b, 0) == (None, None)
+    turn(ev, "t", 0, stored([4], "t"))
+    assert turn(ev, "t", None) == (None, None)  # vLLM did not report cached tokens
+    turn(ev, "u", 0, stored([5, 6], "u"))
+    assert turn(ev, "u", 30, prompt=40) == (None, None)  # a hit (75% cached) is never examined
 
 
 def test_restart_lost_messages_duplicates_and_bounds():

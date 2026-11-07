@@ -44,8 +44,11 @@ add little over inference.
      vLLM reports only *newly stored* blocks; in `full` mode it also reports the blocks a
      request *reused* (`kv_cache_manager.py`), so the whole prefix chain of each request is
      known, tagged with the session.
+   - Each block's position comes from its parent (`parent_block_hash`; vLLM reports reused
+     blocks from block 0 with no parent, then new blocks chained onto them), so late or
+     re-reported events cannot shift positions.
    - When a session's next request is sent, the blocks its **previous request** used are
-     frozen as the chain to judge, in order. Removals of those blocks are recorded from then
+     frozen as the chain to judge. Removals of those blocks are recorded from then
      until the response, so evictions while the request waits in vLLM's queue count.
    - At the response, `cached_tokens` says where the cache read stopped: block
      `cached_tokens // block_size` of the chain. **Only that block decides:**
@@ -54,10 +57,15 @@ add little over inference.
        tokens changed at that point. **Not an eviction**: `unknown`, with the two remaining
        explanations (token-level divergence, DP routing)
      - beyond the chain, or nothing known: the inference stands
+   - **A positive claim needs one removal actually seen. The negative claim needs all of:**
+     the stream caught up with the response (a batch stamped after it was read, or the
+     socket was empty, within 50 ms), no message lost meanwhile, a full-attention-only
+     model (on hybrid models the hit stops at the shortest group, so a sliding-window
+     eviction can leave the full-attention block in place), one request in flight for the
+     session, and vLLM reporting cached tokens. Otherwise: no claim, inference stands.
+   - Hits are never examined, so they never wait for the stream.
    - Judging only the stop point is what makes it robust: output blocks a template never
      reuses, and older chains, get evicted routinely and cannot confirm anything.
-   - Before deciding, Prefixwise waits until the subscriber has drained the socket (at most
-     50 ms), so removals published before the response have been read.
    - Only full-attention block groups are tracked, keyed by (group, hash). On hybrid models,
      sliding-window blocks are freed routinely without breaking the prefix.
 3. **LMCache and HiCache need nothing extra.** vLLM's `cached_tokens` includes tokens loaded
@@ -85,13 +93,15 @@ counting (weak evidence), and metrics polling (engine-wide).
   Per session only the head of the previous request's chain is kept (4,096 blocks: the head
   is what decides a low cache read), for at most 1,000 sessions.
 
-- **Concurrent requests in one session** share a window, so a chain can mix two branches.
-  Agents rarely send parallel requests in one session; the effect is a wrong position at worst.
+- **Concurrent requests in one session** share a window, so a chain can mix two branches:
+  detected, and those requests get no claim.
 
-Two rounds of independent review shaped this. The first version judged any removed block a
+Three rounds of independent review shaped this. The first version judged any removed block a
 session ever held (stale chains, output blocks), ignored hybrid models, raced the event
 stream, and mismatched session ids on retries; the second judged at send time and missed
-evictions while a request waits in vLLM's queue. The stop-point rule above answers all of them.
+evictions while a request waits in vLLM's queue; the third found hybrid models, a busy
+engine and concurrent requests could still produce a false "not an eviction", and that
+arrival order could shift positions. The rules above answer all of them.
 
 ## How it is validated
 
