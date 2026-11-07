@@ -370,3 +370,13 @@
   unanalysed endpoints (not recorded), HEAD/DELETE, Sonnet 4.6 price.
   Per-model lanes deferred to its own PR (changes E1 scoring).
 - Tests: 133 passed.
+
+## 2026-11-07 PST -- v0.3.0 released (tag on 343ce61); this entry commit 95a4fc408bf661401fe02b9534729310c3ccdeef
+- Release: GitHub release v0.3.0 created by Muse in the web UI (this
+  session's tag push got HTTP 403). Release workflow run #1 green
+  (build 43 s, publish 20 s, trusted publishing). PyPI: prefixwise 0.3.0
+  latest.
+- Verified here: clean venv, pip install prefixwise==0.3.0 -> version
+  0.3.0, `prefixwise prices`, mock serve + classify + priced report OK.
+- Found: BrokenPipeError traceback on `report | head`; fixed in this
+  commit (quiet exit). Tests: 134 passed.
