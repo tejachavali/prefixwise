@@ -412,6 +412,9 @@ class PrefixwiseProxy:
         if self.engine not in (None, "vllm", "sglang"):
             raise ValueError(f"unknown engine {self.engine!r}: expected vllm or sglang")
         kv_events = kv_events or os.environ.get("PREFIXWISE_KV_EVENTS") or None
+        if kv_events and self.engine != "vllm":
+            raise ValueError("--kv-events needs --engine vllm: SGLang's events cannot be attributed to "
+                             "sessions (see docs/ENGINES.md)")
         self.engine_events = None
         if kv_events:
             from .engines import EngineEvents
@@ -434,10 +437,6 @@ class PrefixwiseProxy:
         # a turn with the turn recorded just before it, never a torn state.
         self._lock = threading.Lock()
         self._upstream = threading.local()  # last upstream response headers, per thread
-        # vLLM stamps a body session_id onto its KV events (the engine join).
-        # SGLang reads session_id as its own stateful-session handle and
-        # rejects ids it did not open, so engines like it set this False.
-        self.forward_session_id = True
         self.last_snapshot: dict[str, RequestSnapshot] = _SessionMap(MAX_SESSIONS)
         self.last_response_id: dict[str, str | None] = _SessionMap(MAX_SESSIONS)
         self.last_seen: dict[str, float] = _SessionMap(MAX_SESSIONS)
@@ -471,9 +470,7 @@ class PrefixwiseProxy:
         session_id = str(headers.get("x-prefixwise-session-id") or body.get("session_id")
                          or (body.get("metadata") or {}).get("user_id") or "default")
         task_id = headers.get("x-prefixwise-task-id") or body.get("task_id")
-        forward_body = {k: v for k, v in body.items()
-                        if k not in PREFIXWISE_FIELDS
-                        or (provider == "vllm" and k == "session_id" and self.forward_session_id)}
+        forward_body = {k: v for k, v in body.items() if k not in PREFIXWISE_FIELDS}
         # E1-open retry turns: a harness-only upstream session id.
         # The proxy's own session (snapshot chain, gap_seconds) stays
         # session_id; only the identity sent upstream changes, so the
@@ -485,12 +482,10 @@ class PrefixwiseProxy:
         upstream_session_id = (body.get("prefixwise_upstream_session_id")
                                or headers.get("x-prefixwise-upstream-session-id"))
         upstream_session_id = str(upstream_session_id) if upstream_session_id else None
-        # vLLM stamps a body session_id onto its KV events: send ours so the engine
-        # join can attribute evicted blocks to this session. Never to SGLang
-        # (rejects unknown ids) or a hosted API (rejects unknown fields).
-        stamp = (provider == "vllm" and self.forward_session_id) or \
-                (self.engine == "vllm" and provider == "openai" and api == "chat")
-        if stamp:
+        # vLLM puts a body session_id on its KV events, so the engine join can
+        # attribute blocks to sessions. Only vLLM: SGLang rejects session ids it
+        # did not open, and hosted APIs reject unknown fields.
+        if self.engine == "vllm" and api == "chat":
             forward_body["session_id"] = upstream_session_id or session_id
         # Native diagnostics chaining. Anthropic: diagnostics object (GA,
         # no beta header). OpenAI: prompt_cache_options.comparison_response_id,
@@ -605,12 +600,9 @@ class PrefixwiseProxy:
                                ttl_seconds=ctx.get("ttl_seconds"),
                                fork_parent_session_id=ctx.get("fork_of"),
                                session_id=session_id)
+        curr.engine = self.engine is not None
         if self.engine_events is not None:
-            attributed, engine_wide, attributable = self.engine_events.for_turn(session_id)
-            if attributed:
-                curr.evicted_block_hashes = [f"block-{i}" for i in range(attributed)]
-            elif not attributable:
-                curr.engine_evicted_blocks = engine_wide
+            curr.evicted_blocks, curr.resident_blocks = self.engine_events.for_turn(session_id)
         if unknown_parent:
             result = Classification(MissCause.UNKNOWN, None,
                                     "previous_response_id points to a response this proxy never saw;"
@@ -1192,11 +1184,11 @@ def serve(host: str = "127.0.0.1", port: int = 8080, *, ledger_path: str | None 
         print(f"  fixes:    {', '.join(proxy.fixes) or 'none (pass-through)'}")
         print(f"  prices:   {len(proxy.prices.models)} models, table of {proxy.prices.as_of}"
               f" ({' + '.join(proxy.prices.sources)})")
-        if proxy.engine or proxy.engine_events:
-            ev = proxy.engine_events.endpoint if proxy.engine_events else "none (evictions read as routing misses)"
-            print(f"  engine:   {proxy.engine or 'unspecified'}; KV events: {ev}")
-            if proxy.engine == "sglang":
-                print("  note:     start SGLang with --enable-cache-report, or every turn looks like a miss")
+        if proxy.engine:
+            ev = proxy.engine_events.endpoint if proxy.engine_events else "none (evictions are inferred)"
+            print(f"  engine:   {proxy.engine} (one self-hosted engine); KV events: {ev}")
+            flag = "--enable-cache-report" if proxy.engine == "sglang" else "--enable-prompt-tokens-details"
+            print(f"  note:     start {proxy.engine} with {flag}, or every turn looks like a miss")
         print(f"  auth:     {'X-Prefixwise-Token required' if proxy.auth_token else 'none'}"
               + ("  (WARNING: listening beyond localhost without a token)" if exposed and not proxy.auth_token else ""))
         if not os.environ.get("PREFIXWISE_HMAC_KEY"):

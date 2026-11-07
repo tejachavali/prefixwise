@@ -14,10 +14,8 @@ unrelated prompts totalling 3x its GPU KV capacity, then return to the session (
 
 **What we already know (mock, and from the engines' source).** With an offload tier the
 hit is visible to Prefixwise: vLLM's `cached_tokens` counts tokens loaded from LMCache, and
-SGLang's counts host-tier hits. Without offload, Prefixwise today says `routing_miss`: it
-has no engine events, so it cannot tell an eviction from a request routed to another
-replica. That is the gap the engine join (KV events) closes; this experiment measures it on
-real engines before we build it.
+SGLang's counts host-tier hits. Without offload, Prefixwise with `--engine` says `evicted`
+(inferred), and with vLLM KV events, confirmed. The live runs check both on real engines.
 
 ## Run on Colab (L4, Qwen3-4B)
 
@@ -53,11 +51,10 @@ MODEL=Qwen/Qwen3-4B MAX_TOTAL_TOKENS=32768 HICACHE=1 ./experiments/e1_open/sglan
 python experiments/e_evict/e_evict.py --engine sglang-hicache --url http://127.0.0.1:30000 --model Qwen/Qwen3-4B
 ```
 
-**With the engine join** (the point of the experiment): repeat runs 1 and 3 with the engine's
-KV events on and `--kv-events tcp://127.0.0.1:5557` added to `e_evict.py` (`pip install -e ".[engines]"`
-first). vLLM: `vllm_server.sh` already publishes events. SGLang: `KV_EVENTS=1 ./experiments/e1_open/sglang_server.sh`.
-Expected: Prefixwise names the T3 miss `evicted` (vLLM: attributed to the session; SGLang:
-engine-wide), where without events it says `routing_miss`.
+**With KV events (vLLM only):** repeat run 1 with `--kv-events tcp://127.0.0.1:5557` added to
+`e_evict.py` (`pip install -e ".[engines]"` first; `vllm_server.sh` already publishes events).
+Expected: T3 is `evicted` with evidence starting "confirmed", instead of "inferred". SGLang's
+events cannot be attributed to sessions, so there is no SGLang variant (docs/ENGINES.md).
 
 Each run writes `results/*.md` and `.json`. If a server flag is rejected, check
 `--help` for that release and note the change; don't change the harness to make a run pass.
@@ -75,4 +72,4 @@ Each run writes `results/*.md` and `.json`. If a server flag is rejected, check
 - **vLLM** `cached_tokens` = local GPU hits + external (LMCache) tokens, decided when the
   request is admitted; a failed LMCache load can over-report.
 - Both engines publish `BlockStored` / `BlockRemoved` KV events over ZMQ
-  (`--kv-events-config`), the input for the engine join.
+  (`--kv-events-config`); only vLLM's can be attributed to sessions. See docs/ENGINES.md.

@@ -125,7 +125,7 @@ def test_proxy_strips_upstream_session_override():
                      "usage": {"prompt_tokens": 2000,
                                "prompt_tokens_details": {"cached_tokens": 0}}}
 
-    proxy = PrefixwiseProxy()
+    proxy = PrefixwiseProxy(engine="vllm")  # vLLM: the body session_id is sent
     proxy._forward = _capture  # type: ignore[method-assign]
     body = {"model": "m", "session_id": "s1",
             "messages": [{"role": "user", "content": "hi"}],

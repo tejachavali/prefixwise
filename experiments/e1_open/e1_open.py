@@ -351,8 +351,9 @@ def retry_upstream_ids(session_id: str, turn_no: int) -> tuple[str, str]:
 
 def run(*, vllm_url: str, model: str, model_alias: str, mock: bool,
         output_dir: Path, max_turns: int | None = None, engine: str = "vllm") -> tuple[list[dict], dict]:
-    proxy = PrefixwiseProxy(upstream_url=vllm_url, api_key="sk-dummy") if not mock else PrefixwiseProxy()
-    proxy.forward_session_id = engine.startswith("vllm")
+    kind = "vllm" if engine.startswith("vllm") else "sglang"
+    proxy = (PrefixwiseProxy(upstream_url=vllm_url, api_key="sk-dummy", engine=kind)
+             if not mock else PrefixwiseProxy(engine=kind))
     # Mock mode: replace the proxy's forwarder with a simulator that
     # returns cached_tokens per injected cause. Real proxy, real
     # classifier, real ledger; only the upstream is simulated.

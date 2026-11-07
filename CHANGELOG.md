@@ -1,14 +1,19 @@
 # Changelog
 
+## Unreleased
+
+- **Self-hosted engines (vLLM, SGLang, LMCache):** `prefixwise serve --engine vllm|sglang` declares one self-hosted engine. With no routing possible, an unchanged-prefix miss is named `evicted` (inferred, and the evidence says so) instead of `routing_miss`. On vLLM, `--kv-events tcp://host:5557` reads the engine's KV-cache events: Prefixwise's session id rides in the request body onto vLLM's `BlockStored`, so the verdict becomes `evicted` confirmed with a block count, or `unknown` ("not an eviction: the engine still holds this session's blocks"). Prefixes restored by LMCache or HiCache count as hits. `GET /engine` shows the stream. Optional extra `prefixwise[engines]`. Design and limits: `docs/ENGINES.md`.
+- **SGLang and LMCache:** E1-open takes `--engine vllm | vllm-lmcache | sglang | sglang-hicache`, with launch scripts `sglang_server.sh` and `vllm_lmcache_server.sh` (flags checked against each project's source). Prefixwise sends a body `session_id` only to vLLM; SGLang reads it as its own session handle and rejects unknown ones.
+- **E-evict** (`experiments/e_evict`): floods an engine past its GPU KV capacity and checks whether the session's prefix survives, with and without an offload tier (LMCache, HiCache), and with and without KV events.
+- **E1-open report:** the misses list compares against the expected cause, so `switch_back` hits no longer appear as misses.
+- **Fixed:** `vllm_server.sh` enabled KV events with a field name current vLLM rejects (`enable_kv_cache_events` is the field).
+
 ## 0.3.1: 2026-11-07
 
 Production hardening, found by a new benchmark; per-model lanes; OpenAI prices.
 **Upgrading:** existing ledgers are migrated in place on first start. Rows written before
 0.3.1 have no timestamp, so `prefixwise prune` keeps them unless you add `--include-undated`.
 
-- **SGLang and LMCache:** E1-open takes `--engine vllm | vllm-lmcache | sglang | sglang-hicache`, with launch scripts `sglang_server.sh` and `vllm_lmcache_server.sh` (flags checked against each project's source). The proxy no longer forwards `session_id` to engines that reject it (SGLang reads it as its own session handle).
-- **E-evict** (`experiments/e_evict`): floods an engine past its GPU KV capacity and checks whether the session's prefix survives, with and without an offload tier, and what Prefixwise names. In mock it shows the known gap: an engine eviction is reported as `routing_miss` until the engine join exists.
-- **E1-open report:** the misses list compares against the expected cause, so `switch_back` hits no longer appear as misses.
 - **Production benchmark** (`benchmarks/bench.py`): added latency, throughput, memory, a soak and 13 failure cases, against the real `prefixwise serve` and a fake upstream. Results in `benchmarks/runs/`; README "Running in production" summarises them. CI runs the failure cases on every push.
 - **3-4x lower overhead on long prompts:** masked block hashes are cached, since an agent resends the same prefix every turn. A 120k-token request went from +50 ms to +13 ms (p50).
 - **Fails open:** a ledger write or classifier failure no longer turns a paid upstream response into a 500 (or, mid-stream, appends an error to the stream). The response passes through with `X-Prefixwise-Error: not recorded`.

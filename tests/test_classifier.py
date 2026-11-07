@@ -141,8 +141,24 @@ def test_routing_miss_needs_a_short_gap():
 
 
 def test_evicted_only_when_cache_read_low():
-    assert _pair(gap=30, evicted_block_hashes=["h1"]).cause is MissCause.EVICTED
-    assert _pair(gap=30, cached=1900, evicted_block_hashes=["h1"]).cause is MissCause.NONE
+    assert _pair(gap=30, evicted_blocks=1).cause is MissCause.EVICTED
+    assert _pair(gap=30, cached=1900, evicted_blocks=1).cause is MissCause.NONE
+
+
+def test_self_hosted_engine_miss_is_eviction_unless_events_rule_it_out():
+    # gap 90 s: past the retry window. One engine: no routing. Without events the verdict is inferred and says so.
+    c = _pair(gap=90, engine=True)
+    assert c.cause is MissCause.EVICTED and c.evidence.startswith("inferred")
+    # Events: this session's blocks removed -> confirmed.
+    c = _pair(gap=90, engine=True, evicted_blocks=3, resident_blocks=0)
+    assert c.cause is MissCause.EVICTED and c.evidence.startswith("confirmed")
+    # Events: nothing removed and blocks still resident -> not an eviction.
+    c = _pair(gap=90, engine=True, evicted_blocks=0, resident_blocks=12)
+    assert c.cause is MissCause.UNKNOWN and c.evidence.startswith("not an eviction")
+    # Events on but this session never attributed: back to the inference.
+    assert _pair(gap=90, engine=True, evicted_blocks=0, resident_blocks=0).evidence.startswith("inferred")
+    # A hosted provider is unchanged.
+    assert _pair(gap=90).cause is MissCause.ROUTING_MISS
 
 
 def test_fork_boundary_on_first_turn_only():

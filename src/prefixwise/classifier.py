@@ -82,11 +82,13 @@ class RequestSnapshot:
     compaction_event: bool = False
     fork_parent_session_id: str | None = None
     session_id: str | None = None
-    # Engine KV events between the two turns (prefixwise.engines): this
-    # session's GPU blocks the engine removed (vLLM, attributed by session id),
-    # and, where blocks cannot be attributed (SGLang), all GPU blocks removed.
-    evicted_block_hashes: list[str] = field(default_factory=list)
-    engine_evicted_blocks: int = 0
+    # Self-hosted engine (vLLM, SGLang) behind the proxy: one cache, no routing.
+    engine: bool = False
+    # From the engine's KV events (prefixwise.engines; None = no event stream):
+    # this session's blocks removed from GPU since its last turn, and its
+    # blocks still resident.
+    evicted_blocks: int | None = None
+    resident_blocks: int | None = None
     # Anthropic cache_control present anywhere in the request.
     has_breakpoint: bool = False
     breakpoint_after_volatile: bool = False
@@ -240,11 +242,10 @@ def classify(prev: RequestSnapshot | None, curr: RequestSnapshot,
 
     # From here the prefix was reusable but cache_read was low.
     # Engine eviction events are direct evidence; they outrank inference.
-    if curr.evicted_block_hashes:
-        n = len(curr.evicted_block_hashes)
+    if curr.evicted_blocks:
         return Classification(MissCause.EVICTED, None,
-                              f"the engine removed {n} of this session's KV blocks from GPU memory "
-                              "between the two turns (BlockRemoved events)",
+                              f"confirmed: the engine removed {curr.evicted_blocks} of this session's KV blocks "
+                              "from GPU memory since its last turn (KV events)",
                               secondary, native_reason)
 
     # Identical replay within a short window is a retry, not a cache miss.
@@ -254,12 +255,20 @@ def classify(prev: RequestSnapshot | None, curr: RequestSnapshot,
         return Classification(MissCause.RETRY_REPLAY, False,
                               "identical request within the retry window", secondary, native_reason)
 
-    # Engine-wide evictions (blocks not attributable to sessions, e.g. SGLang):
-    # weaker evidence, so it ranks below a retry and says so.
-    if curr.engine_evicted_blocks:
+    # One self-hosted engine: there is no routing, so an unchanged prefix that was
+    # not reused is usually an eviction. Events can rule that out (docs/ENGINES.md).
+    if curr.engine:
+        if curr.evicted_blocks == 0 and curr.resident_blocks:
+            return Classification(MissCause.UNKNOWN, None,
+                                  f"not an eviction: the engine still holds {curr.resident_blocks} of this "
+                                  "session's KV blocks and removed none since its last turn. The token prefix "
+                                  "probably differs from what the request shows (chat template rendering), or "
+                                  "the request went to another data-parallel rank",
+                                  secondary, native_reason)
         return Classification(MissCause.EVICTED, None,
-                              f"the engine evicted {curr.engine_evicted_blocks} KV blocks from GPU memory since "
-                              "this session's last turn (engine-wide; not attributed to sessions)",
+                              "inferred: one self-hosted engine, prefix unchanged but not reused. Usually the "
+                              "engine evicted it (GPU memory full); chat template re-rendering or data-parallel "
+                              "routing look the same. Confirm with --kv-events (vLLM)",
                               secondary, native_reason)
 
     gap, ttl = curr.gap_seconds, curr.ttl_seconds

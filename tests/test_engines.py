@@ -9,9 +9,8 @@ from prefixwise.proxy import PrefixwiseProxy
 ROOT = Path(__file__).resolve().parent.parent
 
 
-def _forwarded_body(forward_session_id: bool) -> dict:
-    proxy = PrefixwiseProxy(upstream_url="http://unused", api_key="k")
-    proxy.forward_session_id = forward_session_id
+def _forwarded_body(engine) -> dict:
+    proxy = PrefixwiseProxy(upstream_url="http://unused", api_key="k", engine=engine)
     seen = {}
 
     def capture(provider, body, request_id, session_id, client_headers, api="chat"):
@@ -25,8 +24,9 @@ def _forwarded_body(forward_session_id: bool) -> dict:
 
 def test_session_id_reaches_vllm_but_not_sglang():
     # vLLM stamps a body session_id onto KV events; SGLang rejects session ids it did not open.
-    assert _forwarded_body(True)["session_id"] == "s1"
-    assert "session_id" not in _forwarded_body(False)
+    assert _forwarded_body("vllm")["session_id"] == "s1"
+    assert "session_id" not in _forwarded_body("sglang")
+    assert "session_id" not in _forwarded_body(None)  # hosted APIs reject unknown fields
 
 
 def run(script, *args):
@@ -39,11 +39,11 @@ def test_e1_open_mock_on_each_engine(tmp_path):
         assert r.returncode == 0 and "Pass: YES" in r.stdout, r.stdout + r.stderr
 
 
-def test_e_evict_mock_shows_offload_recovers_and_the_engine_join_gap(tmp_path):
+def test_e_evict_mock_offload_recovers_gpu_only_is_evicted(tmp_path):
     gpu = run("experiments/e_evict/e_evict.py", "--mock", "--engine", "vllm", "--repeats", "2",
               "--output-dir", str(tmp_path))
     assert gpu.returncode == 0, gpu.stdout + gpu.stderr
-    assert "T3 0/" in gpu.stdout  # evicted
+    assert "T3 0/" in gpu.stdout and "`evicted`" in gpu.stdout  # one engine, prefix gone: inferred eviction
     off = run("experiments/e_evict/e_evict.py", "--mock", "--engine", "vllm-lmcache", "--repeats", "2",
               "--output-dir", str(tmp_path))
     assert off.returncode == 0 and "`none` x2 (2/2 correct)" in off.stdout, off.stdout

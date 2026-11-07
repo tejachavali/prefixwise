@@ -432,3 +432,8 @@
 - serve --engine/--kv-events, GET /engine, extra prefixwise[engines].
 - vllm_server.sh: enable_kv_cache_events (old key not in current vLLM).
 - Tests: 162 passed (9 engine-join, incl. vLLM wire format over real ZMQ).
+- Revised after review: --engine -> inferred `evicted` (no deps); vLLM
+  --kv-events -> confirmed, or `unknown` when blocks are still resident.
+  Dropped SGLang events and engine-wide counts. Engine restart (seq reset)
+  clears residency; lost/garbled messages stop the negative claim.
+  docs/ENGINES.md. Tests: 162 passed.

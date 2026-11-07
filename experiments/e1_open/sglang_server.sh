@@ -16,8 +16,6 @@
 #   --enable-hierarchical-cache  HiCache: GPU -> host memory tier. cached_tokens
 #                           includes host-tier hits.
 #   --max-total-tokens N    caps the GPU KV pool, so eviction is reachable.
-#   KV_EVENTS=1             publishes BlockStored/BlockRemoved on tcp://*:5557
-#                           (for the engine join; E1/E-evict do not need it).
 # Run `python -m sglang.launch_server --help` if a flag is rejected: SGLang
 # renames flags between releases.
 set -euo pipefail
@@ -32,9 +30,6 @@ if [[ "${HICACHE:-0}" == 1 ]]; then
 fi
 if [[ -n "${MAX_TOTAL_TOKENS:-}" ]]; then
   ARGS+=(--max-total-tokens "$MAX_TOTAL_TOKENS")
-fi
-if [[ "${KV_EVENTS:-0}" == 1 ]]; then
-  ARGS+=(--kv-events-config '{"publisher": "zmq", "topic": "kv-events", "endpoint": "tcp://*:5557"}')
 fi
 python3 -c "import sglang; print('SGLang', sglang.__version__)" || {
   echo "SGLang is not installed: pip install 'sglang[all]'"; exit 1; }

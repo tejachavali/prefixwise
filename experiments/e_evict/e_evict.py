@@ -81,8 +81,7 @@ def flood(url: str, model: str, total_tokens: int, each: int, seed: int, mock_st
 def run(args) -> dict:
     engine = "vllm" if args.engine.startswith("vllm") else "sglang"
     proxy = (PrefixwiseProxy(upstream_url=args.url, api_key="sk-dummy", engine=engine, kv_events=args.kv_events)
-             if not args.mock else PrefixwiseProxy())
-    proxy.forward_session_id = args.engine.startswith("vllm")
+             if not args.mock else PrefixwiseProxy(engine=engine))
     mock_state = None
     if args.mock:
         # Simulated engine: hits until flooded; after a flood only an offload tier keeps the prefix.

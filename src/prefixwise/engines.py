@@ -1,143 +1,117 @@
-"""Engine join: read a self-hosted engine's KV-cache events, so an engine eviction
-is named `evicted` instead of looking like a routing miss.
+"""Engine join for vLLM: its KV-cache events tell an eviction from everything else.
 
-vLLM and SGLang publish the same stream when started with --kv-events-config:
-ZMQ PUB, multipart [topic, seq (8 bytes, big-endian), payload], where payload is
-msgpack [ts, events, data_parallel_rank?] and each event is a map tagged by
-"type": BlockStored {block_hashes, medium, session_id, ...}, BlockRemoved
-{block_hashes, medium}, AllBlocksCleared. (vllm/distributed/kv_events.py,
-sglang/srt/disaggregation/kv_events.py, read 2026-11-07.)
+Behind one self-hosted engine, a request whose prefix is unchanged but was not
+reused has three usual causes: the engine evicted the blocks (out of GPU
+memory), the token prefix differs although the request does not (a chat template
+that renders history differently), or the request went to another data-parallel
+rank. The response alone cannot separate them. vLLM's KV events can:
 
-Attribution:
-- vLLM stamps the request's body `session_id` onto BlockStored. With
-  `--engine vllm`, Prefixwise sends its session id there, so a later
-  BlockRemoved of those blocks is attributed to exactly that session.
-- SGLang reads a body `session_id` as its own stateful-session handle and
-  rejects unknown ones, so Prefixwise does not send it; there, evidence is
-  engine-wide ("the engine evicted N blocks since this session's last turn").
-  That is weaker evidence and is labelled as such.
+- vLLM puts the request body's `session_id` on every BlockStored event. With
+  `--engine vllm` Prefixwise sends its session id there, so this module knows
+  which blocks each session holds on the GPU.
+- BlockRemoved of one of those blocks between two turns: a confirmed eviction.
+- No removal and still a miss: the engine still holds the session's blocks, so it
+  was not an eviction (see docs/ENGINES.md).
 
-Only GPU-tier removals (medium "GPU" or unset) count as evictions. Blocks
-removed from an offload tier (CPU/STORAGE, e.g. LMCache) are counted
-separately. With an offload tier a GPU eviction that is restored shows up as a
-hit, and a hit wins before any eviction rule.
+Wire format (vllm/distributed/kv_events.py, 2026-11-06): ZMQ PUB, multipart
+[topic, seq (8 bytes, big-endian), msgpack [ts, events, dp_rank?]], each event a
+map tagged by "type". Only GPU removals count; offload tiers (LMCache) are
+ignored, and a prefix they restore is a hit anyway.
 
-Needs `pip install "prefixwise[engines]"` (pyzmq, msgspec). The core proxy
-stays standard-library only.
+SGLang publishes the same format, but it reads a body `session_id` as its own
+session handle and rejects unknown ones, so its events cannot be attributed to
+sessions and are not used.
+
+Needs `pip install "prefixwise[engines]"` (pyzmq, msgspec).
 """
 
 from __future__ import annotations
 
 import threading
-import time
 from collections import OrderedDict
 
-GPU_MEDIA = (None, "GPU", "gpu")
+GPU = (None, "GPU")
 
 
 class EngineEvents:
-    """Consumes KV events and answers, per turn: what was evicted since this
-    session's previous turn? Thread-safe; bounded memory."""
-
-    def __init__(self, endpoint: str | None = None, topic: str = "", max_blocks: int = 2_000_000,
-                 max_sessions: int = 10_000):
-        self.endpoint, self.topic = endpoint, topic
-        self.max_blocks, self.max_sessions = max_blocks, max_sessions
+    def __init__(self, endpoint: str | None = None, max_blocks: int = 500_000):
+        self.endpoint = endpoint
+        self.max_blocks = max_blocks  # far above any engine's GPU block count
         self._lock = threading.Lock()
-        self._block_sessions: OrderedDict = OrderedDict()  # block hash -> set of session ids
-        self._evicted: OrderedDict = OrderedDict()  # session -> its GPU blocks removed since last turn
-        self._attributed: OrderedDict = OrderedDict()  # sessions seen in BlockStored.session_id
-        self._mark: OrderedDict = OrderedDict()  # session -> removed_gpu at its last turn
-        self.stats = {"batches": 0, "events": 0, "stored": 0, "removed_gpu": 0, "removed_offload": 0,
-                      "cleared": 0, "decode_errors": 0, "dropped_messages": 0, "last_event_at": None}
+        self._owners: OrderedDict = OrderedDict()  # resident block hash -> session ids that stored it
+        self._resident: dict[str, int] = {}  # session -> its blocks still on the GPU
+        self._removed: dict[str, int] = {}  # session -> its blocks removed since its last turn
+        self.stats = {"batches": 0, "stored": 0, "removed": 0, "cleared": 0, "engine_restarts": 0,
+                      "dropped_messages": 0, "decode_errors": 0}
         self._last_seq: int | None = None
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
-    # -- events --------------------------------------------------------------------
+    # -- events ----------------------------------------------------------------------
 
-    @staticmethod
-    def _bounded_set(d: OrderedDict, key, limit: int, value=True):
-        d[key] = value
-        d.move_to_end(key)
-        while len(d) > limit:
-            d.popitem(last=False)
-
-    def handle_batch(self, batch, seq: int | None = None) -> None:
-        """One decoded payload: [ts, events, dp_rank?] (or a dict with 'events')."""
-        events = batch.get("events") if isinstance(batch, dict) else (batch[1] if len(batch) > 1 else [])
+    def handle(self, batch, seq: int | None = None) -> None:
+        """One decoded payload: [ts, events, dp_rank?]."""
         with self._lock:
-            if seq is not None:
-                if self._last_seq is not None and seq > self._last_seq + 1:
+            if seq is not None and self._last_seq is not None:
+                if seq > self._last_seq + 1:  # lost messages: residency is no longer certain
                     self.stats["dropped_messages"] += seq - self._last_seq - 1
-                self._last_seq = seq
+                elif seq <= self._last_seq:  # sequence restarted: the engine restarted, its cache is empty
+                    self.stats["engine_restarts"] += 1
+                    self._clear()
+            self._last_seq = seq if seq is not None else self._last_seq
             self.stats["batches"] += 1
-            self.stats["last_event_at"] = time.time()
-            for ev in events or []:
-                self.stats["events"] += 1
-                kind = ev.get("type") if isinstance(ev, dict) else None
-                if kind == "BlockStored":
-                    self._stored(ev)
-                elif kind == "BlockRemoved":
-                    self._removed(ev)
+            for ev in batch[1]:
+                kind = ev.get("type")
+                if kind == "BlockStored" and ev.get("medium") in GPU:
+                    self._store(ev.get("block_hashes") or [], ev.get("session_id"))
+                elif kind == "BlockRemoved" and ev.get("medium") in GPU:
+                    for h in ev.get("block_hashes") or []:
+                        self._remove(h)
                 elif kind == "AllBlocksCleared":
-                    self._cleared()
+                    self.stats["cleared"] += 1
+                    self._clear()
 
-    def _stored(self, ev: dict) -> None:
-        hashes = ev.get("block_hashes") or []
+    def _store(self, hashes: list, session: str | None) -> None:
         self.stats["stored"] += len(hashes)
-        sid = ev.get("session_id")
-        if not sid or ev.get("medium") not in GPU_MEDIA:
+        if not session:
             return
-        self._bounded_set(self._attributed, sid, self.max_sessions)
         for h in hashes:
-            owners = self._block_sessions.get(h)
-            if owners is None:
-                owners = set()
-            owners.add(sid)
-            self._bounded_set(self._block_sessions, h, self.max_blocks, owners)
+            owners = self._owners.setdefault(h, set())
+            if session not in owners:
+                owners.add(session)
+                self._resident[session] = self._resident.get(session, 0) + 1
+            self._owners.move_to_end(h)
+        while len(self._owners) > self.max_blocks:  # bound memory if removals were missed
+            for s in self._owners.popitem(last=False)[1]:
+                self._resident[s] = max(0, self._resident.get(s, 0) - 1)
 
-    def _removed(self, ev: dict) -> None:
-        hashes = ev.get("block_hashes") or []
-        if ev.get("medium") not in GPU_MEDIA:
-            self.stats["removed_offload"] += len(hashes)
-            return
-        self.stats["removed_gpu"] += len(hashes)
-        for h in hashes:
-            for sid in self._block_sessions.pop(h, ()):
-                self._bounded_set(self._evicted, sid, self.max_sessions, self._evicted.get(sid, 0) + 1)
+    def _clear(self) -> None:
+        for h in list(self._owners):
+            self._remove(h)
 
-    def _cleared(self) -> None:
-        self.stats["cleared"] += 1
-        n = max(1, len(self._block_sessions))
-        self.stats["removed_gpu"] += n
-        for owners in self._block_sessions.values():
-            for sid in owners:
-                self._bounded_set(self._evicted, sid, self.max_sessions, self._evicted.get(sid, 0) + 1)
-        self._block_sessions.clear()
+    def _remove(self, h) -> None:
+        self.stats["removed"] += 1
+        for s in self._owners.pop(h, ()):
+            self._resident[s] = max(0, self._resident.get(s, 0) - 1)
+            self._removed[s] = self._removed.get(s, 0) + 1
 
     # -- per turn --------------------------------------------------------------------
 
-    def for_turn(self, session_id: str) -> tuple[int, int, bool]:
-        """Consume what happened since this session's previous turn.
-
-        Returns (attributed, engine_wide, attributable): this session's GPU blocks
-        removed; GPU blocks the engine removed in total; and whether this session's
-        blocks are attributed at all (vLLM with session ids) so callers can prefer
-        the precise signal and ignore the engine-wide one."""
+    def for_turn(self, session_id: str) -> tuple[int, int]:
+        """(this session's blocks removed since its last turn, its blocks still resident).
+        Consumes the removal count. Once any message was lost or unreadable, a
+        removal may have been missed, so residency is reported as 0 (unknown) and
+        the classifier falls back to inference instead of ruling eviction out."""
         with self._lock:
-            attributed = self._evicted.pop(session_id, 0)
-            total = self.stats["removed_gpu"]
-            prev = self._mark.get(session_id)
-            self._bounded_set(self._mark, session_id, self.max_sessions, total)
-            engine_wide = total - prev if prev is not None else 0
-            return attributed, engine_wide, session_id in self._attributed
+            removed = self._removed.pop(session_id, 0)
+            trusted = not (self.stats["dropped_messages"] or self.stats["decode_errors"])
+            return removed, self._resident.get(session_id, 0) if trusted else 0
 
     def snapshot(self) -> dict:
         with self._lock:
-            return {"endpoint": self.endpoint, "connected": self._thread is not None and self._thread.is_alive(),
-                    **self.stats, "tracked_blocks": len(self._block_sessions),
-                    "attributed_sessions": len(self._attributed)}
+            alive = self._thread is not None and self._thread.is_alive()
+            return {"endpoint": self.endpoint, "connected": alive, **self.stats,
+                    "tracked_blocks": len(self._owners), "tracked_sessions": len(self._resident)}
 
     # -- subscriber ------------------------------------------------------------------
 
@@ -163,24 +137,20 @@ class EngineEvents:
         import msgspec
         import zmq
 
-        decoder = msgspec.msgpack.Decoder()
-        ctx = zmq.Context.instance()
-        sock = ctx.socket(zmq.SUB)
+        decode = msgspec.msgpack.Decoder().decode
+        sock = zmq.Context.instance().socket(zmq.SUB)
         sock.setsockopt(zmq.LINGER, 0)
-        sock.setsockopt(zmq.SUBSCRIBE, self.topic.encode())
+        sock.setsockopt(zmq.SUBSCRIBE, b"")
         sock.connect(self.endpoint)
         ready.set()
-        poller = zmq.Poller()
-        poller.register(sock, zmq.POLLIN)
         try:
             while not self._stop.is_set():
-                if not dict(poller.poll(200)):
+                if not sock.poll(200):
                     continue
                 frames = sock.recv_multipart()
-                payload = frames[-1]
                 seq = int.from_bytes(frames[-2], "big", signed=True) if len(frames) >= 3 else None
                 try:
-                    self.handle_batch(decoder.decode(payload), seq)
+                    self.handle(decode(frames[-1]), seq)
                 except Exception:  # a malformed batch must never stop the subscriber
                     with self._lock:
                         self.stats["decode_errors"] += 1

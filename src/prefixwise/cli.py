@@ -307,10 +307,11 @@ def build_parser() -> argparse.ArgumentParser:
                         "Available: canonical_tools. Default: $PREFIXWISE_FIXES or none")
     ledger_opt(p)
     p.add_argument("--engine", choices=["vllm", "sglang"],
-                   help="self-hosted engine behind --upstream (vllm: send session ids for the engine join)")
+                   help="one self-hosted engine behind --upstream: no routing, so an unchanged prefix "
+                        "that misses is an eviction (inferred; see --kv-events)")
     p.add_argument("--kv-events", metavar="ENDPOINT",
-                   help="the engine's KV-event stream, e.g. tcp://127.0.0.1:5557, so engine evictions are "
-                        "named 'evicted' (needs: pip install 'prefixwise[engines]')")
+                   help="vLLM only: its KV-event stream, e.g. tcp://127.0.0.1:5557, to confirm evictions "
+                        "or rule them out (needs: pip install 'prefixwise[engines]')")
     p.set_defaults(func=cmd_serve)
 
     p = sub.add_parser("report", help="summarise the ledger")
