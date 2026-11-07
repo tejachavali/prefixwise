@@ -420,6 +420,10 @@ class PrefixwiseProxy:
         # Per-provider upstreams ({"anthropic": url, "openai": url}) override upstream_url, so
         # one proxy can serve an agent that talks to both (prefixwise run).
         self.upstreams = {k: v.rstrip("/") for k, v in (upstreams or {}).items() if v}
+        # Providers whose upstream base already ends in its API version, like an
+        # OPENAI_BASE_URL (https://api.openai.com/v1, or a gateway's .../openai):
+        # requests go to <base>/chat/completions, exactly as the SDK would send them.
+        self.versioned = set()
         self.api_key = api_key or os.environ.get("PREFIXWISE_API_KEY")
         self.mock = mock if mock is not None else (
             not (self.upstream_url or self.upstreams) or os.environ.get("PREFIXWISE_MOCK_UPSTREAM") == "1")
@@ -740,11 +744,15 @@ class PrefixwiseProxy:
         query = client_headers.get(QUERY_KEY)
         if query:  # e.g. Anthropic SDK's ?beta=true: forwarded as the client sent it
             path += "?" + query
-        return urllib.request.Request(self.base_url(provider) + path, method="POST",
+        return urllib.request.Request(self.target(provider, path), method="POST",
                                       data=json.dumps(body).encode(), headers=headers)
 
-    def base_url(self, provider: str) -> str:
-        return self.upstreams.get("anthropic" if provider == "anthropic" else "openai", self.upstream_url)
+    def target(self, provider: str, path: str) -> str:
+        """The upstream URL for a request path like /v1/chat/completions."""
+        key = "anthropic" if provider == "anthropic" else "openai"
+        if key in self.versioned and path.startswith("/v1/"):
+            path = path[3:]
+        return self.upstreams.get(key, self.upstream_url) + path
 
     def passthrough(self, method: str, raw_path: str, body: bytes | None,
                     client_headers: dict[str, str]) -> tuple[int, str, bytes]:
@@ -773,7 +781,7 @@ class PrefixwiseProxy:
                 headers["authorization"] = f"Bearer {self.api_key}"
         if anthropic:
             headers.setdefault("anthropic-version", ANTHROPIC_VERSION)
-        req = urllib.request.Request(self.base_url("anthropic" if anthropic else "openai") + raw_path,
+        req = urllib.request.Request(self.target("anthropic" if anthropic else "openai", raw_path),
                                      method=method, data=body or None, headers=headers)
         try:
             with urllib.request.urlopen(req, timeout=UPSTREAM_TIMEOUT) as resp:

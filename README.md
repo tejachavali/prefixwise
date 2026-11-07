@@ -48,6 +48,8 @@ Expected misses (not waste): 2 x first request of a session: nothing to reuse ye
 
 (Illustrative output. `prefixwise run --mock -- <agent>` tries it with synthetic responses and no API calls.)
 
+Ctrl-C goes to the agent as usual. If you already set `ANTHROPIC_BASE_URL` or `OPENAI_BASE_URL` (a gateway), Prefixwise forwards there, so the agent reaches the same place. It works with agents that use an **API key**; an agent signed in with a subscription instead (for example Codex with a ChatGPT login) cannot be routed through a proxy, and the report says so if the provider rejects it.
+
 ### Running the proxy yourself
 
 For a long-running proxy, start it and point any OpenAI- or Anthropic-compatible client at it:

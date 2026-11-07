@@ -248,11 +248,11 @@ class Ledger:
             names = [d[0] for d in cur.description]
         return dict(zip(names, row)) if row else None
 
-    def summary(self) -> dict:
-        """Totals across the whole ledger, for reports. Defined in prefixwise.metrics."""
+    def summary(self, since: float | None = None) -> dict:
+        """Totals across the whole ledger (or since a time), for reports. Defined in prefixwise.metrics."""
         from . import metrics
 
-        m = metrics.summary(self)
+        m = metrics.summary(self, since=since)
         priced = m["requests_priced"] or 0
         return {"requests": m["requests"] or 0, "failed_requests": m["requests_failed"] or 0,
                 "prompt_tokens": m["prompt_tokens"] or 0, "cached_tokens": m["cached_tokens"] or 0,
@@ -268,7 +268,7 @@ class Ledger:
 
     ROLLUP_KEYS = ("cause", "session_id", "agent_id", "model", "provider", "task_id")
 
-    def rollup(self, by: str = "cause") -> list[dict]:
+    def rollup(self, by: str = "cause", since: float | None = None) -> list[dict]:
         """Requests and tokens grouped by one column, most avoidable first.
         Defined in prefixwise.metrics; groups with no verdict (failures only) are left out."""
         from . import metrics
@@ -278,7 +278,7 @@ class Ledger:
         dim = {"session_id": "session", "agent_id": "agent", "task_id": "task"}.get(by, by)
         rows = metrics.query(self, ["requests", "prompt_tokens", "cached_tokens", "avoidable_tokens",
                                     "requests_wasteful", "requests_priced", "cost_usd", "avoidable_cost_usd",
-                                    "tasks_successful", "tokens_per_successful_task"], by=dim)
+                                    "tasks_successful", "tokens_per_successful_task"], by=dim, since=since)
         out = [{by: r[dim], "requests": r["requests"], "prompt_tokens": r["prompt_tokens"],
                 "cached_tokens": r["cached_tokens"], "avoidable_tokens": r["avoidable_tokens"],
                 "waste_requests": r["requests_wasteful"] or 0, "priced_requests": r["requests_priced"] or 0,

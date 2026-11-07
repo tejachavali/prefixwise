@@ -114,15 +114,14 @@ def cmd_report(args) -> int:
     found = findings(led, since=since)
     detail = args.detail or args.by is not None
     args.by = args.by or "cause"
-    summary = led.summary()
-    rows = led.rollup(args.by)[: args.limit]
+    summary = led.summary(since=since)
+    rows = led.rollup(args.by, since=since)[: args.limit]
     if args.json:
         print(json.dumps({"findings": found, "summary": summary, "by": args.by, "rows": rows}, indent=2))
         return 0
     print(render(found))
-    if since is not None or not detail:
-        if since is None:
-            print("\nDetails: prefixwise report --detail   Fixes: prefixwise fixes   Data: prefixwise export")
+    if not detail:
+        print("\nDetails: prefixwise report --detail   Fixes: prefixwise fixes   Data: prefixwise export")
         return 0
     print()
     t = summary["tasks"]
@@ -216,8 +215,33 @@ def cmd_prune(args) -> int:
     return 0
 
 
+def _show_url(url: str) -> str:
+    """scheme://host[:port] only: a gateway URL can carry credentials."""
+    from urllib.parse import urlsplit
+
+    u = urlsplit(url)
+    return f"{u.scheme}://{u.hostname}{':' + str(u.port) if u.port else ''}" if u.hostname else "?"
+
+
+def _is_prefixwise(url: str) -> bool:
+    """Does this local base URL already point at a Prefixwise proxy?"""
+    import urllib.request
+    from urllib.parse import urlsplit
+
+    u = urlsplit(url)
+    if u.hostname not in ("127.0.0.1", "localhost", "::1"):
+        return False
+    try:
+        with urllib.request.urlopen(f"{u.scheme}://{u.netloc}/health", timeout=1) as r:
+            body = json.loads(r.read())
+        return isinstance(body, dict) and "ok" in body and "mock" in body
+    except Exception:
+        return False
+
+
 def cmd_run(args) -> int:
     """Run an agent through Prefixwise and report on that run when it exits."""
+    import signal
     import subprocess
     import threading
     import time
@@ -229,31 +253,48 @@ def cmd_run(args) -> int:
     if not cmd:
         print("usage: prefixwise run [options] -- <agent command>, e.g. prefixwise run -- claude", file=sys.stderr)
         return 2
-    # Where the agent would have gone: its own base URLs if set (a gateway), else the providers.
-    anthropic = os.environ.get("ANTHROPIC_BASE_URL") or "https://api.anthropic.com"
-    openai = (os.environ.get("OPENAI_BASE_URL") or "https://api.openai.com").rstrip("/")
-    openai = openai[:-3] if openai.endswith("/v1") else openai
+    # Where the agent would have gone: its own base URLs if set (a gateway), kept exactly
+    # as given, else the providers. OPENAI_BASE_URL includes the API version path.
+    anthropic = (os.environ.get("ANTHROPIC_BASE_URL") or "https://api.anthropic.com").rstrip("/")
+    openai = (os.environ.get("OPENAI_BASE_URL") or "https://api.openai.com/v1").rstrip("/")
+    for name, url in (("ANTHROPIC_BASE_URL", anthropic), ("OPENAI_BASE_URL", openai)):
+        if not args.mock and _is_prefixwise(url):
+            print(f"prefixwise: {name} already points at a Prefixwise proxy ({_show_url(url)}). Unset it, "
+                  "or use that proxy directly; chaining two would count every request twice.", file=sys.stderr)
+            return 2
     ledger = args.ledger or os.environ.get("PREFIXWISE_LEDGER_PATH") or DEFAULT_LEDGER
     try:
         proxy = PrefixwiseProxy(ledger_path=ledger, mock=True if args.mock else None, fixes=args.fix or None,
                                 upstreams=None if args.mock else {"anthropic": anthropic, "openai": openai})
     except ValueError as exc:
         sys.exit(f"prefixwise: {exc}")
+    proxy.versioned = {"openai"}
+    proxy.api_key = None  # the agent's own keys pass through; never replace them here
     proxy.default_session = f"run-{time.strftime('%Y%m%d-%H%M%S')}"
     server = PrefixwiseHTTPServer(("127.0.0.1", args.port), make_handler(proxy))
     base = f"http://127.0.0.1:{server.server_address[1]}"
     threading.Thread(target=server.serve_forever, daemon=True).start()
     env = {**os.environ, "ANTHROPIC_BASE_URL": base, "OPENAI_BASE_URL": base + "/v1", "PREFIXWISE_URL": base}
-    upstream = "mock" if args.mock else f"anthropic -> {anthropic}, openai -> {openai}"
+    upstream = "mock" if args.mock else f"anthropic -> {_show_url(anthropic)}, openai -> {_show_url(openai)}"
     print(f"prefixwise: proxy on {base} ({upstream}); ledger {ledger}", file=sys.stderr, flush=True)
     start = time.time()
     try:
-        code = subprocess.call(cmd, env=env)
+        child = subprocess.Popen(cmd, env=env)
     except FileNotFoundError:
         print(f"prefixwise: command not found: {cmd[0]}", file=sys.stderr)
-        code = 127
-    except KeyboardInterrupt:
-        code = 130
+        child = None
+    code = 127
+    if child is not None:
+        # Ctrl-C reaches the agent directly (same process group): agents use it to cancel a
+        # turn, so Prefixwise must neither die nor kill the agent. SIGTERM is passed on.
+        old_int = signal.signal(signal.SIGINT, signal.SIG_IGN)
+        old_term = signal.signal(signal.SIGTERM, lambda *_: child.terminate())
+        try:
+            code = child.wait()
+        finally:
+            signal.signal(signal.SIGINT, old_int)
+            signal.signal(signal.SIGTERM, old_term)
+        code = 128 - code if code < 0 else code  # killed by a signal: shell convention
     server.shutdown()
     server.drain(5)
     server.server_close()
@@ -263,7 +304,7 @@ def cmd_run(args) -> int:
         print(f"No requests reached Prefixwise. Does {cmd[0]} read ANTHROPIC_BASE_URL or OPENAI_BASE_URL? "
               "If not, set its base URL to the proxy by hand (see the README).", file=sys.stderr)
     else:
-        print(render(found), file=sys.stderr)
+        print(render(found, command="run"), file=sys.stderr)
         print(f"All runs: prefixwise report --ledger {ledger}", file=sys.stderr)
     return code
 
