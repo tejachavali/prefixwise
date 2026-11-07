@@ -36,15 +36,15 @@ Shared handoff between the agents working on Prefixwise. It says **what is being
 
 ## Now
 
-**Release v0.3.0** (Claude). Muse finished PyPI part A: the pending publisher and the `pypi` environment exist. Dogfood part B is done, and its fixes are in PR #18. Once PR #18 merges, Claude tags `v0.3.0` on `main`, watches `.github/workflows/release.yml`, and checks `pip install prefixwise`.
+**Prefixwise 0.3.0 is public:** `pip install prefixwise`. GitHub release `v0.3.0` (tag on `343ce61`), release workflow run #1 green, PyPI shows 0.3.0 as latest. Muse published it from the GitHub web UI (Claude's session cannot push tags), and Claude verified it by a clean install from PyPI and a smoke test.
 
-**Muse: nothing needed right now.** Optional task C (OpenAI's official prices) still stands:
-- Open https://developers.openai.com/api/docs/pricing.
-- Report input, cached input, output and any cache-write price for `gpt-5.6`, `gpt-5.6-luna`, `gpt-5.6-sol` and `gpt-5.6-terra`, exactly as shown, with the URL.
+**Muse: nothing needed right now.** Optional task C still stands: OpenAI's official prices for `gpt-5.6`, `-luna`, `-sol` and `-terra`, from https://developers.openai.com/api/docs/pricing.
 
-**Next for Claude, after the release:**
-1. **Per-model lanes within a session**, from the dogfood. A side call to a small model should not hide causes on the main thread. This changes E1's model-switch scoring, so the E1 harnesses get updated in the same PR.
-2. The product plan Claude proposed to Teja on 2026-11-06: `prefixwise run -- <cmd>`, a local web UI, live fix experiments. Waiting on Teja's go-ahead and choice of first audience.
+**Next for Claude:**
+1. **Per-model lanes within a session**, from the dogfood. A small-model side call should not hide causes on the main thread. Updates E1's model-switch scoring in the same PR.
+2. **The product plan proposed to Teja on 2026-11-06:** `prefixwise run -- <cmd>`, a local web UI (money view, session timeline, prefix map), and live fix experiments. Waiting on Teja's go-ahead and choice of first audience.
+
+**Releasing from now on:** Claude prepares the version bump and CHANGELOG in a PR. **Muse (or Teja) creates the GitHub release** in the web UI, which creates the tag and triggers `.github/workflows/release.yml`.
 
 ## In parallel (Claude): launch gates
 
@@ -76,7 +76,7 @@ Then a soft launch to a few people who run agents (Omni's founder is a candidate
 
 **Now: launch.**
 1. Dogfooding (Muse, "Now" B).
-2. PyPI release: Teja's setup, then Claude tags `v0.3.0`.
+2. PyPI release: **done** 2026-11-07, `pip install prefixwise` (0.3.0).
 3. A real README example from the dogfood report.
 4. Soft launch to a few people who run agents, then wider.
 
@@ -128,3 +128,4 @@ Then a soft launch to a few people who run agents (Omni's founder is a candidate
 - **2026-11-06:** Roadmap written down (section above). Claude started dollar costs while Muse dogfoods.
 - **2026-11-06:** Claude: dollar costs (PR #17). Anthropic rates are verified from platform.claude.com, the official page (fetched by a Claude helper). OpenAI's pricing pages are unreachable from Claude's environment, so that's Muse task C.
 - **2026-11-07:** Muse finished PyPI setup (part A) and dogfooding (part B: opencode, 92.9% cached, 0 waste). Claude fixed the 4 rough edges (PR #18); the release tag follows.
+- **2026-11-07:** v0.3.0 released. PR #18 (dogfood fixes) and #19 (CHANGELOG) merged. Claude's tag push got HTTP 403 (this session can't create tags), so Muse created the GitHub release and the release workflow published to PyPI. Claude verified with a clean `pip install prefixwise==0.3.0`. A smoke test found a BrokenPipeError on `report | head`, fixed in PR #20.
