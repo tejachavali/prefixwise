@@ -98,7 +98,7 @@ def render(f: dict, command: str = "serve") -> str:
         lines.append(f"No request got a response with usage: {_n(s['requests_failed'])} failed.")
     else:
         hit = s["cache_hit_rate"]
-        head = f"{_n(s['requests'])} requests, {_n(s['prompt_tokens'])} prompt tokens"
+        head = f"{_req(s['requests'])}, {_n(s['prompt_tokens'])} prompt tokens"
         if hit is not None:
             head += f", {hit:.0%} served from cache"
         partial = s["requests_priced"] and s["requests_priced"] < s["requests"]

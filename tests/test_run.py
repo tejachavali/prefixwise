@@ -185,3 +185,47 @@ def test_report_wording_follows_from_the_numbers():
     assert "2 of 3 requests priced" in text and "priced requests only" in text
     assert "prefixwise run --fix canonical_tools" in text
     assert _show_url("https://user:secret@gw.example.com:8443/k/abc?key=1") == "https://gw.example.com:8443"
+
+
+CODEX = r"""
+import json, os, re, sys, urllib.request
+base = next(re.search(r'base_url="([^"]+)"', a).group(1) for a in sys.argv if "base_url=" in a)
+assert any("supports_websockets=false" in a for a in sys.argv)
+body = {"model": "gpt-6.1-sol", "input": [{"role": "user", "content": "reverse a string"}], "stream": False}
+req = urllib.request.Request(base + "/responses", data=json.dumps(body).encode(), method="POST",
+                             headers={"content-type": "application/json", "authorization": "Bearer " + os.environ["OPENAI_API_KEY"],
+                                      "x-codex-turn-state": "sticky-1", "thread-id": "th_9", "session-id": "se_1"})
+r = urllib.request.urlopen(req, timeout=10)
+print("turn-state back:", r.headers.get("x-codex-turn-state"))
+"""
+
+
+def test_codex_is_pointed_at_the_proxy_with_its_headers_kept(tmp_path):
+    from test_proxy import FakeUpstream
+
+    resp = {"id": "resp_1", "object": "response", "status": "completed", "output": [],
+            "usage": {"input_tokens": 1200, "input_tokens_details": {"cached_tokens": 0}, "output_tokens": 5}}
+    up = FakeUpstream(payload=resp)
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    fake = bindir / "codex"
+    fake.write_text(f"#!{sys.executable}\n" + CODEX)
+    fake.chmod(0o755)
+    env = {**os.environ, "PYTHONPATH": SRC, "OPENAI_API_KEY": "sk-codex", "OPENAI_BASE_URL": up.url + "/v1",
+           "PATH": f"{bindir}:{os.environ['PATH']}"}
+    try:
+        r = subprocess.run([sys.executable, "-m", "prefixwise", "run", "--ledger", str(tmp_path / "l.db"), "--",
+                            "codex", "exec", "hi"], capture_output=True, text=True, env=env, timeout=60)
+        assert r.returncode == 0, r.stderr
+        sent = up.requests[0]
+        assert sent["path"] == "/v1/responses"
+        assert sent["headers"]["authorization"] == "Bearer sk-codex"
+        assert sent["headers"]["x-codex-turn-state"] == "sticky-1"  # sticky routing kept
+        assert sent["headers"]["thread-id"] == "th_9"
+        assert "1 requests" not in r.stderr and "1 request" in r.stderr
+        env.pop("OPENAI_API_KEY")
+        r = subprocess.run([sys.executable, "-m", "prefixwise", "run", "--ledger", str(tmp_path / "l.db"), "--",
+                            "codex", "exec", "hi"], capture_output=True, text=True, env=env, timeout=60)
+        assert r.returncode == 2 and "OPENAI_API_KEY" in r.stderr
+    finally:
+        up.server.shutdown()

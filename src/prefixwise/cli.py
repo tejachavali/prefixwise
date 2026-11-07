@@ -239,6 +239,17 @@ def _is_prefixwise(url: str) -> bool:
         return False
 
 
+def _codex_args(base: str) -> list[str]:
+    """Codex ignores OPENAI_BASE_URL (codex-cli 0.167+). A custom model provider, set
+    with -c overrides, sends its Responses calls to the proxy over plain HTTP + SSE
+    (the built-in provider tries WebSocket first), takes the key from
+    OPENAI_API_KEY, skips the sign-in screen and writes nothing to ~/.codex."""
+    p = "model_providers.prefixwise."
+    return ["-c", "model_provider=\"prefixwise\"", "-c", f'{p}name="Prefixwise"',
+            "-c", f'{p}base_url="{base}/v1"', "-c", f'{p}env_key="OPENAI_API_KEY"',
+            "-c", f'{p}wire_api="responses"', "-c", f"{p}supports_websockets=false"]
+
+
 def cmd_run(args) -> int:
     """Run an agent through Prefixwise and report on that run when it exits."""
     import signal
@@ -275,6 +286,14 @@ def cmd_run(args) -> int:
     base = f"http://127.0.0.1:{server.server_address[1]}"
     threading.Thread(target=server.serve_forever, daemon=True).start()
     env = {**os.environ, "ANTHROPIC_BASE_URL": base, "OPENAI_BASE_URL": base + "/v1", "PREFIXWISE_URL": base}
+    if os.path.basename(cmd[0]) == "codex":
+        if not os.environ.get("OPENAI_API_KEY"):
+            print("prefixwise: Codex goes through Prefixwise with an API key: set OPENAI_API_KEY "
+                  "(a ChatGPT sign-in cannot be proxied).", file=sys.stderr)
+            server.shutdown()
+            server.server_close()
+            return 2
+        cmd = [cmd[0], *_codex_args(base), *cmd[1:]]
     upstream = "mock" if args.mock else f"anthropic -> {_show_url(anthropic)}, openai -> {_show_url(openai)}"
     print(f"prefixwise: proxy on {base} ({upstream}); ledger {ledger}", file=sys.stderr, flush=True)
     start = time.time()

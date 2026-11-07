@@ -32,6 +32,7 @@ self-hosted engines (vLLM, SGLang, LMCache) validated live.
 - **Fixed:** a short Anthropic prompt (below the model's minimum cacheable prefix: 512 tokens for Claude 5.x, up to 4,096 for older models) was reported as a misplaced cache breakpoint, with avoidable tokens and advice that could not help. It is now `below_min_prefix`, not waste.
 - **Fixed (agent compatibility check):** under `prefixwise run`, cancelling a streamed turn with Ctrl-C printed proxy tracebacks (BrokenPipeError) into the agent's terminal. Client disconnects are now silent, other server errors are one line, and while the agent runs the proxy's own messages go to `prefixwise-run.log` next to the ledger.
 - **Fixed:** when the previous request was below the provider's minimum cacheable prefix, a change since (e.g. a rewritten message) was reported as waste. Nothing could have been cached, so it is now `below_min_prefix`.
+- **Codex works with `prefixwise run`:** Codex 0.167+ ignores `OPENAI_BASE_URL`, so its requests bypassed the proxy. `prefixwise run -- codex ...` now adds `-c` overrides for a custom provider (plain HTTP + SSE instead of WebSocket, key from `OPENAI_API_KEY`, no sign-in screen, nothing written to `~/.codex`). The proxy forwards Codex's headers, including the `x-codex-turn-state` sticky routing that keeps requests on the same backend, and uses its thread id as the session.
 - Report wording: "1 request", not "1 requests".
 
 ## 0.3.1: 2026-11-07

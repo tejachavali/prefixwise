@@ -48,7 +48,7 @@ Expected misses (not waste): 2 x first request of a session: nothing to reuse ye
 
 (Illustrative output. `prefixwise run --mock -- <agent>` tries it with synthetic responses and no API calls.)
 
-Ctrl-C goes to the agent as usual. If you already set `ANTHROPIC_BASE_URL` or `OPENAI_BASE_URL` (a gateway), Prefixwise forwards there, so the agent reaches the same place. It works with agents that use an **API key**; an agent signed in with a subscription instead (for example Codex with a ChatGPT login) cannot be routed through a proxy, and the report says so if the provider rejects it.
+Ctrl-C goes to the agent as usual. If you already set `ANTHROPIC_BASE_URL` or `OPENAI_BASE_URL` (a gateway), Prefixwise forwards there, so the agent reaches the same place. It works with agents that use an **API key**; an agent signed in with a subscription instead cannot be routed through a proxy, and the report says so if the provider rejects it. **Codex** ignores `OPENAI_BASE_URL`, so `prefixwise run -- codex ...` adds `-c` settings that point it at the proxy as a custom provider (plain HTTP, the key from `OPENAI_API_KEY`, no sign-in screen, nothing written to `~/.codex`).
 
 ### Running the proxy yourself
 

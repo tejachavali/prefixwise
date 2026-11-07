@@ -200,7 +200,12 @@ PREFIXWISE_FIELDS = ("session_id", "agent_id", "task_id", "prefixwise_compaction
 
 # Client headers passed through to the upstream when present.
 PASSTHROUGH_HEADERS = ("authorization", "x-api-key", "anthropic-version", "anthropic-beta",
-                       "openai-organization", "openai-project")
+                       "openai-organization", "openai-project", "openai-beta",
+                       # Codex: session and thread identity, sticky routing (x-codex-turn-state),
+                       # subagent and client ids. Dropping them could cost cache hits.
+                       "session-id", "thread-id", "originator", "version", "x-openai-subagent",
+                       "x-client-request-id", "chatgpt-account-id")
+PASSTHROUGH_PREFIXES = ("x-codex-",)
 ANTHROPIC_VERSION = "2023-06-01"
 UPSTREAM_TIMEOUT = 600  # seconds; long generations stream for minutes
 # A client socket that sends nothing (or stops reading) for this long is
@@ -209,8 +214,9 @@ CLIENT_TIMEOUT = float(os.environ.get("PREFIXWISE_CLIENT_TIMEOUT", "120"))
 
 # Upstream response headers relayed to the client: SDK retry hints, the
 # provider's request id (support tickets), and rate-limit state.
-RELAY_HEADERS = ("retry-after", "retry-after-ms", "x-should-retry", "x-request-id", "request-id")
-RELAY_PREFIXES = ("x-ratelimit-", "anthropic-ratelimit-")
+RELAY_HEADERS = ("retry-after", "retry-after-ms", "x-should-retry", "x-request-id", "request-id",
+                 "x-models-etag")
+RELAY_PREFIXES = ("x-ratelimit-", "anthropic-ratelimit-", "x-codex-")
 
 
 def relay_headers(headers) -> dict[str, str]:
@@ -478,7 +484,9 @@ class PrefixwiseProxy:
             if headers.get(h) and len(headers[h]) > MAX_ID_CHARS:
                 raise ClientError(f"{h} is longer than {MAX_ID_CHARS} characters")
         session_id = str(headers.get("x-prefixwise-session-id") or body.get("session_id")
-                         or (body.get("metadata") or {}).get("user_id") or self.default_session)
+                         or (body.get("metadata") or {}).get("user_id")
+                         or headers.get("thread-id") or headers.get("session-id")  # Codex
+                         or self.default_session)
         task_id = headers.get("x-prefixwise-task-id") or body.get("task_id")
         forward_body = {k: v for k, v in body.items() if k not in PREFIXWISE_FIELDS}
         # E1-open retry turns: a harness-only upstream session id.
@@ -771,7 +779,7 @@ class PrefixwiseProxy:
 
     def _upstream_request(self, provider: str, body: dict, request_id: str, session_id: str,
                           client_headers: dict[str, str], api: str = "chat") -> urllib.request.Request:
-        headers = {k: v for k, v in client_headers.items() if k in PASSTHROUGH_HEADERS}
+        headers = {k: v for k, v in client_headers.items() if k in PASSTHROUGH_HEADERS or k.startswith(PASSTHROUGH_PREFIXES)}
         headers.update({"content-type": "application/json",
                         "x-request-id": request_id, "x-session-id": session_id})
         if provider == "anthropic":
@@ -810,7 +818,7 @@ class PrefixwiseProxy:
         if self.mock:
             return 404, "application/json", json.dumps(_error(
                 404, f"{raw_path} is not available in mock mode (no upstream)")).encode()
-        headers = {k: v for k, v in client_headers.items() if k in PASSTHROUGH_HEADERS}
+        headers = {k: v for k, v in client_headers.items() if k in PASSTHROUGH_HEADERS or k.startswith(PASSTHROUGH_PREFIXES)}
         if body:
             headers["content-type"] = client_headers.get("content-type", "application/json")
         anthropic = raw_path.startswith("/v1/messages") or "anthropic-version" in client_headers \
