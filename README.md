@@ -28,6 +28,27 @@ Not yet measured live: agreement with OpenAI's own miss reason (its diagnostics 
 `unavailable` on every call we made), TTL expiry and routing misses in real traffic, and
 SGLang's KV events. [Limits](#limits) has the full list.
 
+### Turning on a fix: what Prefixwise predicted, and what it saved
+
+An agent sent the same tools in a drifting order, so every reorder re-paid the whole prefix.
+Prefixwise named the cause (`tool_reserialize`) and predicted the saving; turning on
+`--fix canonical_tools` then realised almost exactly that, with task success unchanged.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/figures/fix-dark.svg">
+  <img alt="Share of prompt tokens served from cache with the fix off and on: Claude Haiku 5.5 from 51% to 97%, Qwen3-4B on vLLM from 88% to 97%" src="docs/figures/fix-light.svg" width="720">
+</picture>
+
+| | cached, fix off | cached, fix on | predicted saving | realised |
+|---|---:|---:|---:|---:|
+| Claude Haiku 5.5 | 114,835 of 225,395 (51%) | 219,451 (97%) | 104,732 tokens | 104,616 (**99.9%**) |
+| Qwen3-4B on vLLM | 138,928 of 157,706 (88%) | 152,800 (97%) | 14,229 tokens | 13,872 (**97.5%**) |
+
+The saving is larger on Claude because Anthropic puts tools first in the prompt, so a reorder
+loses everything after them; Qwen3's template puts tools after the system prompt
+([record](experiments/e4/runs/2026-11-06-live.md)). Charts are drawn from the records by
+[`docs/figures/make_figures.py`](docs/figures/make_figures.py).
+
 ## Why Prefixwise
 
 - **The cause, not the count.** 19 causes, one per miss: the first thing, in prompt order,
@@ -208,11 +229,40 @@ The verdict becomes `evicted` **confirmed** ("the engine removed N of this sessi
 
 **LMCache and HiCache need nothing extra.** A prefix restored from CPU memory counts as a hit (vLLM's `cached_tokens` includes tokens loaded from LMCache), so only prefixes lost from every tier are evictions. Why it works this way, the alternatives considered and the known limits (several replicas, lost events): [docs/ENGINES.md](docs/ENGINES.md).
 
+
+**What it looks like on real engines.** A session's prefix, after flooding the GPU's KV cache
+with three times its capacity ([record](experiments/e_evict/runs/2026-11-07-colab-l4.md)):
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/figures/evict-dark.svg">
+  <img alt="Prefix served from cache after a GPU flood: vLLM 0% (evicted, confirmed from KV events), vLLM + LMCache 98% (hit, restored from CPU), SGLang 0% (evicted, inferred), SGLang + HiCache 99% (hit, restored from host memory)" src="docs/figures/evict-light.svg" width="720">
+</picture>
+
+| engine | prefix cached after the flood | correct cause | Prefixwise |
+|---|---:|---|---|
+| vLLM | 0 of 3,404 | evicted | `evicted` 5 of 5; with KV events, confirmed ("211 of the previous request's KV blocks removed") |
+| vLLM + LMCache | 3,328 of 3,404 | none (restored from CPU) | `none` 5 of 5 |
+| SGLang | 3 of 3,404 | evicted | `evicted` 5 of 5 (inferred) |
+| SGLang + HiCache | 3,382 of 3,404 | none (restored from host memory) | `none` 5 of 5 |
+
 ## Running in production
 
 Measured by [`benchmarks/bench.py`](benchmarks/README.md) (results in [`benchmarks/runs/`](benchmarks/runs/)); rerun it on your own hardware.
 
 - **Added latency:** about 3 ms per request at a 2k-token prompt, 6 ms at 30k, 13 ms at 120k (p50; p95 under 22 ms). Streaming adds the same to time to first byte. A model call takes seconds, so this is well under 1%.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/figures/overhead-dark.svg">
+  <img alt="Latency Prefixwise adds per request: median 2.7 ms at 2k prompt tokens, 5.6 ms at 30k, 13.3 ms at 120k; p95 3.8, 7.5 and 18.8 ms" src="docs/figures/overhead-light.svg" width="720">
+</picture>
+
+  | prompt | added p50 | added p95 | added p99 |
+  |---|---:|---:|---:|
+  | 2k tokens | 2.7 ms | 3.8 ms | 8.0 ms |
+  | 30k tokens | 5.6 ms | 7.5 ms | 8.8 ms |
+  | 120k tokens | 13.3 ms | 18.8 ms | 27.0 ms |
+
+  OpenAI request shape, not streamed; the cost grows with the prompt because each block is hashed.
 - **Live, against real providers** (records: [Anthropic](benchmarks/runs/2026-11-07-live-anthropic.md), [OpenAI](benchmarks/runs/2026-11-07-live-openai.md)): 20 pairs each, direct vs. through the proxy, from Colab. Cache hit share identical both ways (Anthropic Haiku 5.5: 98.1% and 98.1%; OpenAI GPT-5.6 Luna: 97.9% and 97.9%), every request recorded. Median added latency +29 ms and +43 ms on ~1 s calls, which is within the network variance between two separate calls; the proxy's own cost is 3-6 ms.
 - **Capacity:** one proxy process handles about 185 requests/s of agent-sized traffic before CPU-bound, with no errors up to 128 concurrent clients. An agent sends roughly one request every few seconds, so one process serves hundreds of agents at once. Session state lives in the process: to run several, route each session to the same instance (e.g. hash `X-Prefixwise-Session-Id`).
 - **Memory:** about 11 KB per tracked session, capped by `PREFIXWISE_MAX_SESSIONS` (default 10,000: roughly 100-150 MB), plus a bounded cache of block hashes (about 8 MB). In a 15-minute soak (148,000 requests, 0 errors) RSS went 60 to 74 MB; Python-level memory is flat once the caches fill (tracemalloc: 16.2 MB at both 2,400 and 4,800 sessions), so the remainder is the allocator keeping freed request buffers.
