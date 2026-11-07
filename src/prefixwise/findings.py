@@ -78,6 +78,10 @@ def _usd(x) -> str:
     return f"${x:,.2f}" if abs(x) >= 0.01 or x == 0 else f"${x:.4f}"
 
 
+def _req(n: int) -> str:
+    return f"{n:,} request{'s' if n != 1 else ''}"
+
+
 def _n(x) -> str:
     return "-" if x is None else f"{x:,.0f}"
 
@@ -111,7 +115,7 @@ def render(f: dict, command: str = "serve") -> str:
                          f"{(s['avoidable_share'] or 0):.1%} of prompt tokens. Fix these, biggest first:")
             for i, w in enumerate(f["waste"], 1):
                 cost = f", {_usd(w['avoidable_cost_usd'])}" if w["avoidable_cost_usd"] is not None else ""
-                lines.append(f"  {i}. {w['what'].capitalize()} ({w['requests']} requests, "
+                lines.append(f"  {i}. {w['what'].capitalize()} ({_req(w['requests'])}, "
                              f"{_n(w['avoidable_tokens'])} tokens{cost}).")
                 if w.get("fix"):
                     lines.append(f"     Fix: {w['fix']}")

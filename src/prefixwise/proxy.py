@@ -514,9 +514,13 @@ class PrefixwiseProxy:
             # there is one, so its verdict compares like with like.
             lane = (session_id, str(body.get("model", "unknown")))
             previous_id = self.lane_response_id.get(lane) or self.last_response_id.get(session_id)
+        # Chain only to an id from the same API: a session can mix Chat Completions
+        # (chatcmpl-...) and Responses (resp_...) on one model, and OpenAI rejects a
+        # foreign id with a 400 (found by the compatibility check, 2026-11-07).
         if provider == "anthropic":
-            forward_body.update(anthropic_diagnostics(previous_id))
-        elif api == "responses" and previous_id:
+            same_api = previous_id if previous_id and previous_id.startswith("msg") else None
+            forward_body.update(anthropic_diagnostics(same_api))
+        elif api == "responses" and previous_id and previous_id.startswith("resp"):
             # Merge into the client's own prompt_cache_options; a comparison
             # id the client chose wins.
             opts = dict(body.get("prompt_cache_options") or {})
@@ -743,7 +747,9 @@ class PrefixwiseProxy:
         # 2,000 prompt tokens so the OpenAI 1,024 minimum does not fire.
         with self._lock:
             cached = 1000 if session_id in self.last_snapshot else 0
-        rid = f"resp-{request_id[:8]}"
+        # Ids shaped like the real APIs' (msg_, resp_, chatcmpl-): diagnostics chaining checks them.
+        rid = {"anthropic": "msg_", "responses": "resp_"}.get(
+            provider if provider == "anthropic" else api, "chatcmpl-") + request_id[:8]
         if provider == "anthropic":
             return {"id": rid, "type": "message", "role": "assistant", "model": model,
                     "content": [{"type": "text", "text": "[prefixwise mock]"}],

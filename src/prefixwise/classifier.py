@@ -65,6 +65,19 @@ MIN_PROVIDER_TTL_SECONDS = 300
 GEMINI_MIN_PREFIX = 4096  # Gemini 3.x; 2,048 on 2.5. ai.google.dev, Nov 2026.
 
 
+def anthropic_min_prefix(model: str) -> int:
+    """The model's minimum cacheable prefix (table above). A model not in it gets
+    the lowest known minimum, so "below the minimum" is claimed only when no
+    Anthropic model could have cached the prompt."""
+    m = (model or "").lower()
+    for marker, tokens in (("opus-4-5", 4096), ("opus-4-6", 4096), ("haiku-4-5", 4096),
+                           ("opus-4-7", 2048), ("mythos-preview", 2048),
+                           ("opus-4-8", 1024), ("sonnet-4-6", 1024), ("sonnet-5-", 512), ("sonnet-5", 1024)):
+        if marker in m:
+            return tokens
+    return 512  # Claude 5.x (Fable, Mythos, Opus, Sonnet, Haiku), and the floor for unknown models
+
+
 @dataclass
 class RequestSnapshot:
     model: str
@@ -207,6 +220,8 @@ def classify(prev: RequestSnapshot | None, curr: RequestSnapshot,
     min_prefix = curr.min_prefix_tokens
     if min_prefix is None:
         min_prefix = {"openai": OPENAI_MIN_PREFIX, "gemini": GEMINI_MIN_PREFIX}.get(curr.provider, None)
+        if curr.provider == "anthropic":
+            min_prefix = anthropic_min_prefix(curr.model)
     # 0 prompt tokens means usage was absent, not a short prompt: fall
     # through to UNKNOWN rather than claim BELOW_MIN_PREFIX.
     if min_prefix is not None and 0 < curr.prompt_tokens < min_prefix:
