@@ -424,6 +424,10 @@ class PrefixwiseProxy:
         # a turn with the turn recorded just before it, never a torn state.
         self._lock = threading.Lock()
         self._upstream = threading.local()  # last upstream response headers, per thread
+        # vLLM stamps a body session_id onto its KV events (the engine join).
+        # SGLang reads session_id as its own stateful-session handle and
+        # rejects ids it did not open, so engines like it set this False.
+        self.forward_session_id = True
         self.last_snapshot: dict[str, RequestSnapshot] = _SessionMap(MAX_SESSIONS)
         self.last_response_id: dict[str, str | None] = _SessionMap(MAX_SESSIONS)
         self.last_seen: dict[str, float] = _SessionMap(MAX_SESSIONS)
@@ -458,7 +462,8 @@ class PrefixwiseProxy:
                          or (body.get("metadata") or {}).get("user_id") or "default")
         task_id = headers.get("x-prefixwise-task-id") or body.get("task_id")
         forward_body = {k: v for k, v in body.items()
-                        if k not in PREFIXWISE_FIELDS or (provider == "vllm" and k == "session_id")}
+                        if k not in PREFIXWISE_FIELDS
+                        or (provider == "vllm" and k == "session_id" and self.forward_session_id)}
         # E1-open retry turns: a harness-only upstream session id.
         # The proxy's own session (snapshot chain, gap_seconds) stays
         # session_id; only the identity sent upstream changes, so the
@@ -470,7 +475,7 @@ class PrefixwiseProxy:
         upstream_session_id = (body.get("prefixwise_upstream_session_id")
                                or headers.get("x-prefixwise-upstream-session-id"))
         upstream_session_id = str(upstream_session_id) if upstream_session_id else None
-        if provider == "vllm":
+        if provider == "vllm" and self.forward_session_id:
             forward_body["session_id"] = upstream_session_id or session_id
         # Native diagnostics chaining. Anthropic: diagnostics object (GA,
         # no beta header). OpenAI: prompt_cache_options.comparison_response_id,
