@@ -170,7 +170,7 @@ Avoidable tokens for a waste turn = the part of the previous turn's prompt that 
 | `prefixwise request REQUEST_ID [--json]` | One request's ledger entry (from `X-Prefixwise-Request-Id`). |
 | `prefixwise explain A.json B.json` / `explain SESSION.jsonl [--json] [--fail-on-waste]` | Offline diagnosis of saved request bodies, or `{"request": ..., "usage": ..., "session_id": ..., "gap_seconds": ...}` records. |
 
-**HTTP endpoints:** `POST /v1/chat/completions`, `POST /v1/responses`, `POST /v1/messages` (streaming supported on all three; the same paths without `/v1` also work, and query strings are forwarded). Any other path, such as `GET /v1/models` or `count_tokens`, passes through to the upstream unchanged and is not recorded. Also: `POST /tasks {"task_id", "success"}`, `GET /requests/<id>`, `GET /ledger`, `GET /health`.
+**HTTP endpoints:** `POST /v1/chat/completions`, `POST /v1/responses`, `POST /v1/messages` (streaming supported on all three; the same paths without `/v1` also work, and query strings are forwarded). Any other path, such as `GET /v1/models` or `count_tokens`, passes through to the upstream unchanged and is not recorded. Also: `POST /tasks {"task_id", "success"}`, `GET /requests/<id>`, `GET /ledger`, `GET /metrics` (Prometheus), `GET /health`.
 
 **Request headers** (all optional; stripped before forwarding):
 
@@ -194,6 +194,8 @@ Avoidable tokens for a waste turn = the part of the previous turn's prompt that 
 ## Data and API
 
 Every number Prefixwise shows is also data. Each request leaves a row of facts (verdict and its evidence, token breakdown, cost, latency, status; failed requests too), and every metric is defined once and served three ways: `prefixwise report`, the HTTP API at `/api/v1` (summary, breakdowns by cause, session, model, day..., request rows, fixes, prices, explain; [docs/API.md](docs/API.md)), and `prefixwise export`. `GET /api/v1/metrics` lists every metric and what it means. Design: [docs/DATA.md](docs/DATA.md).
+
+**Prometheus and Grafana:** `GET /metrics` exports requests, tokens, avoidable tokens and dollars by provider, model and miss cause, plus Prefixwise's own latency and the KV-event stream's health. Import the Grafana dashboard ([`deploy/grafana/prefixwise.json`](deploy/grafana/prefixwise.json)) and the alert rules (hit rate below 80%, avoidable share above 10%, failures, lost KV events: [`deploy/prometheus/prefixwise-rules.yml`](deploy/prometheus/prefixwise-rules.yml)). Setup and queries: [docs/prometheus.md](docs/prometheus.md).
 
 ## Security
 

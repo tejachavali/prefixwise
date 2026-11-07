@@ -1,0 +1,56 @@
+# Prometheus alerting rules for Prefixwise (docs/prometheus.md).
+# Load with `rule_files: [prefixwise-rules.yml]`. Thresholds are starting points:
+# agent workloads usually serve over 90% of prompt tokens from cache, so a sustained
+# drop is worth a look. Tune `for:` and the numbers to your traffic.
+groups:
+  - name: prefixwise
+    rules:
+      - alert: PrefixwiseCacheHitRateLow
+        expr: |
+          (
+            sum(rate(prefixwise_cached_tokens_total[15m]))
+            / sum(rate(prefixwise_prompt_tokens_total[15m]))
+          ) < 0.80
+          and sum(rate(prefixwise_prompt_tokens_total[15m])) > 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Prompt cache hit rate below 80% for 15 minutes"
+          description: "Share of prompt tokens served from cache: {{ $value | humanizePercentage }}. The misses by cause panel (or `prefixwise report --since 1h`) names what broke reuse."
+
+      - alert: PrefixwiseAvoidableWasteHigh
+        expr: |
+          (
+            sum(rate(prefixwise_avoidable_tokens_total[30m]))
+            / sum(rate(prefixwise_prompt_tokens_total[30m]))
+          ) > 0.10
+          and sum(rate(prefixwise_prompt_tokens_total[30m])) > 0
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Over 10% of prompt tokens are avoidable cache misses"
+          description: "Avoidable share: {{ $value | humanizePercentage }}. `prefixwise fixes` ranks the fixes by what they would save."
+
+      - alert: PrefixwiseUpstreamErrors
+        expr: |
+          (
+            sum(rate(prefixwise_requests_failed_total[10m]))
+            / (sum(rate(prefixwise_requests_total[10m])) + sum(rate(prefixwise_requests_failed_total[10m])))
+          ) > 0.05
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Over 5% of requests through Prefixwise failed"
+          description: "Failure share: {{ $value | humanizePercentage }}, by error in prefixwise_requests_failed_total."
+
+      - alert: PrefixwiseKVEventsLost
+        expr: increase(prefixwise_kv_events_dropped_messages_total[10m]) > 0 or prefixwise_kv_events_connected == 0
+        for: 5m
+        labels:
+          severity: info
+        annotations:
+          summary: "The engine's KV-event stream lost messages or is not connected"
+          description: "Evictions are inferred, not confirmed, until the stream is whole again."

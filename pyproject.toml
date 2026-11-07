@@ -36,7 +36,7 @@ prefixwise-proxy = "prefixwise.proxy:serve"
 
 [project.optional-dependencies]
 engines = ["pyzmq>=25", "msgspec>=0.18"]
-dev = ["pytest", "pyzmq>=25", "msgspec>=0.18"]
+dev = ["pytest", "pyzmq>=25", "msgspec>=0.18", "prometheus-client"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/prefixwise"]
