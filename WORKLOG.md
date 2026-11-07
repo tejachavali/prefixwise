@@ -31,59 +31,26 @@ Shared handoff between the agents working on Prefixwise. It says **what is being
 | E1-hosted, Anthropic: agrees with Anthropic's own miss diagnostics | **Pass** 2026-11-06: 37/37 diagnosed misses, all 7 injected miss causes, 60/60 hits, UNKNOWN 0 | `experiments/e1_hosted/runs/` |
 | E1-hosted, OpenAI | **Blocked on OpenAI:** `prompt_cache_diagnostics` returns `unavailable` on every comparison (GPT-5.6 Luna/Sol/base, delays up to 120 s, completed baseline). Not a Prefixwise bug. | `experiments/e1_hosted/runs/2026-11-06-round4.md` |
 | E4: a fix saves what Prefixwise predicts, tasks still succeed | **Pass** 2026-11-06: `canonical_tools` 99.9% realised (Anthropic), 97.5% (vLLM); success flat (0/60, 1/60 changed) | `experiments/e4/runs/2026-11-06-live.md` |
+| Dogfood: real agent traffic | **Done** 2026-11-06: opencode, 25 requests, 92.9% cached, 0 avoidable; 4 rough edges found and fixed (PR #18) | `experiments/dogfood/2026-11-06-opencode.md` |
 | E2/E3 engine join, E5 compaction | Not started | README "Build order" |
 
 ## Now
 
-**Goals (Muse, on Teja's behalf):**
-- **A.** Set up PyPI publishing, so `pip install prefixwise` works.
-- **B.** Dogfood Prefixwise on real agent traffic (launch gate 2; gate 1, E4, passed).
+**Release v0.3.0** (Claude). Muse finished PyPI part A: the pending publisher and the `pypi` environment exist. Dogfood part B is done, and its fixes are in PR #18. Once PR #18 merges, Claude tags `v0.3.0` on `main`, watches `.github/workflows/release.yml`, and checks `pip install prefixwise`.
 
-**Why:**
-- **A:** trying Prefixwise should be one command.
-- **B:** every result so far comes from scripted turns: E1's injected causes and E4's recorded sessions. Real agents are messier: long tool outputs, retries, compaction, streaming, parallel sessions. Real traffic will surface rough edges no experiment can, and gives a real `prefixwise report` to replace the README's illustrative one.
+**Muse: nothing needed right now.** Optional task C (OpenAI's official prices) still stands:
+- Open https://developers.openai.com/api/docs/pricing.
+- Report input, cached input, output and any cache-write price for `gpt-5.6`, `gpt-5.6-luna`, `gpt-5.6-sol` and `gpt-5.6-terra`, exactly as shown, with the URL.
 
-### A. PyPI (about 5 minutes; needs Teja's PyPI and GitHub logins in the browser)
-1. On pypi.org, logged in as Teja: **Your projects → Publishing → Add a new pending publisher**, with:
-   - PyPI project name `prefixwise`
-   - owner `tejachavali`, repository `prefixwise`
-   - workflow `release.yml`
-   - environment `pypi`
-2. On GitHub, logged in as Teja: `tejachavali/prefixwise` → **Settings → Environments → New environment**, named `pypi`, with no secrets.
-3. **Don't tag.** Report back that both are done; Claude pushes the `v0.3.0` tag, watches the release workflow and checks `pip install prefixwise`.
-
-### B. Dogfood (an hour or more of real work)
-1. `pip install "git+https://github.com/tejachavali/prefixwise"` (from `main`).
-2. `prefixwise serve --upstream https://api.anthropic.com --ledger dogfood.db`. It listens on 127.0.0.1:8080. Keys stay in environment variables.
-3. Point a **real agent doing real work** at it. Preferably your own model calls, if your client lets you set the API base URL to `http://127.0.0.1:8080` (Anthropic) or `http://127.0.0.1:8080/v1` (OpenAI). Otherwise run an open-source coding agent on a real task. Set `X-Prefixwise-Session-Id` per conversation if you can.
-4. Don't script the traffic. The point is behaviour Prefixwise hasn't seen.
-
-**Report back:**
-- the output of `prefixwise report`, `prefixwise report --by model` and `prefixwise fixes`
-- which agent you used and roughly how long it ran
-- anything that broke or looked wrong (errors, odd causes, a large `unknown` share), with the request IDs
-
-The ledger holds no prompt text, so these are safe to share. Don't share `dogfood.db` itself if the work was private.
-
-**What Claude does with it:**
-- **Broken things:** fix them first.
-- **A large `unknown` or `routing_miss` share:** find the missing evidence (a header, a provider field).
-- **A wasteful cause that dominates:** check its advice, and consider a proxy toggle for it (the next E4 candidate).
-- **All clean:** the report becomes the README's real example, and then launch.
-
-### C. Optional, any time: OpenAI's official prices (about 5 minutes, browser)
-Claude's environment can't reach OpenAI's pricing pages, so OpenAI models are unpriced.
-- Open https://developers.openai.com/api/docs/pricing (or https://openai.com/api/pricing).
-- Report, exactly as the page shows them, with the URL and any "last updated" date: input, cached input, output, and any cache-write price for `gpt-5.6`, `gpt-5.6-luna`, `gpt-5.6-sol` and `gpt-5.6-terra` (the IDs Muse confirmed on 2026-11-06).
-- Don't use aggregator sites. Claude adds them to the built-in table only if they come from OpenAI's own page.
-
-**Not blocking:** the next fix to prove after dogfooding is probably moving volatile values out of the system prompt. That needs an app change rather than a proxy toggle, so its E4 compares two versions of a recorded session.
+**Next for Claude, after the release:**
+1. **Per-model lanes within a session**, from the dogfood. A side call to a small model should not hide causes on the main thread. This changes E1's model-switch scoring, so the E1 harnesses get updated in the same PR.
+2. The product plan Claude proposed to Teja on 2026-11-06: `prefixwise run -- <cmd>`, a local web UI, live fix experiments. Waiting on Teja's go-ahead and choice of first audience.
 
 ## In parallel (Claude): launch gates
 
 Teja asked when Prefixwise can go public for people to try. The gates, in order:
 1. **E4 live pass:** done 2026-11-06, `canonical_tools` proven.
-2. **Dogfooding:** Muse, on Teja's behalf; see "Now" B.
+2. **Dogfooding:** done 2026-11-06 (opencode); fixes in PR #18.
 3. **Security review:** done, PR #13. See below.
 4. **Launch polish:** done, PR #14 (v0.3.0 prepared, release workflow, CONTRIBUTING, CHANGELOG, issue templates). Publishing needs Teja's one-time PyPI setup; see CONTRIBUTING.md "Releasing".
 
@@ -160,3 +127,4 @@ Then a soft launch to a few people who run agents (Omni's founder is a candidate
 - **2026-11-06:** Teja asked Muse to do the PyPI setup and dogfooding on Teja's behalf. Claude pushes the v0.3.0 tag once Muse confirms the setup.
 - **2026-11-06:** Roadmap written down (section above). Claude started dollar costs while Muse dogfoods.
 - **2026-11-06:** Claude: dollar costs (PR #17). Anthropic rates are verified from platform.claude.com, the official page (fetched by a Claude helper). OpenAI's pricing pages are unreachable from Claude's environment, so that's Muse task C.
+- **2026-11-07:** Muse finished PyPI setup (part A) and dogfooding (part B: opencode, 92.9% cached, 0 waste). Claude fixed the 4 rough edges (PR #18); the release tag follows.

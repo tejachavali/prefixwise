@@ -360,3 +360,13 @@
   ledger, report/fixes in dollars, `prefixwise prices`, user rates file.
 - Tests: 127 passed. Wheel includes prices.json; installed CLI works.
 - Not done: OpenAI rates (official pages unreachable here; Muse task C).
+
+## 2026-11-07 PST -- commit a463c31e2fb40aab6108a0a34ea1647d6221ff9d (dogfood fixes)
+- Dogfood (Muse, Colab, opencode 1.19.5, real task, 60206da): 25
+  requests, 341,145 prompt tokens, 92.9% cached, 0 avoidable. Found:
+  /messages 404, /v1/models 404, HEAD 501, Sonnet 4.6 unpriced,
+  haiku side calls shown as model_switch.
+- What changed: path aliases, query forwarding, pass-through of
+  unanalysed endpoints (not recorded), HEAD/DELETE, Sonnet 4.6 price.
+  Per-model lanes deferred to its own PR (changes E1 scoring).
+- Tests: 133 passed.
