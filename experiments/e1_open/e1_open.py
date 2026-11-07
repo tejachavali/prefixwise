@@ -85,9 +85,8 @@ Engines (--engine; the URL flag is --vllm-url for any of them):
 - vllm-lmcache: vLLM with LMCache CPU offload, vllm_lmcache_server.sh.
   vLLM's cached_tokens counts local hits plus tokens loaded from LMCache.
 - sglang / sglang-hicache: sglang_server.sh (HICACHE=1 for the second).
-  Needs --enable-cache-report for cached_tokens. SGLang reads a body
-  session_id as its own stateful-session handle and rejects unknown ones,
-  so it is not forwarded. SGLang serves any model name with its one model,
+  Needs --enable-cache-report for cached_tokens. Prefixwise sends SGLang a
+  body session_id only with --kv-events (prefixwise serve). SGLang serves any model name with its one model,
   so MODEL_SWITCH turns are a label change on the same weights there.
 
 Usage:

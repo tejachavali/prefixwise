@@ -2,6 +2,8 @@
 
 Design note, 2026-11-07. Facts about the engines were read from their source:
 vllm-project/vllm at 8176238, sgl-project/sglang at a40b25a, LMCache/LMCache at bd9f0f4.
+SGLang's KV events re-read the same day at the v0.5.23 release (297e54f) and main (278fd83),
+which corrected an earlier conclusion (section "SGLang", below).
 
 ## The question
 
@@ -24,7 +26,7 @@ self-hosted engine there is one cache, so that explanation does not apply. What 
 |---|---|---|
 | `cached_tokens` in the response | Hit or miss, not why | Free; needs `--enable-prompt-tokens-details` (vLLM) or `--enable-cache-report` (SGLang) |
 | Engine metrics (`/metrics`) | SGLang: `sglang:evicted_tokens_total`, engine-wide. vLLM: only a sampled histogram (`vllm:kv_block_idle_before_evict_seconds`, behind `--kv-cache-metrics`); no plain eviction counter | Polling; engine-wide only |
-| KV events (`--kv-events-config`, ZMQ + msgpack) | `BlockStored` / `BlockRemoved` / `AllBlocksCleared`. **vLLM stamps the request's `session_id` on `BlockStored`**, so blocks can be attributed to sessions. SGLang has the same field, but it is SGLang's stateful-session handle: it rejects ids it did not open, so a proxy cannot set it | A subscriber thread and two dependencies |
+| KV events (`--kv-events-config`, ZMQ + msgpack) | `BlockStored` / `BlockRemoved` / `AllBlocksCleared`. **vLLM stamps the request's `session_id` on `BlockStored`**, so blocks can be attributed to sessions. SGLang (>= 0.5.20) stamps a body `session_id` too, on the blocks a request newly stores (section "SGLang") | A subscriber thread and two dependencies |
 | SGLang `return_cached_tokens_details` | Per request: tokens served from device / host / storage (LMCache) | A request field; tiers, not causes |
 
 Only attributed KV events can say "this session's blocks were removed" **and** the
@@ -38,7 +40,7 @@ add little over inference.
    unchanged-prefix miss is named `evicted`, and the evidence says it is **inferred** and
    names the look-alikes. No dependencies. (Without the flag Prefixwise assumes a hosted
    API and says `routing_miss`, which is wrong behind one engine.)
-2. **`--kv-events` (vLLM only)** turns the inference into evidence:
+2. **`--kv-events` (vLLM)** turns the inference into evidence:
    - Prefixwise sends its session id in the request body and
      `vllm_xargs: {"kv_cache_report_mode": "full"}` (merged with the client's). By default
      vLLM reports only *newly stored* blocks; in `full` mode it also reports the blocks a
@@ -73,8 +75,60 @@ add little over inference.
    prefix restored from CPU memory is a hit and is never examined for eviction. Only GPU
    removals count.
 
-Not built, on purpose: SGLang event support (cannot be attributed), engine-wide eviction
-counting (weak evidence), and metrics polling (engine-wide).
+4. **`--kv-events` on SGLang** gives the same two verdicts, built differently because SGLang's
+   events differ (section "SGLang").
+
+Not built, on purpose: engine-wide eviction counting (weak evidence) and metrics polling
+(engine-wide).
+
+## SGLang
+
+**Correction.** The first version of this note said SGLang's `session_id` is its stateful-session
+handle and rejects ids it did not open. That is true of `session_params`. Since v0.5.20 a request
+also takes a top-level `session_id`, documented as a "stable identity shared by requests in the
+same session. Unlike session_params, this does not alter or reconstruct the prompt"
+(`managers/io_struct.py`). The scheduler treats such a request as a normal one
+(`scheduler.py`, `_handle_generate_request`), and the default cache (`UnifiedRadixCache`,
+including HiCache and LMCache) passes it to `record_store`, which writes it on `BlockStored`.
+Checked per release: 0.5.18 and 0.5.19 do not put it on events; 0.5.20 to 0.5.23 and main do.
+Its only other effect is with `--enable-session-radix-cache` (off by default), where it pins a
+session's cache; Prefixwise reads that flag from `/server_info` and then sends no session id.
+
+**How SGLang's events differ from vLLM's, and what each changes:**
+
+- **Only new blocks are reported.** `record_store` runs when a radix node is added, never for
+  blocks a request reuses, and there is no `kv_cache_report_mode`. So Prefixwise keeps its own
+  copy of the tree of GPU blocks (each stored run linked to its parent block) and finds a
+  session's chain by walking up from the last block its previous request stored.
+- **One block is one token by default** (`--page-size 1`). The copy is one dictionary entry per
+  cached token pointing to its run, with each run's hashes in a packed array: about 80 bytes per
+  token (measured), 80 MB per million. Past 2 million tokens Prefixwise forgets the tree and
+  judges nothing, as on vLLM's cap.
+- **Eviction removes leaves first.** On the GPU, SGLang evicts only device leaves
+  (`evict_device_leaf`, `_delete_unbacked_device_leaf`, `_demote` emit `BlockRemoved`). A removal
+  on a chain therefore also removed everything after it, so each run keeps one number, the
+  first block removed, and the stop-point rule reads it. Node splits emit nothing and keep the
+  hashes, so a split only means a later removal cuts a run in the middle.
+- **No attention kind on events.** On sliding-window and Mamba models SGLang frees those layers
+  from internal nodes without an event, so the cache read can stop at a block whose
+  full-attention KV is still there. A removed block at the stop point still proves an eviction;
+  "not an eviction" is claimed only with `--full-attention`. `/server_info` shows sliding-window
+  capacity (`token_capacity_swa`), which turns the flag off; it has nothing for Mamba, hence the
+  flag.
+- **The same wire format and stream.** `[topic, seq, msgpack [ts, events, attn_dp_rank]]`,
+  sequence numbers, a publisher that sends only when something changed (so an empty socket means
+  the stream has caught up), one port per DP rank.
+
+The rest is the vLLM design: freeze the previous request's chain when the next is sent, judge
+only the block where the cache read stopped, make the negative claim only when the stream has
+caught up with no lost messages and one request in flight. `AllBlocksCleared` (`/flush_cache`)
+and an engine restart count as evictions.
+
+**Shared limit, vLLM and SGLang:** a removal is counted from the previous request until the
+response. If the cache read stopped because the tokens changed, and the engine then evicted that
+same block while this request ran (it is not in use, so it can be evicted), the verdict reads
+"confirmed eviction" although the eviction came after the miss. It needs a token change and an
+eviction of exactly that block within one request's lifetime.
 
 ## Failure modes, and what the code does about them
 
@@ -121,5 +175,9 @@ skew, failed requests), fixed above. The rules above answer all of them.
   events ("211 of the previous request's KV blocks removed"); LMCache and HiCache restores
   (98-99% of the prefix) counted as hits 5/5; E1-open 120/120 on vLLM + LMCache and on SGLang.
   Record: `experiments/e_evict/runs/2026-11-07-colab-l4.md`.
+- `tests/test_sglang_events.py` does the same with SGLang's structs (v0.5.23): confirmed and
+  ruled-out evictions, a prefix stored by another session, split nodes, paged blocks, host-tier
+  events, cache flush, restart, concurrency, lost messages, overflow, and the `/server_info`
+  checks. **Not yet run against a live SGLang**: E-evict with `--kv-events` is the test.
 - Open: a live test of token-level divergence (a template that re-renders history), to
   measure how often "not an eviction" occurs in real agent traffic.

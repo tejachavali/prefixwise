@@ -1,4 +1,6 @@
-"""Engine join for vLLM: its KV-cache events tell an eviction from everything else.
+"""Engine join for vLLM and SGLang: KV-cache events tell an eviction from everything else.
+
+SGLang (>= 0.5.20) is `SGLangEvents`, below; the rest of this note is about vLLM.
 
 Behind one self-hosted engine, a request whose prefix is unchanged but was not
 reused usually means the engine evicted it (GPU memory full). Two look-alikes
@@ -35,6 +37,7 @@ from __future__ import annotations
 import itertools
 import threading
 import time
+from array import array
 from collections import OrderedDict
 
 GPU = (None, "GPU")
@@ -93,24 +96,27 @@ class EngineEvents:
                 self._last_seq = seq
             self.stats["batches"] += 1
             for ev in batch[1]:
-                kind = ev.get("type")
-                if kind == "BlockStored" and ev.get("medium") in GPU:
-                    if ev.get("kv_cache_spec_kind") in FULL_KINDS:
-                        self._store(ev)
-                    else:
-                        self.hybrid = True
-                elif kind == "BlockRemoved" and ev.get("medium") in GPU:
-                    group = ev.get("group_idx") or 0
-                    for h in ev.get("block_hashes") or []:
-                        self._remove((group, h))
-                elif kind == "AllBlocksCleared":
-                    self.stats["cleared"] += 1
-                    self._clear()
+                self._event(ev)
             if isinstance(batch[0], (int, float)):
                 ts = float(batch[0])
                 self._latest_ts = max(self._latest_ts, ts)
                 offset = time.time() - ts  # the engine may run on another host with another clock
                 self._clock_offset = offset if self._clock_offset is None else min(self._clock_offset, offset)
+
+    def _event(self, ev: dict) -> None:
+        kind = ev.get("type")
+        if kind == "BlockStored" and ev.get("medium") in GPU:
+            if ev.get("kv_cache_spec_kind") in FULL_KINDS:
+                self._store(ev)
+            else:
+                self.hybrid = True
+        elif kind == "BlockRemoved" and ev.get("medium") in GPU:
+            group = ev.get("group_idx") or 0
+            for h in ev.get("block_hashes") or []:
+                self._remove((group, h))
+        elif kind == "AllBlocksCleared":
+            self.stats["cleared"] += 1
+            self._clear()
 
     def _store(self, ev: dict) -> None:
         group, hashes, session = ev.get("group_idx") or 0, ev.get("block_hashes") or [], ev.get("session_id")
@@ -278,3 +284,210 @@ class EngineEvents:
                         self.stats["decode_errors"] += 1
         finally:
             sock.close(0)
+
+
+class _Seg:
+    """Blocks SGLang stored in one event, in chain order: one radix-tree node or part of one.
+
+    SGLang reports only the blocks it newly stores, each run linked to its parent
+    block, so a request's full chain is this run plus its ancestors (`parent`,
+    up to block `parent_last`). Positions are in tokens."""
+
+    __slots__ = ("block", "cut", "hashes", "parent", "parent_last", "start", "tokens")
+
+    def __init__(self, parent, parent_last, start, block, tokens, hashes):
+        self.parent, self.parent_last = parent, parent_last
+        self.start = start  # token position of block 0; None if an ancestor was never seen
+        self.block, self.tokens = block, tokens  # tokens per block, tokens in the run
+        self.hashes = hashes  # packed; the index maps a hash to its run only, to save memory
+        self.cut: int | None = None  # first block removed from the GPU (SGLang evicts leaves first)
+
+    def blocks_before(self, j: int) -> int:
+        """Blocks on the chain before block j of this run."""
+        seg, n = self, j
+        while seg.parent is not None:
+            n += seg.parent_last + 1
+            seg = seg.parent
+        return n
+
+
+def _chain_counts(tail) -> tuple[int, int]:
+    """(blocks on the chain ending at tail, blocks of it removed from the GPU)."""
+    seg, last = tail
+    total = seg.blocks_before(last) + 1
+    first_removed = total
+    while seg is not None:
+        if seg.cut is not None and seg.cut <= last:
+            first_removed = min(first_removed, seg.blocks_before(seg.cut))
+        seg, last = seg.parent, seg.parent_last
+    return total, total - first_removed
+
+
+class SGLangEvents(EngineEvents):
+    """Engine join for SGLang >= 0.5.20 (docs/ENGINES.md).
+
+    Differences from vLLM, all from SGLang's source (v0.5.23, main 278fd83):
+    a body `session_id` is stamped on the blocks a request newly stores, but
+    blocks it reuses are not reported again, so Prefixwise keeps the engine's
+    tree of GPU blocks and walks a session's chain through parent links. Blocks
+    are one token by default (`--page-size`). Eviction removes tree leaves
+    first, so a removal on a chain also removes everything after it. And the
+    events carry no attention kind: on sliding-window or Mamba models SGLang
+    frees those layers without an event, so "not an eviction" is claimed only
+    for a model declared full-attention (`full_attention=True`)."""
+
+    def __init__(self, endpoint: str | None = None, full_attention: bool = False,
+                 max_alive: int = 2_000_000, **kw):
+        super().__init__(endpoint, max_alive=max_alive, **kw)
+        self.full_attention = full_attention
+        self.hybrid = not full_attention
+        self._alive: dict = {}  # block hash on the GPU -> its run
+        self._tails: OrderedDict = OrderedDict()  # session -> [(run, last index) or None, concurrent]
+
+    def _event(self, ev: dict) -> None:
+        kind = ev.get("type")
+        if kind == "BlockStored" and ev.get("medium") in GPU:
+            self._store(ev)
+        elif kind == "BlockRemoved" and ev.get("medium") in GPU:
+            self._remove(ev.get("block_hashes") or [])
+        elif kind == "AllBlocksCleared":
+            self.stats["cleared"] += 1
+            self._clear()
+
+    def _store(self, ev: dict) -> None:
+        hashes = ev.get("block_hashes") or []
+        if not hashes:
+            return
+        self.stats["stored"] += len(hashes)
+        tokens = len(ev.get("token_ids") or ()) or len(hashes) * (ev.get("block_size") or 1)
+        block = ev.get("block_size") or max(1, tokens // len(hashes))
+        try:
+            packed = array("q", hashes)  # SGLang's hashes are signed 64-bit
+        except (TypeError, OverflowError):
+            packed = list(hashes)
+        parent_hash = ev.get("parent_block_hash")
+        p = None if parent_hash is None else self._alive.get(parent_hash)
+        if parent_hash is None:
+            seg = _Seg(None, -1, 0, block, tokens, packed)
+        elif p is None:  # stored before Prefixwise subscribed: this chain cannot be placed
+            seg = _Seg(None, -1, None, block, tokens, packed)
+        else:
+            i = p.hashes.index(parent_hash)
+            end = None if p.start is None else p.start + min(p.tokens, (i + 1) * p.block)
+            seg = _Seg(p, i, end, block, tokens, packed)
+        for h in hashes:
+            self._alive[h] = seg
+        session = ev.get("session_id")
+        if session:
+            tail = self._tails.get(session)
+            if tail is None:
+                tail = self._tails[session] = [None, False]
+                while len(self._tails) > self.max_sessions:
+                    self._tails.popitem(last=False)
+            self._tails.move_to_end(session)
+            tail[0] = (seg, len(packed) - 1)  # stores come in chain order: the latest is the deepest
+        if len(self._alive) > self.max_alive:  # removals were missed: residency is unknown
+            self._alive.clear()
+            self._tails.clear()
+            for check in self._checks.values():
+                check["tail"] = None
+            self.stats["overflows"] += 1
+
+    def _remove(self, hashes) -> None:
+        self.stats["removed"] += len(hashes)
+        prev, i = None, -1
+        for h in hashes:
+            seg = self._alive.pop(h, None)
+            if seg is None:
+                prev = None
+                continue
+            # A node's blocks come in chain order; look a position up only where a run restarts.
+            if not (seg is prev and i + 1 < len(seg.hashes) and seg.hashes[i + 1] == h):
+                i = seg.hashes.index(h)
+                seg.cut = i if seg.cut is None else min(seg.cut, i)
+            else:
+                i += 1
+            prev = seg
+
+    def _clear(self) -> None:
+        for seg in set(self._alive.values()):
+            seg.cut = 0
+        self._alive.clear()
+        for check in self._checks.values():  # chains not indexed any more (stored long ago) too
+            check["cleared"] = True
+
+    def request_sent(self, session_id: str) -> int:
+        with self._lock:
+            concurrent = False
+            for check in self._checks.values():
+                if check["session"] == session_id:
+                    check["concurrent"] = concurrent = True
+            prev = self._tails.pop(session_id, None)
+            self._tails[session_id] = [None, concurrent]
+            while len(self._tails) > self.max_sessions:
+                self._tails.popitem(last=False)
+            token = next(self._tokens)
+            self._checks[token] = {"session": session_id, "tail": prev[0] if prev else None,
+                                   "concurrent": concurrent or bool(prev and prev[1]),
+                                   "cleared": False, "errors": self._errors()}
+            while len(self._checks) > self.max_sessions:
+                self._checks.popitem(last=False)
+            return token
+
+    @staticmethod
+    def _chain(tail):
+        seg, last = tail
+        while seg is not None:
+            yield seg, last
+            seg, last = seg.parent, seg.parent_last
+
+    def _locate(self, tail, position: int):
+        """(run, block index) of the previous request's chain at a token position."""
+        seg, last = tail
+        while seg is not None:
+            if seg.start is None:
+                return None
+            if position >= seg.start:
+                j = (position - seg.start) // seg.block
+                return (seg, j) if j <= last else None
+            seg, last = seg.parent, seg.parent_last
+        return None
+
+    def request_done(self, token: int, cached_tokens: int | None,
+                     prompt_tokens: int | None = None) -> tuple[int | None, int | None]:
+        with self._lock:
+            check = self._checks.get(token)
+            if check is None or cached_tokens is None or check["tail"] is None:
+                self._checks.pop(token, None)
+                return NOTHING
+            if prompt_tokens and cached_tokens >= prompt_tokens * 0.5:  # a hit: never examined
+                self._checks.pop(token, None)
+                return NOTHING
+            at = self._locate(check["tail"], max(0, cached_tokens))
+            if at is None:
+                self._checks.pop(token, None)
+                return NOTHING
+        seg, j = at
+
+        def removed() -> bool:
+            return check["cleared"] or (seg.cut is not None and seg.cut <= j)
+
+        settled = removed() or self._settle()
+        with self._lock:
+            self._checks.pop(token, None)
+            if check["cleared"]:
+                for s_, _ in self._chain(check["tail"]):
+                    s_.cut = 0
+            total, gone = _chain_counts(check["tail"])
+            if removed():
+                return max(gone, 1), 0
+            if not settled or self.hybrid or check["concurrent"] or self._errors() != check["errors"]:
+                return NOTHING
+            return 0, total
+
+    def snapshot(self) -> dict:
+        snap = super().snapshot()
+        with self._lock:
+            snap.update(engine="sglang", full_attention=self.full_attention, gpu_blocks_tracked=len(self._alive),
+                        sessions_tracked=len(self._tails))
+        return snap

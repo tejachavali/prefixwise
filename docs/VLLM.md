@@ -50,9 +50,12 @@ proxy stabilise tool order for you.
   LMCache restores after a GPU eviction counts as a hit. Only prefixes lost from every tier
   are evictions. Launch script: `experiments/e1_open/vllm_lmcache_server.sh`.
 - **SGLang (and HiCache):** start it with `--enable-cache-report`, then
-  `prefixwise serve --upstream http://127.0.0.1:30000 --engine sglang`. Evictions are named
-  as inferred: SGLang reads a body `session_id` as its own session handle, so its KV events
-  cannot be attributed to sessions. Launch script: `experiments/e1_open/sglang_server.sh`.
+  `prefixwise serve --upstream http://127.0.0.1:30000 --engine sglang`. Evictions are
+  inferred. To confirm them (SGLang 0.5.20 or later), also start SGLang with
+  `--kv-events-config '{"publisher": "zmq", "endpoint": "tcp://*:5557"}'` and add
+  `--kv-events tcp://127.0.0.1:5557` (and `--full-attention` for a model with no
+  sliding-window or Mamba layers, so Prefixwise can also say "not an eviction").
+  Launch script: `experiments/e1_open/sglang_server.sh` (`KV_EVENTS=1`).
 
 ## Validated live
 

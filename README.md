@@ -189,6 +189,16 @@ prefixwise serve --upstream http://127.0.0.1:8000 --engine vllm --kv-events tcp:
 
 The verdict becomes `evicted` **confirmed** ("the engine removed N of this session's blocks"), or `unknown` with "not an eviction: the engine still holds this session's blocks" when the cause lies elsewhere. `GET /engine` shows the event stream's health.
 
+**SGLang (0.5.20 or later): the same.** SGLang also writes a request's `session_id` on the blocks it stores, so Prefixwise rebuilds each session's chain from SGLang's events:
+
+```bash
+python -m sglang.launch_server --model-path MODEL --enable-cache-report \
+  --kv-events-config '{"publisher": "zmq", "endpoint": "tcp://*:5557"}'
+prefixwise serve --upstream http://127.0.0.1:30000 --engine sglang --kv-events tcp://127.0.0.1:5557 --full-attention
+```
+
+`--full-attention` says the model has no sliding-window or Mamba layers (Qwen3, Llama, most dense models). SGLang frees those layers without an event, so without the flag a missing block still confirms an eviction, but Prefixwise never says "not an eviction". At startup Prefixwise reads SGLang's `/server_info` and says if the version is too old, events are off, or the model has sliding-window layers. Memory: about 80 bytes per token in SGLang's GPU cache at its default `--page-size 1` (80 MB per million tokens); with more than 2 million it stops judging.
+
 **LMCache and HiCache need nothing extra.** A prefix restored from CPU memory counts as a hit (vLLM's `cached_tokens` includes tokens loaded from LMCache), so only prefixes lost from every tier are evictions. Why it works this way, the alternatives considered and the known limits (several replicas, lost events): [docs/ENGINES.md](docs/ENGINES.md).
 
 ## Running in production
@@ -215,7 +225,7 @@ Measured by [`benchmarks/bench.py`](benchmarks/README.md) (results in [`benchmar
   - **OpenAI native agreement.** OpenAI's `prompt_cache_diagnostics` returned `unavailable` for every comparison on gpt-5.6, -luna and -sol. That held with turn delays of 1 s, 30 s and 120 s, and on a minimal standalone call with a completed baseline. OpenAI's dashboard shows 0 diagnosed responses. Prefixwise still classifies OpenAI traffic; only the cross-check against OpenAI's own verdict is missing.
   - **Causes E1 does not inject:** TTL expiry, routing, eviction, tool-result mutation.
   - **Real agent traffic,** which is messier than scripted turns.
-- **Self-hosted engines:** with `--engine`, an engine eviction is inferred from one cache and no routing; on vLLM, `--kv-events` confirms it or rules it out. Validated live on vLLM 0.33 and SGLang 0.5.23 (Colab L4): evictions named 5/5 (confirmed with KV events), LMCache and HiCache restores counted as hits 5/5 ([record](experiments/e_evict/runs/2026-11-07-colab-l4.md)). Not yet measured live: how often the "not an eviction" verdict (token-level divergence) occurs in real agent traffic. Several replicas need one Prefixwise each.
+- **Self-hosted engines:** with `--engine`, an engine eviction is inferred from one cache and no routing; on vLLM and SGLang, `--kv-events` confirms it or rules it out (SGLang's events not yet validated live). Validated live on vLLM 0.33 and SGLang 0.5.23 (Colab L4): evictions named 5/5 (confirmed with KV events), LMCache and HiCache restores counted as hits 5/5 ([record](experiments/e_evict/runs/2026-11-07-colab-l4.md)). Not yet measured live: how often the "not an eviction" verdict (token-level divergence) occurs in real agent traffic. Several replicas need one Prefixwise each.
 - **Divergence is located per block, not per token.** An edit at the very end of a long system prompt is reported as `system_edit`, even if the provider could have reused everything before it. In one live OpenAI call, appending three words to 2,100 tokens of instructions gave 0 cached tokens, which looks more like routing than the edit itself.
 - One proxy process keeps session state in memory: run one instance per agent fleet, or send all of a session's turns to the same instance.
 - `evicted` needs vLLM KV events, which the proxy does not consume yet.
