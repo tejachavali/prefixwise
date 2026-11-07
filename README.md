@@ -30,10 +30,32 @@ none                       790  5,925,000   84.0%          0           0        
 
 ```bash
 pip install prefixwise
+prefixwise run -- claude                     # or any agent: your command after the --
+```
+
+`prefixwise run` starts the proxy, points the agent at it (`ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`; the agent keeps its own API key), and when the agent exits prints what that run's cache did, in plain English:
+
+```
+42 requests, 1,812,400 prompt tokens, 91% served from cache. Cost $3.08.
+Avoidable: 96,500 tokens ($0.26), 5.3% of prompt tokens. Fix these, biggest first:
+  1. The system prompt changed only in a date, time or id (14 requests, 88,200 tokens, $0.24).
+     Fix: Move dates, times and ids out of the system prompt, to the end of the prompt or the latest user message.
+  2. The same tools were sent in a different order or format (3 requests, 8,300 tokens, $0.02).
+     Fix: Send tools in a fixed order with deterministic serialization (...)
+     Prefixwise can do it for you: prefixwise serve --fix canonical_tools (proven)
+Expected misses (not waste): 2 x first request of a session: nothing to reuse yet; 1 x switched model: each model has its own cache.
+```
+
+(Illustrative output. `prefixwise run --mock -- <agent>` tries it with synthetic responses and no API calls.)
+
+### Running the proxy yourself
+
+For a long-running proxy, start it and point any OpenAI- or Anthropic-compatible client at it:
+
+```bash
 prefixwise serve --mock                      # no API key, synthetic responses; try it first
 ```
 
-Point any OpenAI- or Anthropic-compatible client at it:
 
 ```python
 from openai import OpenAI
@@ -47,7 +69,7 @@ Then:
 
 ```bash
 prefixwise task fix-bug-42 --success         # when the task ends (or POST /tasks)
-prefixwise report                            # where the tokens went
+prefixwise report                            # what the cache did, and what to fix (--detail for tables)
 prefixwise report --by agent_id              # compare agent / prompt versions per successful task
 prefixwise explain examples/session.jsonl    # offline: diagnose a saved session (examples/ is in this repo)
 ```
@@ -98,6 +120,7 @@ Avoidable tokens for a waste turn = the part of the previous turn's prompt that 
 | Command | |
 |---|---|
 | `prefixwise serve [--upstream URL] [--mock] [--fix canonical_tools] [--host H] [--port P] [--ledger FILE]` | Run the proxy. Ledger defaults to `./prefixwise.db`. `--fix` applies an opt-in, reversible rewrite to every request (see below). |
+| `prefixwise run [--mock] [--fix NAME] -- <agent>` | Run an agent through Prefixwise and report on that run when it exits. |
 | `prefixwise prices [--json]` | The dated price table behind dollar costs, and where each rate came from. |
 | `prefixwise prune --older-than 30d` | Delete ledger entries older than that (retention). Add `--include-undated` to also drop rows written before 0.3.1. |
 | `prefixwise export [--format jsonl\|csv] [--since 7d] [--where session=s1]` | Every ledger row (facts, never prompt text) for a spreadsheet, notebook or warehouse. |

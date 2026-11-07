@@ -62,6 +62,10 @@ One row, by the `X-Prefixwise-Request-Id` the proxy returned.
 Fixes ranked by the avoidable tokens (and dollars) this ledger attributes to their cause, with
 whether the proxy can apply them and the evidence behind them.
 
+### `GET /api/v1/findings`
+What `prefixwise report` says, as data: a summary, the avoidable-waste causes with a plain
+explanation and the fix for each, expected misses, and failures. `since`/`until` narrow it.
+
 ### `GET /api/v1/prices`
 The dated price table behind the dollar metrics, and the files it came from.
 

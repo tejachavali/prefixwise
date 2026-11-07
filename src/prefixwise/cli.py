@@ -102,12 +102,29 @@ def cmd_fixes(args) -> int:
 
 
 def cmd_report(args) -> int:
+    from . import api
+    from .findings import findings, render
+
     led = _open_existing_ledger(args)
+    try:
+        since = api._time(args.since, "--since")
+    except api.ApiError as exc:
+        print(f"prefixwise: {exc}", file=sys.stderr)
+        return 2
+    found = findings(led, since=since)
+    detail = args.detail or args.by is not None
+    args.by = args.by or "cause"
     summary = led.summary()
     rows = led.rollup(args.by)[: args.limit]
     if args.json:
-        print(json.dumps({"summary": summary, "by": args.by, "rows": rows}, indent=2))
+        print(json.dumps({"findings": found, "summary": summary, "by": args.by, "rows": rows}, indent=2))
         return 0
+    print(render(found))
+    if since is not None or not detail:
+        if since is None:
+            print("\nDetails: prefixwise report --detail   Fixes: prefixwise fixes   Data: prefixwise export")
+        return 0
+    print()
     t = summary["tasks"]
     print(f"Requests            {_fmt_int(summary['requests'])}")
     print(f"Prompt tokens       {_fmt_int(summary['prompt_tokens'])}"
@@ -197,6 +214,58 @@ def cmd_prune(args) -> int:
     n = Ledger(_ledger_path(args)).prune(seconds, undated=args.include_undated)
     print(f"deleted {n} ledger entries older than {args.older_than}")
     return 0
+
+
+def cmd_run(args) -> int:
+    """Run an agent through Prefixwise and report on that run when it exits."""
+    import subprocess
+    import threading
+    import time
+
+    from .findings import findings, render
+    from .proxy import PrefixwiseHTTPServer, PrefixwiseProxy, make_handler
+
+    cmd = args.agent_command[1:] if args.agent_command[:1] == ["--"] else args.agent_command
+    if not cmd:
+        print("usage: prefixwise run [options] -- <agent command>, e.g. prefixwise run -- claude", file=sys.stderr)
+        return 2
+    # Where the agent would have gone: its own base URLs if set (a gateway), else the providers.
+    anthropic = os.environ.get("ANTHROPIC_BASE_URL") or "https://api.anthropic.com"
+    openai = (os.environ.get("OPENAI_BASE_URL") or "https://api.openai.com").rstrip("/")
+    openai = openai[:-3] if openai.endswith("/v1") else openai
+    ledger = args.ledger or os.environ.get("PREFIXWISE_LEDGER_PATH") or DEFAULT_LEDGER
+    try:
+        proxy = PrefixwiseProxy(ledger_path=ledger, mock=True if args.mock else None, fixes=args.fix or None,
+                                upstreams=None if args.mock else {"anthropic": anthropic, "openai": openai})
+    except ValueError as exc:
+        sys.exit(f"prefixwise: {exc}")
+    proxy.default_session = f"run-{time.strftime('%Y%m%d-%H%M%S')}"
+    server = PrefixwiseHTTPServer(("127.0.0.1", args.port), make_handler(proxy))
+    base = f"http://127.0.0.1:{server.server_address[1]}"
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    env = {**os.environ, "ANTHROPIC_BASE_URL": base, "OPENAI_BASE_URL": base + "/v1", "PREFIXWISE_URL": base}
+    upstream = "mock" if args.mock else f"anthropic -> {anthropic}, openai -> {openai}"
+    print(f"prefixwise: proxy on {base} ({upstream}); ledger {ledger}", file=sys.stderr, flush=True)
+    start = time.time()
+    try:
+        code = subprocess.call(cmd, env=env)
+    except FileNotFoundError:
+        print(f"prefixwise: command not found: {cmd[0]}", file=sys.stderr)
+        code = 127
+    except KeyboardInterrupt:
+        code = 130
+    server.shutdown()
+    server.drain(5)
+    server.server_close()
+    found = findings(proxy.ledger, since=start)
+    print("\n-- prefixwise: this run --", file=sys.stderr)
+    if not (found["summary"]["requests"] or found["summary"]["requests_failed"]):
+        print(f"No requests reached Prefixwise. Does {cmd[0]} read ANTHROPIC_BASE_URL or OPENAI_BASE_URL? "
+              "If not, set its base URL to the proxy by hand (see the README).", file=sys.stderr)
+    else:
+        print(render(found), file=sys.stderr)
+        print(f"All runs: prefixwise report --ledger {ledger}", file=sys.stderr)
+    return code
 
 
 def cmd_export(args) -> int:
@@ -327,11 +396,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_serve)
 
     p = sub.add_parser("report", help="summarise the ledger")
-    p.add_argument("--by", default="cause", choices=["cause", "session_id", "agent_id", "model",
-                                                     "provider", "task_id"])
+    p.add_argument("--by", default=None, choices=["cause", "session_id", "agent_id", "model",
+                                                  "provider", "task_id"],
+                   help="print the per-group table, grouped by this (implies --detail)")
     p.add_argument("--limit", type=int, default=20)
     p.add_argument("--json", action="store_true")
     ledger_opt(p)
+    p.add_argument("--since", metavar="WHEN", help="only requests since then: unix seconds or 24h, 7d, ...")
+    p.add_argument("--detail", action="store_true", help="also print totals and the per-group table")
     p.set_defaults(func=cmd_report)
 
     p = sub.add_parser("prices", help="the dated price table used for dollar costs")
@@ -351,6 +423,17 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--failure", dest="outcome", action="store_const", const="failure")
     ledger_opt(p)
     p.set_defaults(func=cmd_task)
+
+    p = sub.add_parser("run", help="run an agent through Prefixwise, then report on that run",
+                       description="Starts the proxy on a free local port, points the agent at it with "
+                                   "ANTHROPIC_BASE_URL and OPENAI_BASE_URL (the agent keeps its own keys), "
+                                   "and prints what this run's cache did when the agent exits.")
+    p.add_argument("--port", type=int, default=0, help="default: any free port")
+    p.add_argument("--mock", action="store_true", help="synthetic responses, no API calls")
+    p.add_argument("--fix", action="append", metavar="NAME", help="apply a fix (repeatable): canonical_tools")
+    ledger_opt(p)
+    p.add_argument("agent_command", nargs=argparse.REMAINDER, metavar="-- COMMAND")
+    p.set_defaults(func=cmd_run)
 
     p = sub.add_parser("export", help="raw ledger rows as JSONL or CSV (facts, never prompt text)")
     p.add_argument("--format", choices=["jsonl", "csv"], default="jsonl")
