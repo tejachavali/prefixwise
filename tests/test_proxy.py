@@ -304,7 +304,9 @@ def test_stream_upstream_error_is_json_and_not_recorded():
     try:
         status, resp, _ = post(port, "/v1/chat/completions", {**BODY, "stream": True})
         assert status == 400 and resp == err
-        assert proxy.ledger.rollup_by_cause() == []
+        assert proxy.ledger.rollup_by_cause() == []  # no verdict
+        row = proxy.ledger.recent(1)[0]
+        assert (row["status"], row["error"], row["stream"]) == (400, "invalid_request_error", 1)
     finally:
         server.shutdown()
         up.server.shutdown()

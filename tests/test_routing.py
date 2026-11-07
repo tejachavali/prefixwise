@@ -142,6 +142,7 @@ def test_failed_upstream_requests_are_not_recorded():
     server, base = start(proxy)
     try:
         assert call(base + "/v1/messages", "POST", MSG)[0] == 502
-        assert proxy.ledger.rollup_by_cause() == []
+        assert proxy.ledger.rollup_by_cause() == []  # no verdict
+        assert proxy.ledger.summary()["failed_requests"] == 1  # but recorded (docs/DATA.md)
     finally:
         server.shutdown()

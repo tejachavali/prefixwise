@@ -56,11 +56,11 @@ import urllib.request
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from .classifier import Classification, MissCause, RequestSnapshot, classify
+from .classifier import Classification, MissCause, RequestSnapshot, classify, first_divergence
 from .diagnostics import AgreementScorer, anthropic_diagnostics, openai_comparison_options
 from .fingerprint import Fingerprinter
 from .fixes import apply_fixes, parse_fixes
-from .pricing import PriceTable
+from .pricing import PriceTable, breakdown
 from .ledger import Ledger, LedgerEntry, avoidable_for_turn
 
 
@@ -503,6 +503,7 @@ class PrefixwiseProxy:
             "compaction_event": bool(body.get("prefixwise_compaction_event", False))
             or headers.get("x-prefixwise-compaction-event") in ("1", "true"),
             "stream": bool(body.get("stream")),
+            "t0": time.perf_counter(),  # for latency and Prefixwise's own overhead
             "fixes_applied": fixes_applied,
             "fork_of": headers.get("x-prefixwise-fork-of"),
             "ttl_seconds": cache_ttl_seconds(provider, body, headers),
@@ -601,6 +602,8 @@ class PrefixwiseProxy:
             if ctx.get("api") == "responses":
                 self.snapshot_by_response[response_id] = curr
 
+        parts = breakdown(provider, usage)
+        div = first_divergence(prev.blocks, curr.blocks) if prev is not None else None
         entry = LedgerEntry(
             session_id=session_id, agent_id=ctx["agent_id"],
             provider=provider, model=ctx["model"], cause=result.cause.value,
@@ -612,11 +615,19 @@ class PrefixwiseProxy:
             task_id=ctx["task_id"], request_id=ctx["request_id"],
             completion_tokens=completion_tokens_of(provider, usage),
             fixes=",".join(ctx.get("fixes_applied") or []) or None,
+            status=status, api=ctx.get("api"), stream=ctx.get("stream"),
+            uncached_tokens=parts.uncached_input,
+            cache_write_tokens=parts.cache_write_5m + parts.cache_write_1h + parts.cache_write,
+            latency_ms=ctx.get("upstream_ms"), gap_seconds=gap_seconds,
+            evidence=result.evidence,
+            secondary_causes=",".join(c.value for c in result.secondary) or None,
+            divergence_role=div["role"] if div else None, divergence_index=div["index"] if div else None,
         )
         priced_model = str(payload.get("model") or ctx["model"])
         entry.avoidable_cost = self.prices.avoidable_cost(priced_model, entry.avoidable_tokens, prompt_tokens)
         if entry.cost is not None:
             entry.price_as_of = self.prices.as_of
+        entry.overhead_ms = self._overhead_ms(ctx)
         self.ledger.record(entry)
         return {"request_id": ctx["request_id"], "status": status, "cause": result.cause.value,
                 "legit": result.legit, "native_reason": native_reason, "usage": usage,
@@ -624,6 +635,31 @@ class PrefixwiseProxy:
                 "avoidable_tokens": entry.avoidable_tokens, "fixes_applied": ctx.get("fixes_applied") or [],
                 "cost": entry.cost, "avoidable_cost": entry.avoidable_cost,
                 "response": payload}, entry
+
+    @staticmethod
+    def _overhead_ms(ctx: dict) -> float | None:
+        """Prefixwise's own time: everything since the request arrived, minus upstream."""
+        if "t0" not in ctx or ctx.get("upstream_ms") is None:
+            return None
+        return max(0.0, (time.perf_counter() - ctx["t0"]) * 1000 - ctx["upstream_ms"])
+
+    def record_failure(self, ctx: dict, status: int, payload: dict | None = None,
+                       error: str | None = None) -> None:
+        """A request that produced no verdict (upstream error, cut-off stream) is a
+        row too, so error rates exist and every other rate has an honest
+        denominator (docs/DATA.md). Never fails the request."""
+        err = (payload or {}).get("error") if isinstance(payload, dict) else None
+        kind = error or (err.get("type") if isinstance(err, dict) else None) or f"http_{status}"
+        try:
+            self.ledger.record(LedgerEntry(
+                session_id=ctx["session_id"], agent_id=ctx["agent_id"], provider=ctx["provider"],
+                model=ctx["model"], cause=None, prompt_tokens=0, cached_tokens=0, avoidable_tokens=0,
+                avoidable_cost=None, task_id=ctx["task_id"], request_id=ctx["request_id"],
+                status=status, error=str(kind)[:80], api=ctx.get("api"), stream=ctx.get("stream"),
+                latency_ms=ctx.get("upstream_ms"), overhead_ms=self._overhead_ms(ctx)))
+        except Exception as exc:
+            print(f"prefixwise: failure for {ctx['request_id']} not recorded: {type(exc).__name__}",
+                  file=sys.stderr, flush=True)
 
     # -- non-streaming ---------------------------------------------------------------
 
@@ -641,11 +677,14 @@ class PrefixwiseProxy:
             return {"request_id": ctx["request_id"], "status": 400, "cause": None,
                     "response": _error(400, "use handle_stream for stream=true")}, None
         self._upstream.headers = {}
+        sent = time.perf_counter()
         status, payload = self._forward(provider, ctx["forward_body"], ctx["request_id"],
                                         ctx["upstream_session_id"] or ctx["session_id"],
                                         ctx["headers"], api=api)
+        ctx["upstream_ms"] = (time.perf_counter() - sent) * 1000
         upstream_headers = getattr(self._upstream, "headers", {}) or {}
         if status >= 400:
+            self.record_failure(ctx, status, payload)
             return {"request_id": ctx["request_id"], "status": status, "cause": None,
                     "response": payload, "upstream_headers": upstream_headers}, None
         result, entry = self.finalize_safely(ctx, status, payload)
@@ -1103,9 +1142,12 @@ def make_handler(proxy: PrefixwiseProxy):
 
         def _stream(self, provider: str, body: dict, api: str = "chat"):
             ctx = proxy.prepare(provider, body, self._client_headers(), api=api)
+            sent = time.perf_counter()
             status, lines, acc, err = proxy.open_stream(ctx)
             relayed = ctx.get("upstream_headers") or {}
             if lines is None:
+                ctx["upstream_ms"] = (time.perf_counter() - sent) * 1000
+                proxy.record_failure(ctx, status, err)
                 return self._json(status, err, {**relayed, "X-Prefixwise-Request-Id": ctx["request_id"]})
             # Headers go out before usage is known, so the verdict cannot
             # ride in them: fetch it afterwards from GET /requests/<id>.
@@ -1116,20 +1158,23 @@ def make_handler(proxy: PrefixwiseProxy):
             for k, v in relayed.items():
                 self.send_header(k, v)
             self.end_headers()
-            completed = True
+            failure = None
             try:
                 for line in lines:
                     if acc.feed(line):
                         self.wfile.write(line)
                         self.wfile.flush()
             except (BrokenPipeError, ConnectionResetError):
-                completed = False  # client went away mid-stream
+                failure = "client_disconnected"  # client went away mid-stream
             except (TimeoutError, OSError):
-                completed = False  # upstream stalled or dropped
-            # Record only a stream that finished with usage: a cut-off stream
-            # has partial or no usage, and a guess is worse than no entry.
-            if completed and acc.saw_usage:
+                failure = "upstream_dropped"  # upstream stalled or dropped
+            ctx["upstream_ms"] = (time.perf_counter() - sent) * 1000
+            # A verdict needs the stream's usage: a cut-off stream has partial or
+            # none, and a guess is worse than none. It is still recorded, as a failure.
+            if failure is None and acc.saw_usage:
                 proxy.finalize_safely(ctx, status, acc.payload)
+            else:
+                proxy.record_failure(ctx, status, error=failure or "no_usage")
             self.close_connection = True
     return Handler
 

@@ -26,7 +26,9 @@ import time
 
 import json
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import astuple, dataclass, fields
+
+SCHEMA_VERSION = 3
 
 
 @dataclass
@@ -50,6 +52,21 @@ class LedgerEntry:
     fixes: str | None = None  # comma-separated proxy fixes that rewrote this request
     cost: float | None = None  # USD for the whole request; None = a rate was unknown
     price_as_of: str | None = None  # date of the price table that priced it
+    # Schema 3 (docs/DATA.md): facts observed for every request, failures included.
+    status: int = 200  # upstream HTTP status; >= 400 rows have no verdict and no tokens
+    error: str | None = None  # short error class for failed requests
+    api: str | None = None  # chat | responses | messages
+    stream: bool | None = None
+    uncached_tokens: int | None = None  # prompt tokens neither read from nor written to the cache
+    cache_write_tokens: int | None = None  # prompt tokens written to the cache (all TTLs)
+    latency_ms: float | None = None  # upstream time (to the last byte for streams)
+    overhead_ms: float | None = None  # Prefixwise's own processing time
+    gap_seconds: float | None = None  # since this session's previous turn on this model
+    evidence: str | None = None  # why the verdict was given (Prefixwise's words, never prompt text)
+    secondary_causes: str | None = None  # comma-separated
+    divergence_role: str | None = None  # where the prompt first changed: system, tools, messages, ...
+    divergence_index: int | None = None  # block index of that first change
+    schema_version: int = SCHEMA_VERSION
 
 
 def avoidable_tokens(prompt_tokens: int, cached_tokens: int, *,
@@ -90,7 +107,15 @@ def reuse_adjusted_reads(write_multiplier: float, read_multiplier: float) -> flo
 # Columns added after the first schema; added in place to older ledgers.
 _MIGRATIONS = {"task_id": "TEXT", "request_id": "TEXT", "completion_tokens": "INTEGER",
                "fixes": "TEXT", "cost": "REAL", "price_as_of": "TEXT",
-               "recorded_at": "REAL"}  # unix time; NULL on rows from before 0.3.1
+               "recorded_at": "REAL",  # unix time; NULL on rows from before 0.3.1
+               # schema 3; NULL on older rows (status NULL means it succeeded)
+               "status": "INTEGER", "error": "TEXT", "api": "TEXT", "stream": "INTEGER",
+               "uncached_tokens": "INTEGER", "cache_write_tokens": "INTEGER",
+               "latency_ms": "REAL", "overhead_ms": "REAL", "gap_seconds": "REAL",
+               "evidence": "TEXT", "secondary_causes": "TEXT", "divergence_role": "TEXT",
+               "divergence_index": "INTEGER", "schema_version": "INTEGER"}
+
+_COLUMNS = [f.name for f in fields(LedgerEntry)]
 
 
 class Ledger:
@@ -137,22 +162,11 @@ class Ledger:
             self.conn.commit()
 
     def record(self, entry: LedgerEntry) -> int:
+        values = [int(v) if isinstance(v, bool) else v for v in astuple(entry)]
         with self._lock:
             cur = self.conn.execute(
-                """INSERT INTO entries (session_id, agent_id, provider, model, cause,
-                    legit, prompt_tokens, cached_tokens, avoidable_tokens,
-                    avoidable_cost, task_success, native_reason, classifier_version,
-                    task_id, request_id, completion_tokens, fixes, cost, price_as_of, recorded_at)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                (entry.session_id, entry.agent_id, entry.provider, entry.model,
-                 entry.cause, None if entry.legit is None else int(entry.legit),
-                 entry.prompt_tokens, entry.cached_tokens, entry.avoidable_tokens,
-                 entry.avoidable_cost,
-                 None if entry.task_success is None else int(entry.task_success),
-                 entry.native_reason, entry.classifier_version,
-                 entry.task_id, entry.request_id, entry.completion_tokens, entry.fixes,
-                 entry.cost, entry.price_as_of, time.time()),
-            )
+                f"INSERT INTO entries ({', '.join(_COLUMNS)}, recorded_at) "
+                f"VALUES ({', '.join('?' * (len(_COLUMNS) + 1))})", (*values, time.time()))
             if entry.task_id and entry.task_success is not None:
                 self._set_task_outcome_locked(entry.task_id, entry.task_success)
             self.conn.commit()
@@ -231,11 +245,14 @@ class Ledger:
             n, prompt, cached, completion, avoidable = self.conn.execute(
                 """SELECT COUNT(*), COALESCE(SUM(prompt_tokens), 0), COALESCE(SUM(cached_tokens), 0),
                           COALESCE(SUM(completion_tokens), 0), COALESCE(SUM(avoidable_tokens), 0)
-                   FROM entries""").fetchone()
+                   FROM entries WHERE error IS NULL""").fetchone()
             priced, cost, avoidable_cost = self.conn.execute(
                 """SELECT COUNT(cost), COALESCE(SUM(cost), 0), COALESCE(SUM(avoidable_cost), 0)
-                   FROM entries""").fetchone()
-        return {"requests": n, "prompt_tokens": prompt, "cached_tokens": cached,
+                   FROM entries WHERE error IS NULL""").fetchone()
+            failed = self.conn.execute("SELECT COUNT(*) FROM entries WHERE error IS NOT NULL").fetchone()[0]
+        # "requests" are the ones with a verdict; failed requests (no verdict, no
+        # tokens) are counted apart so every token rate keeps an honest denominator.
+        return {"requests": n, "failed_requests": failed, "prompt_tokens": prompt, "cached_tokens": cached,
                 "completion_tokens": completion, "avoidable_tokens": avoidable,
                 "cache_hit_rate": (cached / prompt) if prompt else None,
                 "avoidable_share": (avoidable / prompt) if prompt else None,
@@ -254,7 +271,8 @@ class Ledger:
         with self._lock:
             n, priced, total = self.conn.execute(
                 """SELECT COUNT(*), COUNT(e.cost), COALESCE(SUM(e.cost), 0)
-                   FROM entries e JOIN tasks t ON e.task_id = t.task_id""").fetchone()
+                   FROM entries e JOIN tasks t ON e.task_id = t.task_id
+                   WHERE e.error IS NULL""").fetchone()
         successful = self.task_counts()["successful"]
         if not successful or not n or priced != n:
             return None
@@ -272,7 +290,7 @@ class Ledger:
                            COALESCE(SUM(cached_tokens), 0), COALESCE(SUM(avoidable_tokens), 0),
                            SUM(CASE WHEN legit = 0 THEN 1 ELSE 0 END),
                            COUNT(cost), SUM(cost), SUM(avoidable_cost)
-                    FROM entries GROUP BY {by}
+                    FROM entries WHERE error IS NULL GROUP BY {by}
                     ORDER BY SUM(avoidable_tokens) DESC, COUNT(*) DESC""").fetchall()
             # Tokens per successful task within each group: tokens on resolved
             # tasks (failures included) / distinct successful tasks.
@@ -301,7 +319,7 @@ class Ledger:
         with self._lock:
             rows = self.conn.execute(
                 """SELECT cause, COUNT(*), SUM(avoidable_tokens), SUM(avoidable_cost)
-                   FROM entries GROUP BY cause ORDER BY SUM(avoidable_tokens) DESC"""
+                   FROM entries WHERE error IS NULL GROUP BY cause ORDER BY SUM(avoidable_tokens) DESC"""
             ).fetchall()
         return [{"cause": c, "requests": n, "avoidable_tokens": t or 0,
                  "avoidable_cost": cost} for c, n, t, cost in rows]
