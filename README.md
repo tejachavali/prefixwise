@@ -86,6 +86,14 @@ Expected misses (not waste): 2 x first request of a session: nothing to reuse ye
 
 (Illustrative output. `prefixwise run --mock -- <agent>` tries it with synthetic responses and no API calls.)
 
+**On a Claude Pro or Max plan?** A proxy cannot sit in front of a subscription login, but Claude Code keeps a log of every session. Read those instead, no setup and nothing sent anywhere:
+
+```bash
+prefixwise import claude-code                # reads ~/.claude/projects (subagents included), read-only
+```
+
+It reports the same way, plus a line per agent (the main conversation, each subagent type), so subagent cost is visible. The logs record each response's usage (cache reads, and writes kept for 5 minutes or 1 hour) and what changed between requests (tool, MCP and skill lists, compactions, model and date changes), but not the prompt itself: causes are inferred from those, and a miss the log cannot explain is reported as `unknown`. Dollars are API prices, what the usage is worth. Run it again later and it adds only new requests.
+
 Ctrl-C goes to the agent as usual. If you already set `ANTHROPIC_BASE_URL` or `OPENAI_BASE_URL` (a gateway), Prefixwise forwards there, so the agent reaches the same place. It works with agents that use an **API key**; an agent signed in with a subscription instead cannot be routed through a proxy, and the report says so if the provider rejects it. **Codex** ignores `OPENAI_BASE_URL`, so `prefixwise run -- codex ...` adds `-c` settings that point it at the proxy as a custom provider (plain HTTP, the key from `OPENAI_API_KEY`, no sign-in screen, nothing written to `~/.codex`).
 
 ### Running the proxy yourself
