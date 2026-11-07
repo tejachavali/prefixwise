@@ -18,7 +18,11 @@ for the following turns, as a real harness would leave it):
   A: first_write, none, volatile_system, none, tool_reserialize, none,
      tool_catalog_change, none, system_edit, none
   B: first_write, none, param_rendered, none, compaction_rewrite, none,
-     model_switch, model_switch (back), none, none
+     model_switch, switch_back, none, none
+
+switch_back returns to the original model. Turns are compared with the
+last turn to the same model (per-model lanes), so its prefix is still
+cached: expected cause none, not a second model_switch.
 
 "none" turns append one exchange. RETRY_REPLAY and TTL_EXPIRED are not
 injected: a hosted cache cannot be made cold on demand, and a TTL test
@@ -79,7 +83,10 @@ SESSION_A = ["first_write", "none", "volatile_system", "none", "tool_reserialize
 # in the prefix (a full miss), the system prompt second (a partial miss).
 PROBE_SCRIPT = ["first_write", "none", "tool_reserialize", "system_edit", "none"]
 SESSION_B = ["first_write", "none", "param_rendered", "none", "compaction_rewrite", "none",
-             "model_switch", "model_switch", "none", "none"]
+             "model_switch", "switch_back", "none", "none"]
+
+# Injected labels whose expected cause differs from the label itself.
+EXPECTED = {"switch_back": "none"}
 
 # ~4,700 tokens of stable instructions: above every provider's minimum
 # cacheable prefix (Anthropic is up to 4,096 on some models), so a miss
@@ -153,7 +160,7 @@ class SessionState:
                                                          "for a failing test to be fixed; tests were run.]"},
                             {"role": "assistant", "content": "Understood, continuing from the summary."}]
             headers["X-Prefixwise-Compaction-Event"] = "1"
-        elif injected == "model_switch":
+        elif injected in ("model_switch", "switch_back"):
             self.model = alt_model if self.model == base_model else base_model
         return headers
 
@@ -196,7 +203,7 @@ def plan(provider: str, repeats: int, alt_model: str | None) -> list[tuple[int, 
     scripts = []
     for r in range(repeats):
         scripts.append((2 * r, SESSION_A))
-        b = SESSION_B if alt_model else [("none" if c == "model_switch" else c) for c in SESSION_B]
+        b = SESSION_B if alt_model else [("none" if c in ("model_switch", "switch_back") else c) for c in SESSION_B]
         scripts.append((2 * r + 1, b))
     return scripts
 
@@ -218,7 +225,7 @@ _MOCK_NATIVE = {
 def mock_forward_factory(provider: str, state: dict):
     def forward(prov, body, request_id, session_id, client_headers, api="chat"):
         injected, tokens = state["injected"], state["tokens"]
-        hit = injected == "none"
+        hit = injected in ("none", "switch_back")
         cached = int(tokens * 0.9) if hit else 0
         reason = None if hit or injected == "first_write" else _MOCK_NATIVE[provider][injected]
         diag = None if injected == "first_write" else {"type": "cache_hit" if hit else "cache_miss",
@@ -305,7 +312,8 @@ def run_provider(provider: str, *, model: str, alt_model: str | None, repeats: i
                                                                 else prompt),
                    "native_mapped": (map_native_reason(provider, native).value
                                      if map_native_reason(provider, native) else None),
-                   "agree_injected": result["cause"] == injected, "agree_native": agree_native,
+                   "agree_injected": result["cause"] == EXPECTED.get(injected, injected),
+                   "agree_native": agree_native,
                    "prompt_tokens": prompt, "cached_tokens": cached,
                    "raw_usage": payload.get("usage"),
                    "raw_diagnostics": {k: payload.get(k) for k in ("diagnostics", "prompt_cache_diagnostics")
@@ -347,7 +355,7 @@ def probe_verdict(rows: list[dict]) -> tuple[bool, list[str]]:
         if "error" in r:
             return False, [f"turn {r['turn']}: HTTP {r['status']}"]
         label = f"turn {r['turn']} ({r['injected']}, {r['cached_tokens']}/{r['prompt_tokens']} cached)"
-        if r["injected"] in ("first_write", "none"):
+        if r["injected"] in ("first_write", "none", "switch_back"):
             if r["native_reason"]:
                 notes.append(f"{label}: unexpected miss reason {r['native_reason']!r} on a non-miss turn")
             continue
@@ -371,7 +379,7 @@ def probe_verdict(rows: list[dict]) -> tuple[bool, list[str]]:
 
 def score(results: list[dict], scorer: AgreementScorer) -> dict:
     ok = [r for r in results if "error" not in r]
-    misses = [r for r in ok if r["injected"] not in ("none", "first_write")]
+    misses = [r for r in ok if EXPECTED.get(r["injected"], r["injected"]) not in ("none", "first_write")]
     per: dict[str, dict] = {}
     for r in ok:
         c = per.setdefault(r["injected"], {"n": 0, "agree_injected": 0, "with_native": 0, "agree_native": 0})

@@ -144,10 +144,14 @@ def explain_session(turns: list[Turn], provider: str | None = None) -> list[Expl
     """Explain every turn against the previous turn in the same session."""
     fp = Fingerprinter()
     last: dict[str, Turn] = {}
+    lanes: dict[tuple, Turn] = {}  # (session, model): the same per-model lanes as the proxy
     out = []
     for t in turns:
-        out.append(explain_pair(last.get(t.session_id), t, provider, fp))
+        lane = (t.session_id, str(t.body.get("model", "unknown")))
+        prev = lanes.get(lane) or last.get(t.session_id)
+        out.append(explain_pair(prev, t, provider, fp))
         last[t.session_id] = t
+        lanes[lane] = t
     return out
 
 

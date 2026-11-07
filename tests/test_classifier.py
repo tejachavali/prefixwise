@@ -49,6 +49,9 @@ def test_tool_reserialize_vs_catalog_change():
 
 def test_compaction_rewrite_needs_event():
     prev = snap()
+    prev.blocks = FP.fingerprint_blocks([("system", "You are helpful."),
+                                         ("messages", {"role": "user", "content": "hello"}),
+                                         ("messages", {"role": "assistant", "content": "hi"})])
     curr = snap()
     curr.blocks = FP.fingerprint_blocks([("system", "You are helpful."),
                                          ("messages", {"role": "user", "content": "different history"})])
@@ -185,3 +188,16 @@ def test_absent_usage_is_unknown_not_below_min_prefix():
     prev = snap(prompt_tokens=5857)
     curr = snap(prompt_tokens=0, cached_tokens=0, gap_seconds=2)
     assert classify(prev, curr).cause is MissCause.UNKNOWN
+
+
+
+def test_replacing_a_one_shot_request_is_not_a_history_edit():
+    """A single-message request replaced by another (side calls: titles,
+    summaries) is a new conversation on the same prefix, not waste."""
+    one = lambda text, cached: RequestSnapshot(  # noqa: E731
+        model="m", provider="vllm", prompt_tokens=2000, cached_tokens=cached, gap_seconds=5,
+        blocks=FP.fingerprint_blocks([("system", "Title it."), ("messages", {"role": "user", "content": text})]))
+    c = classify(one("title for step 1", 0), one("title for step 2", 1900))
+    assert c.cause is MissCause.NONE and MissCause.HISTORY_EDIT in c.secondary
+    c = classify(one("title for step 1", 0), one("title for step 2", 0))
+    assert c.cause is MissCause.ROUTING_MISS  # nothing cached: a routing question, never waste by edit

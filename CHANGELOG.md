@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- **Per-model lanes within a session.** Each request is compared with the last request to the same model, so small-model side calls no longer mask causes on the main thread. Found by dogfooding opencode, which interleaves Haiku calls with Sonnet. A first call to a new model is still `model_switch`; switching back to a model whose prefix is still cached is a hit. Provider diagnostics chain to the same model's last response.
+- **Replacing a one-shot request is not a history edit:** a single-message request followed by a different one (side calls) is judged on its shared-prefix cache reuse.
+- **E1-open harness fix:** Session B turns 8–10 now keep the compacted history. They had reverted to the pre-compaction history, hidden by the model switch until lanes exposed it.
+- **CLI:** `prefixwise report | head` exits quietly.
+
 ## 0.3.0: 2026-11-07
 
 - **Fixes the proxy can apply:** `prefixwise serve --fix canonical_tools` sorts tools so a drifting tool list stops breaking the cache. It is opt-in and reversible, and the ledger records which requests it rewrote.
