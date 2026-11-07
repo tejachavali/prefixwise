@@ -17,7 +17,7 @@ Every number below is from a live run against real models; each links to its rec
 
 | What was tested | Setup | Result |
 |---|---|---|
-| Agrees with Anthropic's own miss reason | Claude Haiku 5.5, 7 kinds of miss, Anthropic's diagnostics chained | **37 of 37** misses ([1](experiments/e1_hosted/runs/2026-11-06-anthropic-claude-haiku-5-5.md), [2](experiments/e1_hosted/runs/2026-11-06-round4.md)) |
+| Agrees with Anthropic's own miss reason | Claude Haiku 5.5, 7 kinds of miss, Anthropic's diagnostics chained | **32 of 32** misses Anthropic named, across 6 kinds; on 5 parameter changes Anthropic answered `unavailable` (no verdict) and Prefixwise named the parameter ([1](experiments/e1_hosted/runs/2026-11-06-anthropic-claude-haiku-5-5.md), [2](experiments/e1_hosted/runs/2026-11-06-round4.md)) |
 | Names injected causes on open models | 120 turns, 9 causes, Qwen3-4B on vLLM 0.33, vLLM + LMCache, SGLang 0.5.23 | **120 of 120** on each ([vLLM](experiments/e1_open/runs/2026-11-06-colab-l4-qwen3-4b.md), [LMCache and SGLang](experiments/e_evict/runs/2026-11-07-colab-l4.md)) |
 | Tells engine eviction from everything else | GPU KV cache flooded 3x; vLLM, SGLang, with and without LMCache / HiCache | evictions **5 of 5**, confirmed from the KV events of vLLM and of SGLang; prefixes restored from CPU counted as hits **5 of 5** ([record](experiments/e_evict/runs/2026-11-07-colab-l4.md), [SGLang events](experiments/e_evict/runs/2026-11-07-colab-l4-sglang-events.md)) |
 | A fix pays what it predicts | `--fix canonical_tools` on 60 paired requests with tool-order drift | **99.9%** (Claude) and **97.5%** (vLLM) of predicted savings realised, task success unchanged ([record](experiments/e4/runs/2026-11-06-live.md)) |

@@ -105,6 +105,13 @@ NATIVE_COVERS = {
 }
 
 
+# Answers that are not a verdict: the provider could not compare (``unavailable``:
+# a parameter differed, the conversation was too long, or the comparison was not
+# ready) or no longer had the baseline (``*_not_found``). They are no evidence,
+# never "no change" and never a disagreement (Anthropic and OpenAI diagnostics docs).
+NO_VERDICT = frozenset({"unavailable", "previous_message_not_found", "comparison_response_not_found"})
+
+
 def native_covers(provider: str, reason: str | None) -> set[MissCause] | None:
     """The Prefixwise causes a native reason covers, or None if unmapped."""
     if reason is None:
@@ -127,9 +134,10 @@ class AgreementScorer:
     - agreement: share of turns where Prefixwise's cause maps onto the
       native reason when both exist (E1 target >= 95%).
     - coverage: share of misses not UNKNOWN (E1 target: UNKNOWN <= 10%).
-    A miss providers lump into ``unavailable`` that Prefixwise names
-    PARAM_RENDERED counts as agreement when the parameter diff is
-    present in the request.
+    ``unavailable`` and not-found answers are not verdicts and are not
+    scored (NO_VERDICT): Anthropic returns ``unavailable`` for parameter
+    changes, but also for long conversations and unready comparisons, so
+    counting it as agreement with PARAM_RENDERED would only ever add hits.
     """
 
     total_with_native: int = 0
@@ -144,8 +152,8 @@ class AgreementScorer:
             self.total_misses += 1
             if cause is MissCause.UNKNOWN:
                 self.unknown_misses += 1
-        if native_reason is None:
-            return None
+        if native_reason is None or native_reason in NO_VERDICT:
+            return None  # no verdict to agree or disagree with
         covered = native_covers(provider, native_reason)
         if covered is None:
             return None

@@ -28,7 +28,7 @@ Shared handoff between the agents working on Prefixwise. It says **what is being
 | Milestone | Status | Evidence |
 |---|---|---|
 | E1-open: classifier names injected causes on live vLLM | **Pass** 2026-11-06: 120 turns, 100%, Qwen3-4B on vLLM 0.33.0, Colab L4. Re-passed 2026-11-07 with per-model lanes (120/120) | `experiments/e1_open/runs/` |
-| E1-hosted, Anthropic: agrees with Anthropic's own miss diagnostics | **Pass** 2026-11-06: 37/37 diagnosed misses, all 7 injected miss causes, 60/60 hits, UNKNOWN 0. Re-passed 2026-11-07 with lanes (20/20) | `experiments/e1_hosted/runs/` |
+| E1-hosted, Anthropic: agrees with Anthropic's own miss diagnostics | **Pass** 2026-11-06: 32/32 misses Anthropic named (6 causes), plus 5 parameter changes it called `unavailable` that Prefixwise named, 60/60 hits, UNKNOWN 0. Re-passed 2026-11-07 with lanes (20/20) | `experiments/e1_hosted/runs/` |
 | E1-hosted, OpenAI | **Blocked on OpenAI:** `prompt_cache_diagnostics` returns `unavailable` on every comparison (GPT-5.6 Luna/Sol/base, delays up to 120 s, completed baseline). Not a Prefixwise bug. | `experiments/e1_hosted/runs/2026-11-06-round4.md` |
 | E4: a fix saves what Prefixwise predicts, tasks still succeed | **Pass** 2026-11-06: `canonical_tools` 99.9% realised (Anthropic), 97.5% (vLLM); success flat (0/60, 1/60 changed) | `experiments/e4/runs/2026-11-06-live.md` |
 | Dogfood: real agent traffic | **Done** 2026-11-06: opencode, 25 requests, 92.9% cached, 0 avoidable; 4 rough edges found and fixed (PR #18). Dogfood 2 (2026-11-07): 21 requests, 92.2% cached, 0 avoidable, fixes confirmed | `experiments/dogfood/2026-11-06-opencode.md` |
@@ -71,7 +71,7 @@ Then a soft launch to a few people who run agents (Omni's founder is a candidate
 
 **Done:**
 - E1-open: vLLM, 100%.
-- E1-hosted: Anthropic, 37/37 against its own diagnosis.
+- E1-hosted: Anthropic, 32/32 against the reasons it named (plus 5 `unavailable` parameter changes).
 - E4: `canonical_tools` proven.
 - Proxy, CLI, streaming, Responses API, security hardening, CI, Docker; v0.3.0 ready.
 

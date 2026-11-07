@@ -68,8 +68,10 @@ CATALOG: tuple[Metric, ...] = (
     Metric("overhead_ms_p50", "ms", "Median time Prefixwise itself added.", percentile=("overhead_ms", 0.50)),
     Metric("overhead_ms_p95", "ms", "95th percentile time Prefixwise itself added.",
            percentile=("overhead_ms", 0.95)),
-    Metric("native_compared", "{request}", "Requests where the provider gave its own miss reason.",
-           f"SUM(CASE WHEN {OK} AND native_reason IS NOT NULL THEN 1 ELSE 0 END)"),
+    Metric("native_compared", "{request}", "Requests where the provider named its own miss reason "
+           "(not counting unavailable or baseline-not-found answers, which are no verdict).",
+           f"SUM(CASE WHEN {OK} AND native_reason IS NOT NULL AND native_reason NOT IN "
+           "('unavailable', 'previous_message_not_found', 'comparison_response_not_found') THEN 1 ELSE 0 END)"),
     Metric("tasks_resolved", "{task}", "Tasks with a recorded outcome that have requests in the group.", task=True),
     Metric("tasks_successful", "{task}", "Of those, the successful ones.", task=True),
     Metric("tokens_per_successful_task", "{token}", "Prompt + completion tokens on resolved tasks (failed tasks "

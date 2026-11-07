@@ -1,6 +1,6 @@
 # E4: does a fix save what Prefixwise predicts, without breaking tasks?
 
-E1 showed Prefixwise names cache-miss causes correctly (vLLM 100%; Anthropic 37/37 against its own diagnostics). E4 checks the other half of the claim: **apply the fix Prefixwise recommends, and the predicted savings show up while tasks still succeed.**
+E1 showed Prefixwise names cache-miss causes correctly (vLLM 100%; Anthropic 32/32 against the miss reasons it named). E4 checks the other half of the claim: **apply the fix Prefixwise recommends, and the predicted savings show up while tasks still succeed.**
 
 The fix under test is the proxy's `canonical_tools` toggle (`prefixwise serve --fix canonical_tools`). It sorts tools by name and sorts each tool's keys, so a tool list that drifts between turns produces the same bytes every time.
 
