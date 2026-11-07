@@ -157,15 +157,15 @@ Avoidable tokens for a waste turn = the part of the previous turn's prompt that 
 
 | Detail | Under | What happened | What to do |
 |---|---|---|---|
-| `ttl_shortened` | `ttl_expired` | Asked for a 1-hour cache; Anthropic's usage shows the write was kept for 5 minutes | Check what downgrades the TTL (client version, settings, gateway) |
-| `lookback_exceeded` | `breakpoint_misplaced` | Prefix unchanged but more than 20 content blocks since the last cached point (Anthropic checks at most 20) | Add a breakpoint at the start of each turn |
-| `markers_ignored` | any miss | `cache_control` sent, prompt long enough, yet nothing written or read | Check that no gateway strips the markers, and that the endpoint caches |
-| `sent_before_cache_written` | first request, routing | Another request with the same tools and system prompt was still in flight | Stagger parallel requests (subagents, fan-outs) or warm the prefix first |
-| `shared_prefix_not_reused` | first request | Another session had just cached the same tools and system prompt, yet nothing was read | Check cache keys, TTLs and tool order between the two |
-| `thinking_stripped` | `history_edit` | The only change to earlier messages is removed thinking blocks | Keep thinking blocks in history (client or gateway setting) |
+| `ttl_shortened` | `ttl_expired` | Every breakpoint asked for a 1-hour cache; Anthropic's usage shows the write was kept for 5 minutes, and more than 5 minutes passed | Check what downgrades the TTL (client version, settings, gateway) |
+| `lookback_exceeded` | `breakpoint_misplaced` | Prompt provably unchanged, gap within 5 minutes, but the previous write is 22+ positions back (Anthropic checks 20; a run of tool calls or results is one) | Add a breakpoint at the start of each turn |
+| `markers_ignored` | any miss | `cache_control` on the last block, prompt of 8,192+ tokens, yet nothing written or read | Check that no gateway strips the markers, and that the endpoint caches |
+| `sent_before_cache_written` | first request | Sent within a second of another request (same model, key, tools, system) still waiting for its response | Stagger parallel requests (subagents, fan-outs) or warm the prefix first |
+| `shared_prefix_not_reused` | first request | Anthropic: another session had just written an entry for the same model, key, tools and system prompt, within reach of a breakpoint here, yet little was read | Check cache keys, TTLs and breakpoint placement between the two |
+| `thinking_stripped` | `history_edit` | On a model that keeps earlier thinking (Opus 4.5+, Sonnet 4.6+, Haiku 5.5, Fable, Mythos), the only change is removed thinking blocks | Keep thinking blocks in history (client or gateway setting) |
 | `cache_key_changed` | routing, expiry | OpenAI `prompt_cache_key` changed between turns | Keep one key per conversation |
 
-`prefixwise report` lists them under each cause; `/api/v1/breakdown?by=detail` and `?detail=` slice by them.
+Each detail is claimed only when all of its conditions hold; otherwise there is none. `prefixwise report` lists them under each cause; `/api/v1/breakdown?by=detail` and `?detail=` slice by them.
 
 ## Reference
 

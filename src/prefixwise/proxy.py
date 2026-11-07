@@ -44,6 +44,7 @@ against current LMCache (its import path breaks; pin unverified).
 
 from __future__ import annotations
 
+import hashlib
 import hmac
 import json
 import os
@@ -57,8 +58,8 @@ import urllib.request
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from .classifier import Classification, MissCause, RequestSnapshot, _min_prefix, classify, first_divergence
-from .details import Facts, body_facts, detail_for, usage_facts
+from .classifier import Classification, MissCause, RequestSnapshot, classify, first_divergence
+from .details import Facts, body_facts, detail_for, keeps_thinking, usage_facts
 from .diagnostics import AgreementScorer, anthropic_diagnostics
 from .fingerprint import Fingerprinter
 from .fixes import apply_fixes, parse_fixes
@@ -78,7 +79,18 @@ def extract_blocks(body: dict, provider: str) -> list[tuple[str, object]]:
     blocks = [(role, _strip_cache_markers(value)) for role, value in _extract_blocks_raw(body, provider)]
     if provider == "anthropic":
         blocks = [(role, _anthropic_text_blocks(role, value)) for role, value in blocks]
+        if not keeps_thinking(str(body.get("model") or "")):
+            # Older models drop earlier turns' thinking from the prompt themselves, so a client
+            # that sends or omits it renders the same prompt: it must not look like an edit.
+            blocks = [(role, _without_thinking(value)) for role, value in blocks]
     return blocks
+
+
+def _without_thinking(value: object) -> object:
+    if isinstance(value, dict) and value.get("role") == "assistant" and isinstance(value.get("content"), list):
+        return {**value, "content": [b for b in value["content"]
+                                     if not (isinstance(b, dict) and b.get("type") in ("thinking", "redacted_thinking"))]}
+    return value
 
 
 def _anthropic_text_blocks(role: str, value: object) -> object:
@@ -630,22 +642,27 @@ class PrefixwiseProxy:
             if "comparison_response_id" not in opts:
                 opts["comparison_response_id"] = previous_id
                 inject("prompt_cache_options", opts)
-        facts = body_facts(provider, forward_body)
+        # Caches are per model and per workspace (credentials), so both are in the prefix key.
+        credential = hashlib.sha256((headers.get("x-api-key") or headers.get("authorization")
+                                     or self.api_key or "").encode()).hexdigest()[:12]
+        facts = body_facts(provider, forward_body, model=str(body.get("model", "")), credential=credential)
         request_id = str(uuid.uuid4())
         sent = time.time()
+        facts.sent_at = sent
         if facts.prefix_key:
             with self._lock:
                 flying = self.prefix_inflight.get(facts.prefix_key)
                 if flying is None:
                     flying = self.prefix_inflight[facts.prefix_key] = {}
                 for rid, t in list(flying.items()):
-                    if sent - t > 600:  # a request that never completed
+                    if sent - t > 60:  # only the last second matters; drop what never completed
                         flying.pop(rid, None)
-                facts.inflight_same_prefix = bool(flying)
+                if flying:
+                    facts.fanout_age = sent - max(flying.values())
                 flying[request_id] = sent
                 done = self.prefix_done.get(facts.prefix_key)
                 if done is not None and done[1] != session_id:
-                    facts.shared_prefix_age = sent - done[0]
+                    facts.shared_age, facts.shared_write_pos = sent - done[0], done[2]
         return {
             "provider": provider, "api": api, "body": body, "headers": headers,
             "facts": facts, "sent_at": sent,
@@ -768,14 +785,17 @@ class PrefixwiseProxy:
         parts = breakdown(provider, usage)
         facts = usage_facts(ctx.get("facts") or Facts(provider=provider), usage,
                             parts.cache_write_5m + parts.cache_write_1h + parts.cache_write)
+        facts.done_at = now
         prev_facts = self.lane_facts.get(lane) if lane in self.lane_facts else self.session_facts.get(session_id)
-        new_cause, detail, why = detail_for(result.cause.value, prev_facts if prev is not None else None, facts,
-                                            prompt_tokens=prompt_tokens, cached_tokens=cached,
-                                            gap_seconds=gap_seconds, min_prefix=_min_prefix(curr))
+        if prev is None or (ctx.get("api") == "responses" and body.get("previous_response_id")):
+            prev_facts = None  # a stitched branch: the lane's latest request may be another branch
+        new_cause, detail, why = detail_for(result.cause.value, prev_facts, facts,
+                                            prompt_tokens=prompt_tokens, cached_tokens=cached)
         if new_cause:
             cause_name, legit = new_cause
-            result = Classification(MissCause(cause_name), legit, why, result.secondary + [result.cause],
-                                    native_reason)
+            result = Classification(MissCause(cause_name), legit,
+                                    f"{why} (classifier: {result.cause.value}, {result.evidence})",
+                                    result.secondary + [result.cause], native_reason)
         elif why:
             result.evidence = f"{result.evidence}; {why}"
         self._release_prefix(ctx, done_session=session_id)
@@ -842,8 +862,22 @@ class PrefixwiseProxy:
         flying = self.prefix_inflight.get(facts.prefix_key)
         if flying is not None:
             flying.pop(ctx.get("request_id"), None)
-        if done_session is not None:
-            self.prefix_done[facts.prefix_key] = (time.time(), done_session)
+        # Writes happen only at breakpoints: other sessions can reuse this request's entry for
+        # tools+system only if it wrote one ending there.
+        inside = [b for b in facts.breakpoints if b < facts.sys_end]
+        if done_session is not None and facts.cache_write > 0 and inside:
+            self.prefix_done[facts.prefix_key] = (time.time(), done_session, max(inside))
+
+    def response_started(self, ctx: dict) -> None:
+        """The upstream began answering: the request's prefill is done and its cache entry
+        exists, so it no longer counts as a request other requests are waiting on."""
+        facts = ctx.get("facts")
+        if facts is None or not facts.prefix_key:
+            return
+        with self._lock:
+            flying = self.prefix_inflight.get(facts.prefix_key)
+            if flying is not None:
+                flying.pop(ctx.get("request_id"), None)
 
     def record_failure(self, ctx: dict, status: int, payload: dict | None = None,
                        error: str | None = None) -> None:
@@ -880,6 +914,7 @@ class PrefixwiseProxy:
         """
         ctx = self.prepare(provider, body, headers, api=api)
         if ctx["stream"]:
+            self.response_started(ctx)  # not sent at all: nothing in flight
             return {"request_id": ctx["request_id"], "status": 400, "cause": None,
                     "response": _error(400, "use handle_stream for stream=true")}, None
         self._upstream.headers = {}
@@ -891,6 +926,7 @@ class PrefixwiseProxy:
             status, payload = self._forward(provider, ctx["forward_body"], ctx["request_id"],
                                             ctx["upstream_session_id"] or ctx["session_id"],
                                             ctx["headers"], api=api)
+        self.response_started(ctx)
         ctx["upstream_ms"] = (time.perf_counter() - sent) * 1000
         upstream_headers = getattr(self._upstream, "headers", {}) or {}
         if status >= 400:
@@ -1085,6 +1121,7 @@ class PrefixwiseProxy:
             try:
                 resp = urllib.request.urlopen(req, timeout=UPSTREAM_TIMEOUT)
                 ctx["upstream_headers"] = relay_headers(resp.headers)
+                self.response_started(ctx)
                 break
             except urllib.error.HTTPError as exc:
                 ctx["upstream_headers"] = relay_headers(exc.headers)
@@ -1452,6 +1489,12 @@ def make_handler(proxy: PrefixwiseProxy):
 
         def _stream(self, provider: str, body: dict, api: str = "chat"):
             ctx = proxy.prepare(provider, body, self._client_headers(), api=api)
+            try:
+                return self._stream_ctx(ctx, provider, api)
+            finally:  # whatever happened (cut-off upstream, client gone), it is not in flight now
+                proxy.response_started(ctx)
+
+        def _stream_ctx(self, ctx: dict, provider: str, api: str):
             sent = time.perf_counter()
             status, lines, acc, err = proxy.open_stream(ctx)
             relayed = ctx.get("upstream_headers") or {}
