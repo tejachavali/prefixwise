@@ -169,12 +169,13 @@ class Ledger:
             )
             self.conn.commit()
 
-    def record(self, entry: LedgerEntry) -> int:
+    def record(self, entry: LedgerEntry, at: float | None = None) -> int:
+        """Store one row. `at` is when it happened (default now); imports pass the log's time."""
         values = [int(v) if isinstance(v, bool) else v for v in astuple(entry)]
         with self._lock:
             cur = self.conn.execute(
                 f"INSERT INTO entries ({', '.join(_COLUMNS)}, recorded_at) "
-                f"VALUES ({', '.join('?' * (len(_COLUMNS) + 1))})", (*values, time.time()))
+                f"VALUES ({', '.join('?' * (len(_COLUMNS) + 1))})", (*values, time.time() if at is None else at))
             if entry.task_id and entry.task_success is not None:
                 self._set_task_outcome_locked(entry.task_id, entry.task_success)
             self.conn.commit()
@@ -245,6 +246,11 @@ class Ledger:
             finally:
                 conn.close()
         return _cm()
+
+    def request_ids(self) -> set[str]:
+        """Every request id in the ledger (imports skip what is already there)."""
+        with self._lock:
+            return {r[0] for r in self.conn.execute("SELECT request_id FROM entries WHERE request_id IS NOT NULL")}
 
     def get_request(self, request_id: str) -> dict | None:
         with self._lock:

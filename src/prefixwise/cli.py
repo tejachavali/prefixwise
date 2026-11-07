@@ -384,6 +384,55 @@ def cmd_export(args) -> int:
     return 0
 
 
+def cmd_import(args) -> int:
+    """Read agent session logs (read-only) into the ledger, then report on what was imported."""
+    import time
+
+    from . import api, findings, metrics
+    from .importers import import_claude_code
+    from .ledger import Ledger
+
+    try:
+        since = api._time(args.since, "--since") if args.since else None
+    except api.ApiError as exc:
+        print(f"prefixwise: {exc}", file=sys.stderr)
+        return 2
+    root = os.path.expanduser(args.path or "~/.claude/projects")
+    if not os.path.isdir(root):
+        print(f"prefixwise: no Claude Code logs at {root} (Claude Code keeps them in ~/.claude/projects; "
+              "pass --path)", file=sys.stderr)
+        return 1
+    path = args.ledger or os.environ.get("PREFIXWISE_LEDGER_PATH") or DEFAULT_LEDGER
+    led = Ledger(path)
+    stats = import_claude_code(root, led, since=since)
+    if args.json:
+        print(json.dumps(stats, indent=2))
+        return 0
+    if not stats["imported"]:
+        print(f"Nothing new: the {stats['logs']} logs hold {stats['skipped_known']:,} requests already in {path}.")
+        return 0
+    day = lambda t: time.strftime("%Y-%m-%d", time.localtime(t))  # noqa: E731
+    print(f"Imported {stats['imported']:,} requests from {stats['logs']} Claude Code logs "
+          f"({day(stats['first'])} to {day(stats['last'])})"
+          + (f"; {stats['skipped_known']:,} were already in {path}" if stats["skipped_known"] else "")
+          + (f"; {stats['duplicates']:,} logged twice were counted once" if stats["duplicates"] else "") + ".")
+    print("Read from the logs, which hold each response's usage and what changed between requests, not the "
+          "prompt itself: causes are inferred, and a miss the log cannot explain is `unknown`.")
+    print("Dollars are API prices: on a Pro/Max plan they show what the usage is worth, not what you paid.\n")
+    window = {"since": stats["first"], "until": stats["last"] + 1}
+    print(findings.render(findings.findings(led, **window), command="serve"))
+    rows = metrics.query(led, ["requests", "prompt_tokens", "cache_hit_rate", "cost_usd", "avoidable_tokens"],
+                         by="agent", order="-prompt_tokens", **window)
+    if len(rows) > 1:
+        print("\nBy agent:")
+        for r in rows:
+            cost = f"${r['cost_usd']:,.2f}" if r["cost_usd"] is not None else "-"
+            hit = f"{r['cache_hit_rate']:.0%}" if r["cache_hit_rate"] is not None else "-"
+            print(f"  {r['agent']:<30} {r['requests']:>6,} requests  {hit:>4} from cache  {cost:>10}")
+    print(f"\nLedger: {path}  (prefixwise report --ledger {path} --detail, or prefixwise serve to browse /api/v1)")
+    return 0
+
+
 def cmd_request(args) -> int:
     row = _open_existing_ledger(args).get_request(args.request_id)
     if row is None:
@@ -531,6 +580,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("-o", "--output", metavar="FILE", help="default: stdout")
     ledger_opt(p)
     p.set_defaults(func=cmd_export)
+
+    p = sub.add_parser("import", help="read agent session logs (no proxy needed) and report on them")
+    p.add_argument("source", choices=["claude-code"], help="whose logs: claude-code (~/.claude/projects)")
+    p.add_argument("--path", metavar="DIR", help="where the logs are (default ~/.claude/projects)")
+    p.add_argument("--since", metavar="WHEN", help="only requests after this: unix seconds, or 24h, 7d")
+    p.add_argument("--json", action="store_true", help="import counts as JSON, no report")
+    ledger_opt(p)
+    p.set_defaults(func=cmd_import)
 
     p = sub.add_parser("prune", help="delete old ledger entries (retention)")
     p.add_argument("--older-than", required=True, metavar="AGE", help="e.g. 30d, 12h, 90 (days)")
