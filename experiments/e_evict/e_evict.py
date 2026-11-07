@@ -80,7 +80,8 @@ def flood(url: str, model: str, total_tokens: int, each: int, seed: int, mock_st
 
 def run(args) -> dict:
     engine = "vllm" if args.engine.startswith("vllm") else "sglang"
-    proxy = (PrefixwiseProxy(upstream_url=args.url, api_key="sk-dummy", engine=engine, kv_events=args.kv_events)
+    proxy = (PrefixwiseProxy(upstream_url=args.url, api_key="sk-dummy", engine=engine, kv_events=args.kv_events,
+                             full_attention=args.full_attention)
              if not args.mock else PrefixwiseProxy(engine=engine))
     mock_state = None
     if args.mock:
@@ -182,6 +183,8 @@ def main() -> int:
     ap.add_argument("--mock", action="store_true", help="simulated engine, no GPU")
     ap.add_argument("--kv-events", help="the engine's KV-event endpoint (e.g. tcp://127.0.0.1:5557): with it, "
                     "Prefixwise should name the GPU-only eviction 'evicted' (the engine join)")
+    ap.add_argument("--full-attention", action="store_true",
+                    help="SGLang: the model has full attention only (Qwen3-4B does), so events can rule an eviction out")
     ap.add_argument("--output-dir", default=str(Path(__file__).resolve().parent / "results"))
     args = ap.parse_args()
     res = run(args)

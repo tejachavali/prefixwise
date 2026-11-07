@@ -298,7 +298,7 @@ def classify(prev: RequestSnapshot | None, curr: RequestSnapshot,
         return Classification(MissCause.EVICTED, None,
                               "inferred: one self-hosted engine, prefix unchanged but not reused. Usually the "
                               "engine evicted it (GPU memory full); chat template re-rendering or data-parallel "
-                              "routing look the same. Confirm with --kv-events (vLLM)",
+                              "routing look the same. Confirm with --kv-events",
                               secondary, native_reason)
 
     gap, ttl = curr.gap_seconds, curr.ttl_seconds

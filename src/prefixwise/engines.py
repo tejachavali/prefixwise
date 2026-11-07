@@ -1,4 +1,6 @@
-"""Engine join for vLLM: its KV-cache events tell an eviction from everything else.
+"""Engine join for vLLM and SGLang: KV-cache events tell an eviction from everything else.
+
+SGLang (>= 0.5.20) is `SGLangEvents`, below; the rest of this note is about vLLM.
 
 Behind one self-hosted engine, a request whose prefix is unchanged but was not
 reused usually means the engine evicted it (GPU memory full). Two look-alikes
@@ -35,6 +37,7 @@ from __future__ import annotations
 import itertools
 import threading
 import time
+from array import array
 from collections import OrderedDict
 
 GPU = (None, "GPU")
@@ -93,24 +96,27 @@ class EngineEvents:
                 self._last_seq = seq
             self.stats["batches"] += 1
             for ev in batch[1]:
-                kind = ev.get("type")
-                if kind == "BlockStored" and ev.get("medium") in GPU:
-                    if ev.get("kv_cache_spec_kind") in FULL_KINDS:
-                        self._store(ev)
-                    else:
-                        self.hybrid = True
-                elif kind == "BlockRemoved" and ev.get("medium") in GPU:
-                    group = ev.get("group_idx") or 0
-                    for h in ev.get("block_hashes") or []:
-                        self._remove((group, h))
-                elif kind == "AllBlocksCleared":
-                    self.stats["cleared"] += 1
-                    self._clear()
+                self._event(ev)
             if isinstance(batch[0], (int, float)):
                 ts = float(batch[0])
                 self._latest_ts = max(self._latest_ts, ts)
                 offset = time.time() - ts  # the engine may run on another host with another clock
                 self._clock_offset = offset if self._clock_offset is None else min(self._clock_offset, offset)
+
+    def _event(self, ev: dict) -> None:
+        kind = ev.get("type")
+        if kind == "BlockStored" and ev.get("medium") in GPU:
+            if ev.get("kv_cache_spec_kind") in FULL_KINDS:
+                self._store(ev)
+            else:
+                self.hybrid = True
+        elif kind == "BlockRemoved" and ev.get("medium") in GPU:
+            group = ev.get("group_idx") or 0
+            for h in ev.get("block_hashes") or []:
+                self._remove((group, h))
+        elif kind == "AllBlocksCleared":
+            self.stats["cleared"] += 1
+            self._clear()
 
     def _store(self, ev: dict) -> None:
         group, hashes, session = ev.get("group_idx") or 0, ev.get("block_hashes") or [], ev.get("session_id")
@@ -278,3 +284,271 @@ class EngineEvents:
                         self.stats["decode_errors"] += 1
         finally:
             sock.close(0)
+
+
+class _Seg:
+    """Blocks SGLang stored in one event, in chain order: one radix-tree node or part of one.
+
+    SGLang reports only the blocks it newly stores, each run linked to its parent
+    block, so a request's full chain is this run plus its ancestors (`parent`,
+    up to block `parent_last`). Positions are in tokens."""
+
+    __slots__ = ("ambiguous", "block", "born", "cut", "hashes", "parent", "parent_last", "start", "tokens")
+
+    def __init__(self, parent, parent_last, start, block, tokens, hashes, born):
+        self.parent, self.parent_last = parent, parent_last
+        self.start = start  # token position of block 0; None if an ancestor was never seen
+        self.block, self.tokens = block, tokens  # tokens per block, tokens in the run
+        self.hashes = hashes  # packed; the index maps a hash to its run only, to save memory
+        self.born = born  # event counter when stored
+        self.cut: int | None = None  # first block removed from the GPU (SGLang evicts leaves first)
+        self.ambiguous = False  # a hash of it is also on another subtree: removals cannot be told apart
+
+    def end(self, last: int) -> int:
+        """Token position after block `last`."""
+        return self.start + min(self.tokens, (last + 1) * self.block)
+
+
+def _chain(tail) -> list:
+    """[(run, last block used)] from the root to tail."""
+    out = []
+    seg, last = tail
+    while seg is not None:
+        out.append((seg, last))
+        seg, last = seg.parent, seg.parent_last
+    out.reverse()
+    return out
+
+
+class SGLangEvents(EngineEvents):
+    """Engine join for SGLang >= 0.5.20 (docs/ENGINES.md, section "SGLang").
+
+    A body `session_id` is stamped on the blocks a request newly stores; blocks it
+    reuses are not reported again, so Prefixwise keeps a copy of the engine's tree
+    of GPU blocks and walks a session's chain through parent links. Blocks are one
+    token by default (`--page-size`). GPU eviction removes leaves first, so a
+    removal on a chain removes everything after it. Events carry no attention
+    kind: on sliding-window or Mamba models SGLang frees those layers without an
+    event, so "not an eviction" is claimed only for a model declared
+    full-attention. SGLang queues events in order and publishes them after a
+    step's output, so the negative claim waits for the request's own store, which
+    follows every eviction made to admit it."""
+
+    def __init__(self, endpoint: str | None = None, full_attention: bool = False,
+                 max_alive: int = 2_000_000, max_held_tokens: int = 16_000_000,
+                 barrier_seconds: float = 0.5, **kw):
+        super().__init__(endpoint, max_alive=max_alive, **kw)
+        self.full_attention = full_attention
+        self.hybrid = not full_attention
+        self.max_held_tokens = max_held_tokens  # tokens of chains kept for sessions (8 bytes each)
+        self.barrier_seconds = barrier_seconds
+        self._alive: dict = {}  # block hash on the GPU -> its run
+        # session -> [(run, last index) or None, mixed, positions where its stores started]
+        self._tails: OrderedDict = OrderedDict()
+        self._held = 0
+        self._born = itertools.count(1)
+        self.stats["duplicate_hashes"] = 0
+
+    # -- events ----------------------------------------------------------------------
+
+    def _event(self, ev: dict) -> None:
+        kind = ev.get("type")
+        if kind == "BlockStored" and ev.get("medium") in GPU:
+            self._store(ev)
+        elif kind == "BlockRemoved" and ev.get("medium") in GPU:
+            self._remove(ev.get("block_hashes") or [])
+        elif kind == "AllBlocksCleared":
+            self.stats["cleared"] += 1
+            self._clear()
+
+    def _hold(self, tail, sign: int) -> None:
+        if tail is not None:
+            seg, last = tail
+            self._held += sign * min(seg.tokens, (last + 1) * seg.block) + sign * (seg.start or 0)
+
+    def _store(self, ev: dict) -> None:
+        hashes = ev.get("block_hashes") or []
+        if not hashes:
+            return
+        self.stats["stored"] += len(hashes)
+        tokens = len(ev.get("token_ids") or ()) or len(hashes) * (ev.get("block_size") or 1)
+        block = ev.get("block_size") or max(1, tokens // len(hashes))
+        try:
+            packed = array("q", hashes)  # SGLang's hashes are signed 64-bit
+        except (TypeError, OverflowError):
+            packed = list(hashes)
+        born = next(self._born)
+        parent_hash = ev.get("parent_block_hash")
+        p = None if parent_hash is None else self._alive.get(parent_hash)
+        if parent_hash is None:
+            seg = _Seg(None, -1, 0, block, tokens, packed, born)
+        elif p is None:  # stored before Prefixwise subscribed: this chain cannot be placed
+            seg = _Seg(None, -1, None, block, tokens, packed, born)
+        else:
+            i = len(p.hashes) - 1 if p.hashes[-1] == parent_hash else p.hashes.index(parent_hash)
+            seg = _Seg(p, i, None if p.start is None else p.end(i), block, tokens, packed, born)
+        alive = self._alive
+        for h in hashes:
+            old = alive.get(h)
+            if old is not None and old is not seg:
+                # The same hash on two subtrees (SGLang leaves extra_key out of event hashes):
+                # a removal cannot be told apart, so neither chain is judged.
+                old.ambiguous = seg.ambiguous = True
+                self.stats["duplicate_hashes"] += 1
+            alive[h] = seg
+        session = ev.get("session_id")
+        if session:
+            tail = self._tails.get(session)
+            if tail is None:  # no window opened by request_sent (dropped, or another client): mixed
+                tail = self._tails[session] = [None, True, set()]
+            self._tails.move_to_end(session)
+            if seg.start is not None:
+                tail[2].add(seg.start)
+            self._hold(tail[0], -1)
+            tail[0] = (seg, len(packed) - 1)  # stores come in chain order: the latest is the deepest
+            self._hold(tail[0], 1)
+            self._trim()
+        if len(alive) > self.max_alive:  # more blocks than the GPU holds: removals were missed
+            alive.clear()
+            for t in list(self._tails.values()):
+                self._hold(t[0], -1)
+            self._tails.clear()
+            for check in self._checks.values():
+                check["overflowed"] = True
+            self.stats["overflows"] += 1
+
+    def _trim(self) -> None:
+        while self._tails and (len(self._tails) > self.max_sessions or self._held > self.max_held_tokens):
+            _, t = self._tails.popitem(last=False)
+            self._hold(t[0], -1)
+
+    def _remove(self, hashes) -> None:
+        self.stats["removed"] += len(hashes)
+        prev, i = None, -1
+        for h in hashes:
+            seg = self._alive.pop(h, None)
+            if seg is None:
+                prev = None
+                continue
+            # A node's blocks come in chain order; look a position up only where a run restarts.
+            if not (seg is prev and i + 1 < len(seg.hashes) and seg.hashes[i + 1] == h):
+                i = seg.hashes.index(h)
+                seg.cut = i if seg.cut is None else min(seg.cut, i)
+            else:
+                i += 1
+            prev = seg
+
+    def _clear(self) -> None:
+        for seg in set(self._alive.values()):
+            seg.cut = 0
+        self._alive.clear()
+        for check in self._checks.values():  # chains not indexed any more (stored long ago) too
+            check["cleared"] = True
+
+    # -- per request -----------------------------------------------------------------
+
+    def _drop_check(self, token: int) -> None:
+        check = self._checks.pop(token, None)
+        if check is not None:
+            self._hold(check["tail"], -1)
+
+    def request_sent(self, session_id: str) -> int:
+        with self._lock:
+            concurrent = False
+            for check in self._checks.values():
+                if check["session"] == session_id:
+                    check["concurrent"] = concurrent = True
+            prev = self._tails.pop(session_id, None)  # its held tokens move to the check
+            window = self._tails[session_id] = [None, concurrent, set()]
+            token = next(self._tokens)
+            self._checks[token] = {"session": session_id, "tail": prev[0] if prev else None,
+                                   "window": window, "sent": next(self._born) if prev else 0,
+                                   "concurrent": concurrent or bool(prev and prev[1]),
+                                   "cleared": False, "overflowed": False, "errors": self._errors()}
+            while len(self._checks) > self.max_sessions:  # requests that never completed
+                self._hold(self._checks.popitem(last=False)[1]["tail"], -1)
+            self._trim()
+            return token
+
+    def discard(self, token: int | None) -> None:
+        if token is not None:
+            with self._lock:
+                self._drop_check(token)
+
+    def _removed(self, check, seg, j) -> bool:
+        """Was the stop block removed between the previous request and this response?"""
+        if check["cleared"]:
+            return True
+        if seg.cut is None or seg.cut > j:
+            return False
+        other = self._alive.get(seg.hashes[j])  # stored again before this request was sent: present
+        return not (other is not None and other is not seg and other.born < check["sent"])
+
+    def _judge(self, check, cached: int):
+        """(stop run, block, blocks on chain, blocks removed), or None."""
+        if check["tail"] is None or check["overflowed"]:
+            return None
+        chain = _chain(check["tail"])
+        if any(seg.start is None or seg.ambiguous for seg, _ in chain):
+            return None
+        total, first_cut, stop, offset = 0, None, None, 0
+        for seg, last in chain:
+            n = last + 1
+            if seg.cut is not None and seg.cut <= last and first_cut is None:
+                first_cut = offset + seg.cut
+            if stop is None and seg.start <= cached < seg.end(last):
+                stop = (seg, (cached - seg.start) // seg.block)
+            offset += n
+        if stop is None:  # the read stopped beyond the previous chain
+            return None
+        total = offset
+        gone = total - first_cut if first_cut is not None else 0
+        return stop[0], stop[1], total, gone
+
+    def request_done(self, token: int, cached_tokens: int | None,
+                     prompt_tokens: int | None = None) -> tuple[int | None, int | None]:
+        with self._lock:
+            check = self._checks.get(token)
+            if (check is None or cached_tokens is None
+                    or (prompt_tokens and cached_tokens >= prompt_tokens * 0.5)):  # a hit: never examined
+                self._drop_check(token)
+                return NOTHING
+            judged = self._judge(check, max(0, cached_tokens))
+            if judged is None:
+                self._drop_check(token)
+                return NOTHING
+            seg, j, total, gone = judged
+            if self._removed(check, seg, j):
+                self._drop_check(token)
+                return max(gone, 1), 0
+            if self.hybrid or check["concurrent"]:
+                self._drop_check(token)
+                return NOTHING
+        # Not removed so far. Wait for this request's own store: SGLang queues events in
+        # order, so it follows every removal made to admit this request. Its first store
+        # starts exactly where its read stopped; the previous request's late finish store
+        # (published after its response) starts elsewhere, so it cannot pass for it.
+        stop = max(0, cached_tokens)
+        end = time.time() + self.barrier_seconds
+        while stop not in check["window"][2] and time.time() < end and self._thread is not None:
+            time.sleep(0.002)
+        with self._lock:
+            self._drop_check(token)
+            judged = self._judge(check, max(0, cached_tokens))
+            if judged is None:
+                return NOTHING
+            seg, j, total, gone = judged
+            if self._removed(check, seg, j):
+                return max(gone, 1), 0
+            barrier = stop in check["window"][2] or self._thread is None
+            if (not barrier or check["concurrent"] or check["overflowed"]
+                    or self._errors() != check["errors"]):
+                return NOTHING
+            return 0, total
+
+    def snapshot(self) -> dict:
+        snap = super().snapshot()
+        with self._lock:
+            snap.update(engine="sglang", full_attention=self.full_attention, gpu_blocks_tracked=len(self._alive),
+                        sessions_tracked=len(self._tails), chain_tokens_held=self._held)
+        return snap

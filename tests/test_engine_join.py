@@ -251,8 +251,8 @@ def test_malformed_payload_does_not_stop_the_subscriber(publisher):
 def test_engine_settings_are_validated():
     with pytest.raises(ValueError):
         PrefixwiseProxy(engine="tgi")
-    with pytest.raises(ValueError):  # SGLang events cannot be attributed to sessions
-        PrefixwiseProxy(engine="sglang", kv_events="tcp://127.0.0.1:1")
+    with pytest.raises(ValueError):  # events need a declared engine
+        PrefixwiseProxy(kv_events="tcp://127.0.0.1:1")
     p, seen = proxy_with(None, [0, 0], engine="sglang")
     p.handle("openai", dict(BODY), {"x-prefixwise-session-id": "x"})
     assert "session_id" not in seen[0] and "vllm_xargs" not in seen[0]
