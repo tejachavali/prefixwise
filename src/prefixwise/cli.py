@@ -438,6 +438,12 @@ def cmd_import(args) -> int:
             cost = f"${r['cost_usd']:,.2f}" if r["cost_usd"] is not None else "-"
             hit = f"{r['cache_hit_rate']:.0%}" if r["cache_hit_rate"] is not None else "-"
             print(f"  {r['agent']:<30} {r['requests']:>6,} requests  {hit:>4} from cache  {cost:>10}")
+    with led.reader() as conn:
+        unpriced = [m for (m,) in conn.execute(
+            "SELECT DISTINCT model FROM entries WHERE cost IS NULL AND recorded_at BETWEEN ? AND ? ORDER BY model",
+            (window["since"], window["until"]))]
+    if unpriced:
+        print(f"\nNo prices for {', '.join(unpriced)}: add rates with PREFIXWISE_PRICES (see `prefixwise prices`).")
     print(f"\nLedger: {path}  (prefixwise report --ledger {path} --detail, or prefixwise serve to browse /api/v1)")
     return 0
 
