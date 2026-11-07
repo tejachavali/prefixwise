@@ -7,7 +7,7 @@ name = "prefixwise"
 version = "0.4.0"
 description = "Name why your LLM prompt cache missed, price the miss, and measure tokens per successful task. A local proxy and CLI for OpenAI, Anthropic and vLLM."
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.10"
 license = "MIT"
 authors = [{name = "Teja Chavali"}]
 keywords = ["llm", "prompt-caching", "kv-cache", "agents", "token-efficiency", "openai", "anthropic", "vllm", "proxy"]
@@ -16,6 +16,7 @@ classifiers = [
     "Environment :: Console",
     "Intended Audience :: Developers",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",

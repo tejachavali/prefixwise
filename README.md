@@ -168,6 +168,8 @@ Found a vulnerability? See [SECURITY.md](SECURITY.md).
 
 ## Self-hosted engines: vLLM, SGLang, LMCache
 
+Step-by-step for vLLM users, with what each verdict means: **[docs/VLLM.md](docs/VLLM.md)**.
+
 Prefixwise reads the engine's `cached_tokens` like any provider's: start vLLM with `--enable-prompt-tokens-details`, SGLang with `--enable-cache-report`. Tell it there is one self-hosted engine behind it:
 
 ```bash

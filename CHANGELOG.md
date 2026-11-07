@@ -5,6 +5,8 @@
 `prefixwise run`, a report that says what to do, every metric as data (API and export), and
 self-hosted engines (vLLM, SGLang, LMCache) validated live.
 
+**Python 3.10 is now supported** (the test suite passes on 3.10 to 3.13); vLLM users on 3.10 can install it.
+
 **Upgrading:**
 - Existing ledgers migrate in place (schema 3); old rows count as succeeded.
 - `prefixwise report` now prints plain-English findings by default. The totals and tables
