@@ -28,7 +28,7 @@ import json
 import sqlite3
 from dataclasses import astuple, dataclass, fields
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 @dataclass
@@ -66,6 +66,10 @@ class LedgerEntry:
     secondary_causes: str | None = None  # comma-separated
     divergence_role: str | None = None  # where the prompt first changed: system, tools, messages, ...
     divergence_index: int | None = None  # block index of that first change
+    # Schema 4: the why behind the cause, where the evidence allows (prefixwise.details):
+    # ttl_shortened, lookback_exceeded, markers_ignored, sent_before_cache_written,
+    # shared_prefix_not_reused, thinking_stripped, cache_key_changed.
+    detail: str | None = None
     schema_version: int = SCHEMA_VERSION
 
 
@@ -113,7 +117,8 @@ _MIGRATIONS = {"task_id": "TEXT", "request_id": "TEXT", "completion_tokens": "IN
                "uncached_tokens": "INTEGER", "cache_write_tokens": "INTEGER",
                "latency_ms": "REAL", "overhead_ms": "REAL", "gap_seconds": "REAL",
                "evidence": "TEXT", "secondary_causes": "TEXT", "divergence_role": "TEXT",
-               "divergence_index": "INTEGER", "schema_version": "INTEGER"}
+               "divergence_index": "INTEGER", "schema_version": "INTEGER",
+               "detail": "TEXT"}  # schema 4
 
 _COLUMNS = [f.name for f in fields(LedgerEntry)]
 

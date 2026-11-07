@@ -35,6 +35,28 @@ CAUSE_PLAIN = {
 }
 
 
+# The why behind a cause (prefixwise.details), in words, with what to do where it is clear.
+DETAIL_PLAIN = {
+    "ttl_shortened": "asked for a 1-hour cache but the entry was kept for 5 minutes",
+    "lookback_exceeded": "more than 20 content blocks since the last cached point; add a breakpoint at the "
+                         "start of each turn",
+    "markers_ignored": "cache_control was sent but nothing was cached; check that no gateway strips the markers",
+    "sent_before_cache_written": "sent in parallel before the first request had cached the prefix; stagger them "
+                                 "or warm the prefix first",
+    "shared_prefix_not_reused": "another session had just cached the same tools and system prompt, yet nothing "
+                                "was read",
+    "thinking_stripped": "thinking blocks were removed from earlier messages",
+    "cache_key_changed": "prompt_cache_key changed between turns",
+}
+
+
+def _details(ledger, cause: str, window: dict) -> list[dict]:
+    rows = metrics.query(ledger, ["requests"], by="detail", filters={"cause": cause}, **window)
+    return sorted(({"detail": r["detail"], "what": DETAIL_PLAIN.get(r["detail"], r["detail"]),
+                    "requests": r["requests"]} for r in rows if r["detail"] and r["requests"]),
+                  key=lambda d: -d["requests"])
+
+
 def findings(ledger, since: float | None = None, until: float | None = None) -> dict:
     """The facts a person needs, for the whole ledger or a time window."""
     window = {"since": since, "until": until}
@@ -47,7 +69,8 @@ def findings(ledger, since: float | None = None, until: float | None = None) -> 
         if cause is None or not r["requests"] or cause == "none":
             continue
         item = {"cause": cause, "what": CAUSE_PLAIN.get(cause, cause), "requests": r["requests"],
-                "avoidable_tokens": r["avoidable_tokens"], "avoidable_cost_usd": r["avoidable_cost_usd"]}
+                "avoidable_tokens": r["avoidable_tokens"], "avoidable_cost_usd": r["avoidable_cost_usd"],
+                "details": _details(ledger, cause, window)}
         if cause == "unknown":  # not known to be expected, nor waste
             unexplained.append(item)
         elif r["avoidable_tokens"]:
@@ -117,6 +140,8 @@ def render(f: dict, command: str = "serve") -> str:
                 cost = f", {_usd(w['avoidable_cost_usd'])}" if w["avoidable_cost_usd"] is not None else ""
                 lines.append(f"  {i}. {w['what'].capitalize()} ({_req(w['requests'])}, "
                              f"{_n(w['avoidable_tokens'])} tokens{cost}).")
+                for d in w.get("details") or []:
+                    lines.append(f"     {d['requests']} of these: {d['what']}.")
                 if w.get("fix"):
                     lines.append(f"     Fix: {w['fix']}")
                 if w.get("proxy_fix"):
@@ -133,6 +158,9 @@ def render(f: dict, command: str = "serve") -> str:
     if f["expected"]:
         parts = [f"{e['requests']} x {e['what']}" for e in f["expected"][:4]]
         lines.append("Expected misses (not waste): " + "; ".join(parts) + ".")
+        for e in f["expected"]:
+            for d in e.get("details") or []:
+                lines.append(f"  {d['requests']} x {e['what'].split(':')[0]}: {d['what']}.")
     if f["failures"]:
         parts = [f"{x['requests']} x {x['error']}" for x in f["failures"]]
         lines.append("Failed requests (no verdict): " + ", ".join(parts) + ".")
