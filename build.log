@@ -410,8 +410,30 @@
   process; 0 errors at c=128; 1M-row report 2.2 s.
 - Tests: 149 passed. CI: fault suite + docker stop exit 0.
 
+## 2026-11-07 SGLang + LMCache (claude/engines)
+- Research (from source): SGLang --enable-cache-report -> cached_tokens;
+  rejects unknown body session_id; vLLM cached_tokens = local + LMCache
+  hits; LMCache MP server + LMCacheMPConnector; 256-token chunks.
+- proxy.forward_session_id; E1-open --engine; sglang_server.sh,
+  vllm_lmcache_server.sh; experiments/e_evict (mock: gap = routing_miss).
+- Tests: 152 passed.
 ## 2026-11-07 Release 0.3.1 (claude/release-0.3.1)
 - Version 0.3.1 in pyproject.toml and __init__.py; CHANGELOG dated, with an
   upgrade note (ledger migrates in place; pre-0.3.1 rows undated).
 - Wheel builds and includes prices.json. Tests: 149 passed.
 - Muse publishes the GitHub release v0.3.1 after the merge.
+
+## 2026-11-07 Engine join (claude/engine-join, stacked on claude/engines)
+- prefixwise/engines.py: ZMQ SUB to vLLM/SGLang KV events (msgpack
+  [ts, events, rank]; tagged BlockStored/BlockRemoved/AllBlocksCleared).
+  Per-session attribution via BlockStored.session_id (vLLM); engine-wide
+  count otherwise (SGLang). GPU removals only; offload counted apart.
+- Classifier: attributed eviction > retry > engine-wide eviction > TTL/routing.
+- serve --engine/--kv-events, GET /engine, extra prefixwise[engines].
+- vllm_server.sh: enable_kv_cache_events (old key not in current vLLM).
+- Tests: 162 passed (9 engine-join, incl. vLLM wire format over real ZMQ).
+- Revised after review: --engine -> inferred `evicted` (no deps); vLLM
+  --kv-events -> confirmed, or `unknown` when blocks are still resident.
+  Dropped SGLang events and engine-wide counts. Engine restart (seq reset)
+  clears residency; lost/garbled messages stop the negative claim.
+  docs/ENGINES.md. Tests: 162 passed.

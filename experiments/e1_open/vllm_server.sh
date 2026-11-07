@@ -37,7 +37,10 @@
 # needed for gated models (HF_TOKEN env var); Qwen3-8B is NOT gated.
 #
 # Note: --kv-events-config enables the KV event stream used by the
-# E2/E3 engine join. E1-open itself scores from cached_tokens in the
+# engine join (prefixwise serve --engine vllm --kv-events tcp://127.0.0.1:5557).
+# The field is enable_kv_cache_events (vllm/config/kv_events.py, 2026-11-06;
+# extra fields are rejected). Earlier versions of this script used a name
+# current vLLM does not know. E1-open itself scores from cached_tokens in the
 # response, so if that flag fails on your vLLM version, drop it and
 # E1-open still runs; the KV-event join is then out of scope for that run.
 set -euo pipefail
@@ -75,5 +78,5 @@ exec vllm serve "$MODEL" \
   --enable-prompt-tokens-details \
   --enable-auto-tool-choice \
   --tool-call-parser hermes \
-  --kv-events-config '{"enable_prefix_cache_events": true, "publisher": "zmq", "topic": "cache-events", "endpoint": "tcp://127.0.0.1:5557"}' \
+  --kv-events-config '{"enable_kv_cache_events": true, "publisher": "zmq", "topic": "kv-events", "endpoint": "tcp://*:5557"}' \
   $VLLM_ARGS

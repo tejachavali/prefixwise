@@ -11,3 +11,4 @@ venv/
 *.sqlite
 .env
 experiments/e1_open/results/
+experiments/e_evict/results/

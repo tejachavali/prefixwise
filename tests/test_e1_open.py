@@ -125,7 +125,7 @@ def test_proxy_strips_upstream_session_override():
                      "usage": {"prompt_tokens": 2000,
                                "prompt_tokens_details": {"cached_tokens": 0}}}
 
-    proxy = PrefixwiseProxy()
+    proxy = PrefixwiseProxy(engine="vllm")  # vLLM: the body session_id is sent
     proxy._forward = _capture  # type: ignore[method-assign]
     body = {"model": "m", "session_id": "s1",
             "messages": [{"role": "user", "content": "hi"}],
@@ -135,7 +135,7 @@ def test_proxy_strips_upstream_session_override():
     assert result["status"] == 200
     assert "prefixwise_upstream_session_id" not in seen["body"]
     assert seen["session_id"] == "s1-retry-6"  # upstream sees the fresh session
-    assert seen["body"]["session_id"] == "s1-retry-6"  # vLLM body session too
+    assert seen["body"]["session_id"] == "s1"  # vLLM body: Prefixwise's own session (KV-event attribution)
     assert "s1" in proxy.last_snapshot  # proxy chain keeps the original session
 
 

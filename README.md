@@ -121,7 +121,7 @@ Avoidable tokens for a waste turn = the part of the previous turn's prompt that 
 
 | Command | |
 |---|---|
-| `prefixwise serve [--upstream URL] [--mock] [--fix canonical_tools] [--host H] [--port P] [--ledger FILE]` | Run the proxy. Ledger defaults to `./prefixwise.db`. `--fix` applies an opt-in, reversible rewrite to every request (see below). |
+| `prefixwise serve [--upstream URL] [--mock] [--fix canonical_tools] [--engine vllm\|sglang] [--kv-events ENDPOINT] [--host H] [--port P] [--ledger FILE]` | Run the proxy. `--engine`/`--kv-events`: see Self-hosted engines. Ledger defaults to `./prefixwise.db`. `--fix` applies an opt-in, reversible rewrite to every request (see below). |
 | `prefixwise run [--mock] [--fix NAME] -- <agent>` | Run an agent through Prefixwise and report on that run when it exits. |
 | `prefixwise prices [--json]` | The dated price table behind dollar costs, and where each rate came from. |
 | `prefixwise prune --older-than 30d` | Delete ledger entries older than that (retention). Add `--include-undated` to also drop rows written before 0.3.1. |
@@ -166,6 +166,29 @@ Every number Prefixwise shows is also data. Each request leaves a row of facts (
 
 Found a vulnerability? See [SECURITY.md](SECURITY.md).
 
+## Self-hosted engines: vLLM, SGLang, LMCache
+
+Prefixwise reads the engine's `cached_tokens` like any provider's: start vLLM with `--enable-prompt-tokens-details`, SGLang with `--enable-cache-report`. Tell it there is one self-hosted engine behind it:
+
+```bash
+prefixwise serve --upstream http://127.0.0.1:8000 --engine vllm      # or --engine sglang
+```
+
+One engine means one cache and no routing, so a request whose prefix is unchanged but was not reused is named `evicted` (the engine ran out of GPU memory). That verdict is **inferred**, and the evidence says so: a chat template that renders history differently, or data-parallel routing, looks the same.
+
+**vLLM: confirm it with KV events.** vLLM can tag the blocks each request uses with a session, so Prefixwise can check the block where the cache read stopped: removed means a confirmed eviction, still on the GPU means the prompt's tokens changed there:
+
+```bash
+pip install "prefixwise[engines]"     # pyzmq + msgspec; the core stays stdlib-only
+vllm serve MODEL --enable-prefix-caching --enable-prompt-tokens-details \
+  --kv-events-config '{"enable_kv_cache_events": true, "publisher": "zmq", "endpoint": "tcp://*:5557"}'
+prefixwise serve --upstream http://127.0.0.1:8000 --engine vllm --kv-events tcp://127.0.0.1:5557
+```
+
+The verdict becomes `evicted` **confirmed** ("the engine removed N of this session's blocks"), or `unknown` with "not an eviction: the engine still holds this session's blocks" when the cause lies elsewhere. `GET /engine` shows the event stream's health.
+
+**LMCache and HiCache need nothing extra.** A prefix restored from CPU memory counts as a hit (vLLM's `cached_tokens` includes tokens loaded from LMCache), so only prefixes lost from every tier are evictions. Why it works this way, the alternatives considered and the known limits (several replicas, lost events): [docs/ENGINES.md](docs/ENGINES.md).
+
 ## Running in production
 
 Measured by [`benchmarks/bench.py`](benchmarks/README.md) (results in [`benchmarks/runs/`](benchmarks/runs/)); rerun it on your own hardware.
@@ -190,6 +213,7 @@ Measured by [`benchmarks/bench.py`](benchmarks/README.md) (results in [`benchmar
   - **OpenAI native agreement.** OpenAI's `prompt_cache_diagnostics` returned `unavailable` for every comparison on gpt-5.6, -luna and -sol. That held with turn delays of 1 s, 30 s and 120 s, and on a minimal standalone call with a completed baseline. OpenAI's dashboard shows 0 diagnosed responses. Prefixwise still classifies OpenAI traffic; only the cross-check against OpenAI's own verdict is missing.
   - **Causes E1 does not inject:** TTL expiry, routing, eviction, tool-result mutation.
   - **Real agent traffic,** which is messier than scripted turns.
+- **Self-hosted engines:** with `--engine`, an engine eviction is inferred from one cache and no routing; on vLLM, `--kv-events` confirms it or rules it out. Tested against vLLM's event wire format, not yet on a live engine. Several replicas need one Prefixwise each.
 - **Divergence is located per block, not per token.** An edit at the very end of a long system prompt is reported as `system_edit`, even if the provider could have reused everything before it. In one live OpenAI call, appending three words to 2,100 tokens of instructions gave 0 cached tokens, which looks more like routing than the edit itself.
 - One proxy process keeps session state in memory: run one instance per agent fleet, or send all of a session's turns to the same instance.
 - `evicted` needs vLLM KV events, which the proxy does not consume yet.

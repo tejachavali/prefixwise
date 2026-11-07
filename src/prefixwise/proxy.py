@@ -405,8 +405,22 @@ class PrefixwiseProxy:
     def __init__(self, ledger_path: str = ":memory:", hmac_key: bytes | None = None,
                  upstream_url: str | None = None, api_key: str | None = None,
                  mock: bool | None = None, fixes: str | list[str] | tuple[str, ...] | None = None,
-                 prices: str | None = None, upstreams: dict[str, str] | None = None):
+                 prices: str | None = None, engine: str | None = None, kv_events: str | None = None,
+                 upstreams: dict[str, str] | None = None):
         self.ledger = Ledger(ledger_path)
+        # Self-hosted engine behind the proxy (vllm, sglang), and its KV-event
+        # stream for the engine join (prefixwise.engines).
+        self.engine = engine or os.environ.get("PREFIXWISE_ENGINE") or None
+        if self.engine not in (None, "vllm", "sglang"):
+            raise ValueError(f"unknown engine {self.engine!r}: expected vllm or sglang")
+        kv_events = kv_events or os.environ.get("PREFIXWISE_KV_EVENTS") or None
+        if kv_events and self.engine != "vllm":
+            raise ValueError("--kv-events needs --engine vllm: SGLang's events cannot be attributed to "
+                             "sessions (see docs/ENGINES.md)")
+        self.engine_events = None
+        if kv_events:
+            from .engines import EngineEvents
+            self.engine_events = EngineEvents(kv_events).start()
         # Opt-in request rewrites (see fixes.py). Off unless named here or
         # in PREFIXWISE_FIXES; turning them off restores pass-through.
         self.fixes = parse_fixes(fixes if fixes is not None else os.environ.get("PREFIXWISE_FIXES"))
@@ -466,8 +480,7 @@ class PrefixwiseProxy:
         session_id = str(headers.get("x-prefixwise-session-id") or body.get("session_id")
                          or (body.get("metadata") or {}).get("user_id") or self.default_session)
         task_id = headers.get("x-prefixwise-task-id") or body.get("task_id")
-        forward_body = {k: v for k, v in body.items()
-                        if k not in PREFIXWISE_FIELDS or (provider == "vllm" and k == "session_id")}
+        forward_body = {k: v for k, v in body.items() if k not in PREFIXWISE_FIELDS}
         # E1-open retry turns: a harness-only upstream session id.
         # The proxy's own session (snapshot chain, gap_seconds) stays
         # session_id; only the identity sent upstream changes, so the
@@ -479,8 +492,18 @@ class PrefixwiseProxy:
         upstream_session_id = (body.get("prefixwise_upstream_session_id")
                                or headers.get("x-prefixwise-upstream-session-id"))
         upstream_session_id = str(upstream_session_id) if upstream_session_id else None
-        if provider == "vllm":
-            forward_body["session_id"] = upstream_session_id or session_id
+        # vLLM puts a body session_id on its KV events, so the engine join can
+        # attribute blocks to sessions. Only vLLM: SGLang rejects session ids it
+        # did not open, and hosted APIs reject unknown fields.
+        engine_token = None
+        if self.engine == "vllm" and api == "chat":
+            forward_body["session_id"] = session_id
+            xargs = body.get("vllm_xargs")
+            if self.engine_events is not None and (xargs is None or isinstance(xargs, dict)):
+                # Report every block a request uses, reused ones too, in order, so the
+                # blocks of this session's previous request are known (docs/ENGINES.md).
+                forward_body["vllm_xargs"] = {**(xargs or {}), "kv_cache_report_mode": "full"}
+                engine_token = self.engine_events.request_sent(session_id)
         # Native diagnostics chaining. Anthropic: diagnostics object (GA,
         # no beta header). OpenAI: prompt_cache_options.comparison_response_id,
         # Responses API only (it does not exist on /v1/chat/completions). A
@@ -502,7 +525,7 @@ class PrefixwiseProxy:
         return {
             "provider": provider, "api": api, "body": body, "headers": headers,
             "forward_body": forward_body, "session_id": session_id,
-            "upstream_session_id": upstream_session_id,
+            "upstream_session_id": upstream_session_id, "engine_token": engine_token,
             "agent_id": str(headers.get("x-prefixwise-agent-id") or body.get("agent_id") or "proxy"),
             "task_id": str(task_id) if task_id else None,
             "request_id": str(uuid.uuid4()), "model": str(body.get("model", "unknown")),
@@ -529,6 +552,14 @@ class PrefixwiseProxy:
         # Fingerprint what the provider actually received: with a fix on,
         # that is the rewritten request, not the client's original.
         fps = self.fingerprinter.fingerprint_blocks(extract_blocks(ctx["forward_body"], provider))
+        if ctx.get("engine_token") is not None:  # outside the lock: it may wait a few ms for events
+            reported = "prompt_tokens_details" in usage  # vLLM needs --enable-prompt-tokens-details
+            if not reported and not getattr(self, "_warned_details", False):
+                self._warned_details = True
+                print("prefixwise: vLLM is not reporting cached tokens; start it with "
+                      "--enable-prompt-tokens-details, or every request looks like a miss", file=sys.stderr)
+            ctx["engine_verdict"] = self.engine_events.request_done(
+                ctx["engine_token"], cached if reported else None, prompt_tokens)
         with self._lock:
             return self._finalize_locked(ctx, status, payload, usage, prompt_tokens, cached,
                                          native_reason, response_id, fps)
@@ -596,6 +627,9 @@ class PrefixwiseProxy:
                                ttl_seconds=ctx.get("ttl_seconds"),
                                fork_parent_session_id=ctx.get("fork_of"),
                                session_id=session_id)
+        curr.engine = self.engine is not None
+        if ctx.get("engine_verdict") is not None:
+            curr.evicted_blocks, curr.resident_blocks = ctx["engine_verdict"]
         if unknown_parent:
             result = Classification(MissCause.UNKNOWN, None,
                                     "previous_response_id points to a response this proxy never saw;"
@@ -643,7 +677,7 @@ class PrefixwiseProxy:
                 "legit": result.legit, "native_reason": native_reason, "usage": usage,
                 "prompt_tokens": prompt_tokens, "cached_tokens": cached,
                 "avoidable_tokens": entry.avoidable_tokens, "fixes_applied": ctx.get("fixes_applied") or [],
-                "cost": entry.cost, "avoidable_cost": entry.avoidable_cost,
+                "cost": entry.cost, "avoidable_cost": entry.avoidable_cost, "evidence": result.evidence,
                 "response": payload}, entry
 
     @staticmethod
@@ -694,6 +728,8 @@ class PrefixwiseProxy:
         ctx["upstream_ms"] = (time.perf_counter() - sent) * 1000
         upstream_headers = getattr(self._upstream, "headers", {}) or {}
         if status >= 400:
+            if self.engine_events is not None:
+                self.engine_events.discard(ctx.get("engine_token"))
             self.record_failure(ctx, status, payload)
             return {"request_id": ctx["request_id"], "status": status, "cause": None,
                     "response": payload, "upstream_headers": upstream_headers}, None
@@ -1067,6 +1103,10 @@ def make_handler(proxy: PrefixwiseProxy):
                 return self._json(200, {"ok": True, "mock": proxy.mock})
             if not self._authorized():
                 return
+            if path == "/engine":
+                ev = proxy.engine_events
+                return self._json(200, {"engine": proxy.engine,
+                                        "kv_events": ev.snapshot() if ev else None})
             if path.startswith(api.PREFIX + "/") or path == api.PREFIX:
                 try:
                     return self._json(*api.get(proxy, path, route(self.path)[1]))
@@ -1185,6 +1225,8 @@ def make_handler(proxy: PrefixwiseProxy):
             status, lines, acc, err = proxy.open_stream(ctx)
             relayed = ctx.get("upstream_headers") or {}
             if lines is None:
+                if proxy.engine_events is not None:
+                    proxy.engine_events.discard(ctx.get("engine_token"))
                 ctx["upstream_ms"] = (time.perf_counter() - sent) * 1000
                 proxy.record_failure(ctx, status, err)
                 return self._json(status, err, {**relayed, "X-Prefixwise-Request-Id": ctx["request_id"]})
@@ -1215,6 +1257,8 @@ def make_handler(proxy: PrefixwiseProxy):
             if failure is None:
                 proxy.finalize_safely(ctx, status, acc.payload)
             else:
+                if proxy.engine_events is not None:
+                    proxy.engine_events.discard(ctx.get("engine_token"))
                 proxy.record_failure(ctx, status, error=failure)
             self.close_connection = True
     return Handler
@@ -1223,13 +1267,14 @@ def make_handler(proxy: PrefixwiseProxy):
 def serve(host: str = "127.0.0.1", port: int = 8080, *, ledger_path: str | None = None,
           upstream_url: str | None = None, mock: bool | None = None, quiet: bool = False,
           fixes: str | list[str] | None = None, auth_token: str | None = None,
-          allow_unauthenticated: bool = False, prices: str | None = None):
+          allow_unauthenticated: bool = False, prices: str | None = None,
+          engine: str | None = None, kv_events: str | None = None):
     """Run the proxy until interrupted. Settings fall back to PREFIXWISE_* env vars."""
     hmac_key = os.environ.get("PREFIXWISE_HMAC_KEY")
     ledger_path = ledger_path or os.environ.get("PREFIXWISE_LEDGER_PATH", ":memory:")
     proxy = PrefixwiseProxy(ledger_path=ledger_path, upstream_url=upstream_url, mock=mock,
                             hmac_key=hmac_key.encode() if hmac_key else None, fixes=fixes,
-                            prices=prices)
+                            prices=prices, engine=engine, kv_events=kv_events)
     proxy.auth_token = auth_token or os.environ.get("PREFIXWISE_AUTH_TOKEN") or None
     exposed = not _is_loopback(host)
     if exposed and not proxy.auth_token and proxy.api_key and not proxy.mock and not allow_unauthenticated:
@@ -1247,6 +1292,11 @@ def serve(host: str = "127.0.0.1", port: int = 8080, *, ledger_path: str | None 
         print(f"  fixes:    {', '.join(proxy.fixes) or 'none (pass-through)'}")
         print(f"  prices:   {len(proxy.prices.models)} models, table of {proxy.prices.as_of}"
               f" ({' + '.join(proxy.prices.sources)})")
+        if proxy.engine:
+            ev = proxy.engine_events.endpoint if proxy.engine_events else "none (evictions are inferred)"
+            print(f"  engine:   {proxy.engine} (one self-hosted engine); KV events: {ev}")
+            flag = "--enable-cache-report" if proxy.engine == "sglang" else "--enable-prompt-tokens-details"
+            print(f"  note:     start {proxy.engine} with {flag}, or every turn looks like a miss")
         print(f"  auth:     {'X-Prefixwise-Token required' if proxy.auth_token else 'none'}"
               + ("  (WARNING: listening beyond localhost without a token)" if exposed and not proxy.auth_token else ""))
         if not os.environ.get("PREFIXWISE_HMAC_KEY"):

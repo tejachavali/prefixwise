@@ -80,9 +80,20 @@ Modes:
   so the scoring path (proxy -> classifier -> ledger) runs locally.
   This is a smoke test of the harness, not evidence about vLLM.
 
+Engines (--engine; the URL flag is --vllm-url for any of them):
+- vllm (default): vllm_server.sh.
+- vllm-lmcache: vLLM with LMCache CPU offload, vllm_lmcache_server.sh.
+  vLLM's cached_tokens counts local hits plus tokens loaded from LMCache.
+- sglang / sglang-hicache: sglang_server.sh (HICACHE=1 for the second).
+  Needs --enable-cache-report for cached_tokens. SGLang reads a body
+  session_id as its own stateful-session handle and rejects unknown ones,
+  so it is not forwarded. SGLang serves any model name with its one model,
+  so MODEL_SWITCH turns are a label change on the same weights there.
+
 Usage:
   python3 experiments/e1_open/e1_open.py --mock
   python3 experiments/e1_open/e1_open.py --vllm-url http://127.0.0.1:8000 --model Qwen/Qwen3-8B
+  python3 experiments/e1_open/e1_open.py --engine sglang --vllm-url http://127.0.0.1:30000 --model Qwen/Qwen3-4B
 """
 
 from __future__ import annotations
@@ -93,6 +104,8 @@ import sys
 import time
 from datetime import date, timedelta
 from pathlib import Path
+
+ENGINES = ("vllm", "vllm-lmcache", "sglang", "sglang-hicache")
 
 # Allow running from the repo root without installing the package.
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
@@ -290,7 +303,7 @@ def write_report(results: list[dict], report: dict, output_dir: Path) -> tuple[P
     json_path = output_dir / f"e1_open_{stamp}.json"
     md_path = output_dir / f"e1_open_{stamp}.md"
     json_path.write_text(json.dumps({"report": report, "results": results}, indent=2))
-    lines = ["# E1-open report", "",
+    lines = ["# E1-open report", "", f"Engine: {report.get('engine', 'vllm')}", "",
              f"Turns: {report['total_turns']}  |  Agreement: {report['agreement']:.1%}  |  "
              f"UNKNOWN rate (misses): {report['unknown_rate']:.1%}  |  "
              f"Pass: {'YES' if report['pass'] else 'NO'}", "",
@@ -299,9 +312,9 @@ def write_report(results: list[dict], report: dict, output_dir: Path) -> tuple[P
              "|---|---:|---:|---:|"]
     for cause, c in sorted(report["per_cause"].items()):
         lines.append(f"| {cause} | {c['n']} | {c['correct']} | {c['precision']:.1%} |")
-    lines += ["", "## Misses (predicted != injected)", ""]
+    lines += ["", "## Misses (predicted != expected cause)", ""]
     for r in results:
-        if r["predicted"] != r["injected"]:
+        if r["predicted"] != expected_cause(r["injected"]):
             lines.append(f"- turn {r['turn']} session {r['session_id']}: "
                          f"injected {r['injected']}, predicted {r['predicted']}, "
                          f"cached {r['cached_tokens']}/{r['prompt_tokens']}")
@@ -337,8 +350,10 @@ def retry_upstream_ids(session_id: str, turn_no: int) -> tuple[str, str]:
 
 
 def run(*, vllm_url: str, model: str, model_alias: str, mock: bool,
-        output_dir: Path, max_turns: int | None = None) -> tuple[list[dict], dict]:
-    proxy = PrefixwiseProxy(upstream_url=vllm_url, api_key="sk-dummy") if not mock else PrefixwiseProxy()
+        output_dir: Path, max_turns: int | None = None, engine: str = "vllm") -> tuple[list[dict], dict]:
+    kind = "vllm" if engine.startswith("vllm") else "sglang"
+    proxy = (PrefixwiseProxy(upstream_url=vllm_url, api_key="sk-dummy", engine=kind)
+             if not mock else PrefixwiseProxy(engine=kind))
     # Mock mode: replace the proxy's forwarder with a simulator that
     # returns cached_tokens per injected cause. Real proxy, real
     # classifier, real ledger; only the upstream is simulated.
@@ -397,6 +412,7 @@ def run(*, vllm_url: str, model: str, model_alias: str, mock: bool,
                 "upstream_session_id": retry_upstream_session_id,
             })
     report = score_results(results)
+    report["engine"] = engine
     return results, report
 
 
@@ -408,15 +424,18 @@ def main() -> int:
     ap.add_argument("--mock", action="store_true", help="simulate vLLM, no GPU/server needed")
     ap.add_argument("--output-dir", default=str(Path(__file__).resolve().parent / "results"))
     ap.add_argument("--max-turns", type=int, default=None)
+    ap.add_argument("--engine", choices=ENGINES, default="vllm",
+                    help="the server behind --vllm-url (changes only what is forwarded)")
     args = ap.parse_args()
 
     if args.mock:
         print("E1-open in MOCK mode: simulated vLLM cached_tokens, no GPU needed.")
     else:
-        print(f"E1-open live: vLLM at {args.vllm_url}, model {args.model} (alias {args.model_alias})")
+        print(f"E1-open live: {args.engine} at {args.vllm_url}, model {args.model} (alias {args.model_alias})")
     results, report = run(vllm_url=args.vllm_url, model=args.model,
                           model_alias=args.model_alias, mock=args.mock,
-                          output_dir=Path(args.output_dir), max_turns=args.max_turns)
+                          output_dir=Path(args.output_dir), max_turns=args.max_turns,
+                          engine=args.engine)
     json_path, md_path = write_report(results, report, Path(args.output_dir))
     print(f"Turns: {report['total_turns']}  Agreement: {report['agreement']:.1%}  "
           f"UNKNOWN rate: {report['unknown_rate']:.1%}  Pass: {'YES' if report['pass'] else 'NO'}")

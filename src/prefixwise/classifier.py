@@ -82,8 +82,13 @@ class RequestSnapshot:
     compaction_event: bool = False
     fork_parent_session_id: str | None = None
     session_id: str | None = None
-    # vLLM KV events for this session between the two turns.
-    evicted_block_hashes: list[str] = field(default_factory=list)
+    # Self-hosted engine (vLLM, SGLang) behind the proxy: one cache, no routing.
+    engine: bool = False
+    # From the engine's KV events (prefixwise.engines; None = nothing to judge):
+    # evicted_blocks > 0 when the block where the cache read stopped was removed;
+    # evicted_blocks == 0 and resident_blocks > 0 when that block is still on the GPU.
+    evicted_blocks: int | None = None
+    resident_blocks: int | None = None
     # Anthropic cache_control present anywhere in the request.
     has_breakpoint: bool = False
     breakpoint_after_volatile: bool = False
@@ -237,9 +242,10 @@ def classify(prev: RequestSnapshot | None, curr: RequestSnapshot,
 
     # From here the prefix was reusable but cache_read was low.
     # Engine eviction events are direct evidence; they outrank inference.
-    if curr.evicted_block_hashes:
+    if curr.evicted_blocks:
         return Classification(MissCause.EVICTED, None,
-                              "BlockRemoved events for this session's blocks between the two turns",
+                              "confirmed: the block where the cache read stopped was removed from GPU memory "
+                              f"({curr.evicted_blocks} of the previous request's KV blocks removed; KV events)",
                               secondary, native_reason)
 
     # Identical replay within a short window is a retry, not a cache miss.
@@ -248,6 +254,22 @@ def classify(prev: RequestSnapshot | None, curr: RequestSnapshot,
        curr.gap_seconds is not None and curr.gap_seconds < 60 and curr.cached_tokens == 0:
         return Classification(MissCause.RETRY_REPLAY, False,
                               "identical request within the retry window", secondary, native_reason)
+
+    # One self-hosted engine: there is no routing, so an unchanged prefix that was
+    # not reused is usually an eviction. Events can rule that out (docs/ENGINES.md).
+    if curr.engine:
+        if curr.evicted_blocks == 0 and curr.resident_blocks:
+            return Classification(MissCause.UNKNOWN, None,
+                                  "not an eviction: the engine still holds the block where the cache read stopped "
+                                  f"({curr.resident_blocks} of the previous request's blocks resident; KV events). "
+                                  "The token prefix changed there although the request did not (chat template "
+                                  "rendering), or the request went to another data-parallel rank",
+                                  secondary, native_reason)
+        return Classification(MissCause.EVICTED, None,
+                              "inferred: one self-hosted engine, prefix unchanged but not reused. Usually the "
+                              "engine evicted it (GPU memory full); chat template re-rendering or data-parallel "
+                              "routing look the same. Confirm with --kv-events (vLLM)",
+                              secondary, native_reason)
 
     gap, ttl = curr.gap_seconds, curr.ttl_seconds
     if ttl is not None and gap is not None and gap > ttl:

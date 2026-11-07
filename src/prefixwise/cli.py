@@ -67,8 +67,8 @@ def cmd_serve(args) -> int:
         serve(host=args.host, port=args.port, ledger_path=ledger,
               upstream_url=args.upstream, mock=True if args.mock else None,
               fixes=args.fix or None, allow_unauthenticated=args.allow_unauthenticated,
-              prices=args.prices)
-    except ValueError as exc:  # unknown --fix name
+              prices=args.prices, engine=args.engine, kv_events=args.kv_events)
+    except ValueError as exc:  # unknown --fix or --engine name
         sys.exit(f"prefixwise: {exc}")
     return 0
 
@@ -434,6 +434,12 @@ def build_parser() -> argparse.ArgumentParser:
                    help="apply a fix to every request before forwarding (repeatable). "
                         "Available: canonical_tools. Default: $PREFIXWISE_FIXES or none")
     ledger_opt(p)
+    p.add_argument("--engine", choices=["vllm", "sglang"],
+                   help="one self-hosted engine behind --upstream: no routing, so an unchanged prefix "
+                        "that misses is an eviction (inferred; see --kv-events)")
+    p.add_argument("--kv-events", metavar="ENDPOINT",
+                   help="vLLM only: its KV-event stream, e.g. tcp://127.0.0.1:5557, to confirm evictions "
+                        "or rule them out (needs: pip install 'prefixwise[engines]')")
     p.set_defaults(func=cmd_serve)
 
     p = sub.add_parser("report", help="summarise the ledger")
