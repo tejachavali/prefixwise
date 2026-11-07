@@ -26,7 +26,9 @@ import time
 
 import json
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import astuple, dataclass, fields
+
+SCHEMA_VERSION = 3
 
 
 @dataclass
@@ -50,6 +52,21 @@ class LedgerEntry:
     fixes: str | None = None  # comma-separated proxy fixes that rewrote this request
     cost: float | None = None  # USD for the whole request; None = a rate was unknown
     price_as_of: str | None = None  # date of the price table that priced it
+    # Schema 3 (docs/DATA.md): facts observed for every request, failures included.
+    status: int = 200  # upstream HTTP status; >= 400 rows have no verdict and no tokens
+    error: str | None = None  # short error class for failed requests
+    api: str | None = None  # chat | responses | messages
+    stream: bool | None = None
+    uncached_tokens: int | None = None  # prompt tokens neither read from nor written to the cache
+    cache_write_tokens: int | None = None  # prompt tokens written to the cache (all TTLs)
+    latency_ms: float | None = None  # upstream time (to the last byte for streams)
+    overhead_ms: float | None = None  # Prefixwise's own processing time
+    gap_seconds: float | None = None  # since this session's previous turn on this model
+    evidence: str | None = None  # why the verdict was given (Prefixwise's words, never prompt text)
+    secondary_causes: str | None = None  # comma-separated
+    divergence_role: str | None = None  # where the prompt first changed: system, tools, messages, ...
+    divergence_index: int | None = None  # block index of that first change
+    schema_version: int = SCHEMA_VERSION
 
 
 def avoidable_tokens(prompt_tokens: int, cached_tokens: int, *,
@@ -90,7 +107,15 @@ def reuse_adjusted_reads(write_multiplier: float, read_multiplier: float) -> flo
 # Columns added after the first schema; added in place to older ledgers.
 _MIGRATIONS = {"task_id": "TEXT", "request_id": "TEXT", "completion_tokens": "INTEGER",
                "fixes": "TEXT", "cost": "REAL", "price_as_of": "TEXT",
-               "recorded_at": "REAL"}  # unix time; NULL on rows from before 0.3.1
+               "recorded_at": "REAL",  # unix time; NULL on rows from before 0.3.1
+               # schema 3; NULL on older rows (status NULL means it succeeded)
+               "status": "INTEGER", "error": "TEXT", "api": "TEXT", "stream": "INTEGER",
+               "uncached_tokens": "INTEGER", "cache_write_tokens": "INTEGER",
+               "latency_ms": "REAL", "overhead_ms": "REAL", "gap_seconds": "REAL",
+               "evidence": "TEXT", "secondary_causes": "TEXT", "divergence_role": "TEXT",
+               "divergence_index": "INTEGER", "schema_version": "INTEGER"}
+
+_COLUMNS = [f.name for f in fields(LedgerEntry)]
 
 
 class Ledger:
@@ -108,6 +133,7 @@ class Ledger:
             if not os.path.exists(path):
                 os.close(os.open(path, os.O_CREAT | os.O_WRONLY, 0o600))
         # timeout: the CLI and a running proxy may share one ledger file.
+        self.path = path
         self.conn = sqlite3.connect(path, check_same_thread=False, timeout=10)
         with self._lock:
             if path != ":memory:":
@@ -129,6 +155,8 @@ class Ledger:
                     self.conn.execute(f"ALTER TABLE entries ADD COLUMN {col} {typ}")
             self.conn.execute("CREATE INDEX IF NOT EXISTS entries_task ON entries(task_id)")
             self.conn.execute("CREATE INDEX IF NOT EXISTS entries_request ON entries(request_id)")
+            self.conn.execute("CREATE INDEX IF NOT EXISTS entries_session ON entries(session_id)")
+            self.conn.execute("CREATE INDEX IF NOT EXISTS entries_time ON entries(recorded_at)")
             self.conn.execute(
                 """CREATE TABLE IF NOT EXISTS tasks (
                     task_id TEXT PRIMARY KEY, success INTEGER NOT NULL, recorded_at REAL
@@ -137,22 +165,11 @@ class Ledger:
             self.conn.commit()
 
     def record(self, entry: LedgerEntry) -> int:
+        values = [int(v) if isinstance(v, bool) else v for v in astuple(entry)]
         with self._lock:
             cur = self.conn.execute(
-                """INSERT INTO entries (session_id, agent_id, provider, model, cause,
-                    legit, prompt_tokens, cached_tokens, avoidable_tokens,
-                    avoidable_cost, task_success, native_reason, classifier_version,
-                    task_id, request_id, completion_tokens, fixes, cost, price_as_of, recorded_at)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                (entry.session_id, entry.agent_id, entry.provider, entry.model,
-                 entry.cause, None if entry.legit is None else int(entry.legit),
-                 entry.prompt_tokens, entry.cached_tokens, entry.avoidable_tokens,
-                 entry.avoidable_cost,
-                 None if entry.task_success is None else int(entry.task_success),
-                 entry.native_reason, entry.classifier_version,
-                 entry.task_id, entry.request_id, entry.completion_tokens, entry.fixes,
-                 entry.cost, entry.price_as_of, time.time()),
-            )
+                f"INSERT INTO entries ({', '.join(_COLUMNS)}, recorded_at) "
+                f"VALUES ({', '.join('?' * (len(_COLUMNS) + 1))})", (*values, time.time()))
             if entry.task_id and entry.task_success is not None:
                 self._set_task_outcome_locked(entry.task_id, entry.task_success)
             self.conn.commit()
@@ -188,35 +205,41 @@ class Ledger:
             self._set_task_outcome_locked(task_id, success)
             self.conn.commit()
 
-    def task_counts(self, agent_id: str | None = None) -> dict:
-        q = """SELECT COUNT(*), COALESCE(SUM(t.success), 0) FROM tasks t
-               WHERE EXISTS (SELECT 1 FROM entries e WHERE e.task_id = t.task_id
-                             {agent})"""
-        args: list = []
-        agent = ""
-        if agent_id:
-            agent, args = "AND e.agent_id = ?", [agent_id]
-        with self._lock:
-            resolved, successful = self.conn.execute(q.format(agent=agent), args).fetchone()
-        return {"resolved": resolved, "successful": successful}
+    def task_counts(self) -> dict:
+        """Resolved and successful tasks. Defined in prefixwise.metrics."""
+        from . import metrics
+
+        m = metrics.query(self, ["tasks_resolved", "tasks_successful"])
+        row = m[0] if m else {}
+        return {"resolved": row.get("tasks_resolved") or 0, "successful": row.get("tasks_successful") or 0}
 
     def tokens_per_successful_task(self, agent_id: str | None = None) -> float | None:
-        """All tokens on resolved tasks (failures included) / successful tasks.
+        """Tokens on resolved tasks (failed tasks included) / successful tasks; None until
+        a task succeeds. Defined in prefixwise.metrics."""
+        from . import metrics
 
-        None when no task has succeeded yet: the ratio is undefined, not zero.
-        """
-        q = """SELECT COALESCE(SUM(e.prompt_tokens + COALESCE(e.completion_tokens, 0)), 0)
-               FROM entries e JOIN tasks t ON e.task_id = t.task_id"""
-        args: list = []
-        if agent_id:
-            q += " WHERE e.agent_id = ?"
-            args.append(agent_id)
-        with self._lock:
-            total = self.conn.execute(q, args).fetchone()[0]
-        successful = self.task_counts(agent_id)["successful"]
-        if not successful:
-            return None
-        return total / successful
+        m = metrics.query(self, ["tokens_per_successful_task"],
+                          filters={"agent": agent_id} if agent_id else None)
+        return m[0]["tokens_per_successful_task"] if m else None
+
+    def reader(self):
+        """A connection for long reads (metrics, the API, exports). A file ledger
+        gets its own read-only connection, so a big query never blocks the proxy
+        recording requests (WAL lets readers and the writer run together)."""
+        import contextlib
+
+        @contextlib.contextmanager
+        def _cm():
+            if self.path == ":memory:":
+                with self._lock:
+                    yield self.conn
+                return
+            conn = sqlite3.connect(f"file:{self.path}?mode=ro", uri=True, timeout=10)
+            try:
+                yield conn
+            finally:
+                conn.close()
+        return _cm()
 
     def get_request(self, request_id: str) -> dict | None:
         with self._lock:
@@ -226,69 +249,43 @@ class Ledger:
         return dict(zip(names, row)) if row else None
 
     def summary(self) -> dict:
-        """Totals across the whole ledger, for reports."""
-        with self._lock:
-            n, prompt, cached, completion, avoidable = self.conn.execute(
-                """SELECT COUNT(*), COALESCE(SUM(prompt_tokens), 0), COALESCE(SUM(cached_tokens), 0),
-                          COALESCE(SUM(completion_tokens), 0), COALESCE(SUM(avoidable_tokens), 0)
-                   FROM entries""").fetchone()
-            priced, cost, avoidable_cost = self.conn.execute(
-                """SELECT COUNT(cost), COALESCE(SUM(cost), 0), COALESCE(SUM(avoidable_cost), 0)
-                   FROM entries""").fetchone()
-        return {"requests": n, "prompt_tokens": prompt, "cached_tokens": cached,
-                "completion_tokens": completion, "avoidable_tokens": avoidable,
-                "cache_hit_rate": (cached / prompt) if prompt else None,
-                "avoidable_share": (avoidable / prompt) if prompt else None,
-                "tasks": self.task_counts(),
-                "tokens_per_successful_task": self.tokens_per_successful_task(),
+        """Totals across the whole ledger, for reports. Defined in prefixwise.metrics."""
+        from . import metrics
+
+        m = metrics.summary(self)
+        priced = m["requests_priced"] or 0
+        return {"requests": m["requests"] or 0, "failed_requests": m["requests_failed"] or 0,
+                "prompt_tokens": m["prompt_tokens"] or 0, "cached_tokens": m["cached_tokens"] or 0,
+                "completion_tokens": m["completion_tokens"] or 0, "avoidable_tokens": m["avoidable_tokens"] or 0,
+                "cache_hit_rate": m["cache_hit_rate"], "avoidable_share": m["avoidable_share"],
+                "tasks": {"resolved": m["tasks_resolved"] or 0, "successful": m["tasks_successful"] or 0},
+                "tokens_per_successful_task": m["tokens_per_successful_task"],
                 # Dollars cover only priced requests; priced_requests says how many.
                 "priced_requests": priced,
-                "cost": cost if priced else None,
-                "avoidable_cost": avoidable_cost if priced else None,
-                "cost_per_successful_task": self.cost_per_successful_task()}
-
-    def cost_per_successful_task(self) -> float | None:
-        """Dollars on resolved tasks (failures included) / successful tasks.
-        None unless every request on those tasks was priced: a partial sum
-        would understate it."""
-        with self._lock:
-            n, priced, total = self.conn.execute(
-                """SELECT COUNT(*), COUNT(e.cost), COALESCE(SUM(e.cost), 0)
-                   FROM entries e JOIN tasks t ON e.task_id = t.task_id""").fetchone()
-        successful = self.task_counts()["successful"]
-        if not successful or not n or priced != n:
-            return None
-        return total / successful
+                "cost": m["cost_usd"] if priced else None,
+                "avoidable_cost": (m["avoidable_cost_usd"] or 0) if priced else None,
+                "cost_per_successful_task": m["cost_per_successful_task_usd"]}
 
     ROLLUP_KEYS = ("cause", "session_id", "agent_id", "model", "provider", "task_id")
 
     def rollup(self, by: str = "cause") -> list[dict]:
-        """Requests and tokens grouped by one column, most avoidable first."""
+        """Requests and tokens grouped by one column, most avoidable first.
+        Defined in prefixwise.metrics; groups with no verdict (failures only) are left out."""
+        from . import metrics
+
         if by not in self.ROLLUP_KEYS:
             raise ValueError(f"rollup key must be one of {self.ROLLUP_KEYS}")
-        with self._lock:
-            rows = self.conn.execute(
-                f"""SELECT {by}, COUNT(*), COALESCE(SUM(prompt_tokens), 0),
-                           COALESCE(SUM(cached_tokens), 0), COALESCE(SUM(avoidable_tokens), 0),
-                           SUM(CASE WHEN legit = 0 THEN 1 ELSE 0 END),
-                           COUNT(cost), SUM(cost), SUM(avoidable_cost)
-                    FROM entries GROUP BY {by}
-                    ORDER BY SUM(avoidable_tokens) DESC, COUNT(*) DESC""").fetchall()
-            # Tokens per successful task within each group: tokens on resolved
-            # tasks (failures included) / distinct successful tasks.
-            per_task = {k: (tok, ok) for k, tok, ok in self.conn.execute(
-                f"""SELECT e.{by}, SUM(e.prompt_tokens + COALESCE(e.completion_tokens, 0)),
-                           COUNT(DISTINCT CASE WHEN t.success = 1 THEN t.task_id END)
-                    FROM entries e JOIN tasks t ON e.task_id = t.task_id
-                    GROUP BY e.{by}""").fetchall()}
-        out = []
-        for k, n, pt, ct, at, w, priced, cost, acost in rows:
-            tok, ok = per_task.get(k, (0, 0))
-            out.append({by: k, "requests": n, "prompt_tokens": pt, "cached_tokens": ct,
-                        "avoidable_tokens": at, "waste_requests": w or 0,
-                        "priced_requests": priced, "cost": cost, "avoidable_cost": acost,
-                        "successful_tasks": ok,
-                        "tokens_per_successful_task": (tok / ok) if ok else None})
+        dim = {"session_id": "session", "agent_id": "agent", "task_id": "task"}.get(by, by)
+        rows = metrics.query(self, ["requests", "prompt_tokens", "cached_tokens", "avoidable_tokens",
+                                    "requests_wasteful", "requests_priced", "cost_usd", "avoidable_cost_usd",
+                                    "tasks_successful", "tokens_per_successful_task"], by=dim)
+        out = [{by: r[dim], "requests": r["requests"], "prompt_tokens": r["prompt_tokens"],
+                "cached_tokens": r["cached_tokens"], "avoidable_tokens": r["avoidable_tokens"],
+                "waste_requests": r["requests_wasteful"] or 0, "priced_requests": r["requests_priced"] or 0,
+                "cost": r["cost_usd"], "avoidable_cost": r["avoidable_cost_usd"],
+                "successful_tasks": r["tasks_successful"],
+                "tokens_per_successful_task": r["tokens_per_successful_task"]} for r in rows if r["requests"]]
+        out.sort(key=lambda r: (-r["avoidable_tokens"], -r["requests"]))
         return out
 
     def recent(self, limit: int = 20) -> list[dict]:
@@ -301,12 +298,13 @@ class Ledger:
         with self._lock:
             rows = self.conn.execute(
                 """SELECT cause, COUNT(*), SUM(avoidable_tokens), SUM(avoidable_cost)
-                   FROM entries GROUP BY cause ORDER BY SUM(avoidable_tokens) DESC"""
+                   FROM entries WHERE error IS NULL GROUP BY cause ORDER BY SUM(avoidable_tokens) DESC"""
             ).fetchall()
         return [{"cause": c, "requests": n, "avoidable_tokens": t or 0,
                  "avoidable_cost": cost} for c, n, t, cost in rows]
 
     def to_json(self) -> str:
-        return json.dumps({"tokens_per_successful_task": self.tokens_per_successful_task(),
-                           "tasks": self.task_counts(),
+        s = self.summary()
+        return json.dumps({"tokens_per_successful_task": s["tokens_per_successful_task"],
+                           "tasks": s["tasks"],
                            "by_cause": self.rollup_by_cause()}, indent=2)

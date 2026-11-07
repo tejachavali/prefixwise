@@ -74,29 +74,10 @@ def cmd_serve(args) -> int:
 
 
 def cmd_fixes(args) -> int:
-    from .fixes import FIX_ADVICE, FIX_STATUS
+    from .fixes import recommend
 
-    led = _open_existing_ledger(args)
-    summary = led.summary()
-    rows = {r["cause"]: r for r in led.rollup("cause")}
-    with led._lock:
-        fixed_requests = dict(led.conn.execute(
-            "SELECT fixes, COUNT(*) FROM entries WHERE fixes IS NOT NULL GROUP BY fixes").fetchall())
-    recs = []
-    for cause, advice in FIX_ADVICE.items():
-        r = rows.get(cause)
-        if not r or not r["avoidable_tokens"]:
-            continue
-        recs.append({"cause": cause, "requests": r["requests"], "predicted_savings_tokens": r["avoidable_tokens"],
-                     "predicted_savings_usd": r["avoidable_cost"],
-                     "unpriced_requests": r["requests"] - r["priced_requests"],
-                     "share_of_prompt_tokens": (r["avoidable_tokens"] / summary["prompt_tokens"])
-                     if summary["prompt_tokens"] else None,
-                     "fix": advice["fix"], "proxy_toggle": advice["toggle"],
-                     "status": (FIX_STATUS.get(advice["toggle"] or "", {}).get("status")
-                                or "recommended (predicted; prove it with experiments/e4)"),
-                     "evidence": FIX_STATUS.get(advice["toggle"] or "", {}).get("evidence")})
-    recs.sort(key=lambda x: -x["predicted_savings_tokens"])
+    rec = recommend(_open_existing_ledger(args))
+    recs, fixed_requests = rec["recommendations"], rec["requests_rewritten_by_fixes"]
     if args.json:
         print(json.dumps({"recommendations": recs, "requests_rewritten_by_fixes": fixed_requests}, indent=2))
         return 0
@@ -218,6 +199,43 @@ def cmd_prune(args) -> int:
     return 0
 
 
+def cmd_export(args) -> int:
+    """Raw ledger rows (facts, never prompt text) as JSONL or CSV, oldest first."""
+    import csv
+
+    from . import api, metrics
+
+    led = _open_existing_ledger(args)
+    try:
+        since = api._time(args.since, "--since")
+        filters = dict(f.split("=", 1) for f in args.where)
+        where, params = metrics._where(filters, since, None)
+    except (ValueError, api.ApiError) as exc:
+        print(f"prefixwise: {exc}", file=sys.stderr)
+        return 2
+    if args.output:  # owner-only, like the ledger itself
+        out = os.fdopen(os.open(args.output, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w", newline="")
+    else:
+        out = sys.stdout
+    with led.reader() as conn:
+        cur = conn.execute(f"SELECT * FROM entries{where} ORDER BY id", params)
+        names = [d[0] for d in cur.description]
+        writer = csv.writer(out) if args.format == "csv" else None
+        if writer:
+            writer.writerow(names)
+        n = 0
+        for row in cur:
+            n += 1
+            if writer:
+                writer.writerow(row)
+            else:
+                out.write(json.dumps(dict(zip(names, row))) + "\n")
+    if args.output:
+        out.close()
+        print(f"wrote {n} rows to {args.output}", file=sys.stderr)
+    return 0
+
+
 def cmd_request(args) -> int:
     row = _open_existing_ledger(args).get_request(args.request_id)
     if row is None:
@@ -333,6 +351,15 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--failure", dest="outcome", action="store_const", const="failure")
     ledger_opt(p)
     p.set_defaults(func=cmd_task)
+
+    p = sub.add_parser("export", help="raw ledger rows as JSONL or CSV (facts, never prompt text)")
+    p.add_argument("--format", choices=["jsonl", "csv"], default="jsonl")
+    p.add_argument("--since", metavar="WHEN", help="unix seconds, or a duration back from now: 24h, 7d")
+    p.add_argument("--where", action="append", default=[], metavar="FIELD=VALUE",
+                   help="filter (repeatable): cause, session, agent, model, provider, task, api, error")
+    p.add_argument("-o", "--output", metavar="FILE", help="default: stdout")
+    ledger_opt(p)
+    p.set_defaults(func=cmd_export)
 
     p = sub.add_parser("prune", help="delete old ledger entries (retention)")
     p.add_argument("--older-than", required=True, metavar="AGE", help="e.g. 30d, 12h, 90 (days)")
