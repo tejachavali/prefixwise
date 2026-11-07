@@ -389,7 +389,7 @@ def cmd_import(args) -> int:
     import time
 
     from . import api, findings, metrics
-    from .importers import import_claude_code
+    from .importers import import_claude_code, import_codex
     from .ledger import Ledger
 
     try:
@@ -397,16 +397,17 @@ def cmd_import(args) -> int:
     except api.ApiError as exc:
         print(f"prefixwise: {exc}", file=sys.stderr)
         return 2
-    root = os.path.expanduser(args.path or "~/.claude/projects")
+    codex = args.source == "codex"
+    name, home = ("Codex", "~/.codex") if codex else ("Claude Code", "~/.claude/projects")
+    root = os.path.expanduser(args.path or home)
     if not os.path.isdir(root):
-        print(f"prefixwise: no Claude Code logs at {root} (Claude Code keeps them in ~/.claude/projects; "
-              "pass --path)", file=sys.stderr)
+        print(f"prefixwise: no {name} logs at {root} ({name} keeps them in {home}; pass --path)", file=sys.stderr)
         return 1
-    # Its own ledger by default: an API-key user who also proxies Claude Code keeps the two apart
+    # Its own ledger by default: someone who also proxies the agent keeps the two apart
     # (the proxy cannot know the log's response ids, so one request would count twice).
-    path = args.ledger or "prefixwise-claude-code.db"
+    path = args.ledger or f"prefixwise-{args.source}.db"
     led = Ledger(path)
-    stats = import_claude_code(root, led, since=since)
+    stats = (import_codex if codex else import_claude_code)(root, led, since=since)
     if args.json:
         print(json.dumps(stats, indent=2))
         return 0
@@ -419,13 +420,14 @@ def cmd_import(args) -> int:
             print(f"Nothing new: the {stats['logs']} logs hold {stats['skipped_known']:,} requests already in {path}.")
         return 0
     day = lambda t: time.strftime("%Y-%m-%d", time.localtime(t))  # noqa: E731
-    print(f"Imported {stats['imported']:,} requests from {stats['logs']} Claude Code logs "
+    print(f"Imported {stats['imported']:,} requests from {stats['logs']} {name} logs "
           f"({day(stats['first'])} to {day(stats['last'])})"
           + (f"; {stats['skipped_known']:,} were already in {path}" if stats["skipped_known"] else "")
           + (f"; {stats['duplicates']:,} logged twice were counted once" if stats["duplicates"] else "") + ".")
     print("Read from the logs, which hold each response's usage and what changed between requests, not the "
           "prompt itself: causes are inferred, and a miss the log cannot explain is `unknown`.")
-    print("Dollars are API prices: on a Pro/Max plan they show what the usage is worth, not what you paid.\n")
+    print("Dollars are API prices: on a subscription (Claude Pro/Max, ChatGPT plans) they show what the usage "
+          "is worth, not what you paid.\n")
     window = {"since": stats["first"], "until": stats["last"] + 1}
     print(findings.render(findings.findings(led, **window), command="serve"))
     rows = metrics.query(led, ["requests", "prompt_tokens", "cache_hit_rate", "cost_usd", "avoidable_tokens"],
@@ -589,11 +591,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_export)
 
     p = sub.add_parser("import", help="read agent session logs (no proxy needed) and report on them")
-    p.add_argument("source", choices=["claude-code"], help="whose logs: claude-code (~/.claude/projects)")
-    p.add_argument("--path", metavar="DIR", help="where the logs are (default ~/.claude/projects)")
+    p.add_argument("source", choices=["claude-code", "codex"],
+                   help="whose logs: claude-code (~/.claude/projects) or codex (~/.codex)")
+    p.add_argument("--path", metavar="DIR", help="where the logs are (default: the agent's own folder)")
     p.add_argument("--since", metavar="WHEN", help="only requests after this: unix seconds, or 24h, 7d")
     p.add_argument("--json", action="store_true", help="import counts as JSON, no report")
-    p.add_argument("--ledger", help="SQLite ledger file (default: ./prefixwise-claude-code.db, apart from a "
+    p.add_argument("--ledger", help="SQLite ledger file (default: ./prefixwise-<source>.db, apart from a "
                                     "proxy's ledger so nothing is counted twice)")
     p.set_defaults(func=cmd_import)
 
