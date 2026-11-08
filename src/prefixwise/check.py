@@ -13,8 +13,11 @@ production, so a regression is a cause inside a single run: nothing is compared 
 and no prompt is stored between runs. The mock provider answers with synthetic usage; the gated
 causes are decided from the request alone (block hashes, markers), so they do not depend on it.
 
-The mock makes an agent's loop run: a user turn that offers tools is answered with a call to the
-first tool, so the agent sends a second turn (the result), which is the turn the gate judges. A
+The mock makes an agent's loop run: a user turn that offers tools is answered with a call to a
+tool (the forced one, else the first; never when tool_choice is none), so the agent sends a second
+turn (the result), which is the turn the gate judges; the turn after a tool call gets text, however
+the agent rendered the result, so the mock never drives a loop. The agent has to accept placeholder
+arguments (values by type for the schema's required properties). A
 conversation's first response is held for `first_turn_delay` seconds (1.1 by default) so a
 per-second timestamp in the prompt changes between the turns; a date or time the fingerprinter's
 masks find in a system prompt is reported as a warning, because a per-minute one would not change
@@ -38,7 +41,6 @@ command exited non-zero and nothing was found).
 from __future__ import annotations
 
 import json
-import math
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -54,7 +56,7 @@ BASELINE_FILE = ".prefixwise-baseline.json"
 BASELINE_VERSION = 1
 DEFAULT_FIRST_TURN_DELAY = 1.1
 MONTH_SECONDS = 30 * 86400
-_NOT_ELIGIBLE = {"first_write"}
+_NOT_ELIGIBLE = {"first_write", "model_switch"}  # no previous turn on this model's cache
 
 
 def parse_fail_on(value: str | None, strict: bool = False) -> tuple[str, ...]:
@@ -109,6 +111,7 @@ class Report:
     scenarios: int = 0
     eligible: int = 0
     eligible_by_model: dict = field(default_factory=dict)
+    volatile_scenarios: set = field(default_factory=set)  # scenarios where volatile_system was seen, gated or not
     mock: bool = True
     agent_exit: int | None = None
 
@@ -188,6 +191,8 @@ def judge(rows: list[dict], fail_on: tuple, allow: list[dict] | None = None, moc
         if r["cause"] not in _NOT_ELIGIBLE:
             rep.eligible += 1
             rep.eligible_by_model[model] = rep.eligible_by_model.get(model, 0) + 1
+        if r["cause"] == "volatile_system":
+            rep.volatile_scenarios.add(scenario)
         if r["cause"] in fail_on:
             f = Finding(scenario=scenario, turn=turns[scenario], cause=r["cause"], model=model,
                         provider=str(r.get("provider") or "unknown"), divergence_role=r.get("divergence_role"),
@@ -218,8 +223,8 @@ def baseline_from_ledger(ledger, since: float | None = None, now: float | None =
     with ledger.reader() as conn:
         span = conn.execute(f"SELECT MIN(recorded_at), MAX(recorded_at) FROM entries{where}", args).fetchone()
         rows = conn.execute(
-            f"SELECT model, provider, COUNT(*), SUM(cause != 'first_write'),"
-            f" SUM(CASE WHEN cause != 'first_write' THEN COALESCE(cached_tokens, 0) + COALESCE(avoidable_tokens, 0)"
+            f"SELECT model, provider, COUNT(*), SUM(cause NOT IN ('first_write', 'model_switch')),"
+            f" SUM(CASE WHEN cause NOT IN ('first_write', 'model_switch') THEN COALESCE(cached_tokens, 0) + COALESCE(avoidable_tokens, 0)"
             f" ELSE 0 END) FROM entries{where} GROUP BY model, provider ORDER BY COUNT(*) DESC", args).fetchall()
     first, last = span if span else (None, None)
     seconds = max((last or 0) - (first or 0), 86400.0)  # a ledger shorter than a day is scaled as a day
@@ -247,6 +252,11 @@ def load_baseline(path: str | Path) -> dict:
     data = json.loads(Path(path).read_text())
     if not isinstance(data, dict) or data.get("version") != BASELINE_VERSION or not isinstance(data.get("models"), dict):
         raise ValueError(f"{path}: not a prefixwise baseline (version {BASELINE_VERSION}; prefixwise export --baseline)")
+    for model, m in data["models"].items():
+        if not isinstance(m, dict) or not all(isinstance(m.get(k), (int, float)) and not isinstance(m.get(k), bool)
+                                               for k in ("turns_per_month", "eligible_turns_per_month", "mean_reusable_tokens")):
+            raise ValueError(f"{path}: model {model!r} needs numeric turns_per_month, eligible_turns_per_month, "
+                             "mean_reusable_tokens")
     return data
 
 
@@ -301,10 +311,9 @@ class VolatileWatch:
             self.seen.setdefault(str(session_id), set()).update(kinds)
 
     def warnings(self, rep: Report) -> list[str]:
-        caught = {f.scenario for f in rep.findings if f.cause == "volatile_system"}
         out = []
         for scenario, kinds in sorted(self.seen.items()):
-            if scenario in caught:
+            if scenario in rep.volatile_scenarios:  # it did change: a finding (or not gated), not a warning
                 continue
             what = " and ".join(sorted(kinds))
             out.append(f"scenario={scenario}: a {what} is in the system prompt. It did not change within this "
@@ -388,9 +397,6 @@ def rows_from_bodies(files: list[str], provider: str | None = None) -> list[dict
                          "evidence": ex.evidence, "detail": None, "request_id": None})
     return rows
 
-
-def _nan_free(x: float | None) -> float | None:
-    return None if x is None or math.isnan(x) else x
 
 
 __all__ = ["DEFAULT_FAIL_ON", "STRICT_EXTRA", "BASELINE_FILE", "Finding", "Projection", "Report", "VolatileWatch",

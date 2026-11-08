@@ -21,14 +21,16 @@ never stored or sent anywhere; only block hashes, counts and Prefixwise's verdic
   the working directory when `--baseline` is not given.
 - The projection's denominator is eligible turns: `affected eligible turns / eligible turns in the
   run` (first turns excluded) x the baseline's `eligible_turns_per_month` x `mean_reusable_tokens` x
-  `PriceTable.miss_rate` (the rate a miss pays above a hit per token). Without a baseline, tokens.
+  `PriceTable.miss_rate`; first turns and model switches are not eligible (the rate a miss pays above a hit per token). Without a baseline, tokens.
 - **Multi-turn mock driver.** An agent test that runs one turn tests nothing (`first_write`). The
   mock answers a user turn that offers tools with a call to the first function tool (arguments are
   placeholders by type for the schema's required properties; Anthropic `tool_use`, chat
   `tool_calls`, Responses `function_call`, streamed too), so the loop runs a second turn, the one
-  the gate judges; a turn that answers a tool call gets text, so one round per user message, never
-  a loop. A run with no turn that had a previous turn warns: `0 cache-eligible multi-turn sequences
-  observed`.
+  the gate judges; the turn after a tool call gets text, however the agent rendered the result (a
+  plain user message included), so one tool call at a time and never a loop the mock drives.
+  `tool_choice` is honoured (none: no call; a forced tool: that one). The agent has to accept
+  placeholder arguments. A run with no turn that had a previous turn warns: `0 cache-eligible
+  multi-turn sequences observed`.
 - **Sub-second clocks.** Against a fast mock, turn 1 and turn 2 are milliseconds apart, so a
   per-second timestamp never changes. `check` holds each conversation's first mock response for
   `--first-turn-delay` seconds (1.1) so `int(time.time())` and `%S` stamps do change; a date or

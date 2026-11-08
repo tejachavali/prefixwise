@@ -269,10 +269,12 @@ def has_cache_breakpoint(body: dict) -> bool:
 
 
 def _mock_tool_call(body: dict, provider: str, api: str) -> tuple[str, dict] | None:
-    """prefixwise check: a call to the first function tool when the latest message is a user turn
-    that carries no tool result, so an agent's tool loop runs a second turn (the result, then the
-    answer) and the second turn is what the gate judges. Arguments are placeholders, by type, for
-    the schema's required properties. None: no tools, or the turn already answers a tool call."""
+    """prefixwise check: a call to a function tool when the latest message is a user turn that
+    carries no tool result, so an agent's tool loop runs a second turn (the result, then the
+    answer) and the second turn is what the gate judges. `tool_choice` is honoured: none calls
+    nothing, a forced tool is the one called, else the first function tool. Arguments are
+    placeholders, by type, for the schema's required properties. None: no tools, the turn already
+    answers a tool call, or tool_choice forbids it."""
     tools = body.get("tools")
     msgs = body.get("input") if api == "responses" else body.get("messages")
     if isinstance(msgs, str):
@@ -285,6 +287,14 @@ def _mock_tool_call(body: dict, provider: str, api: str) -> tuple[str, dict] | N
     if provider == "anthropic" and isinstance(last.get("content"), list) and any(
             isinstance(b, dict) and b.get("type") == "tool_result" for b in last["content"]):
         return None
+    choice = body.get("tool_choice")
+    forced = None
+    if choice == "none" or (isinstance(choice, dict) and choice.get("type") == "none"):
+        return None
+    if isinstance(choice, dict):
+        forced = (choice.get("name") or (choice.get("function") or {}).get("name")
+                  if choice.get("type") in ("tool", "function") else None)
+    candidates = []
     for t in tools:
         if not isinstance(t, dict):
             continue
@@ -302,6 +312,9 @@ def _mock_tool_call(body: dict, provider: str, api: str) -> tuple[str, dict] | N
                 continue
             name, schema = fn.get("name"), fn.get("parameters")
         if isinstance(name, str) and name:
+            candidates.append((name, schema))
+    for name, schema in candidates:
+        if forced is None or name == forced:
             return name, _placeholder_args(schema)
     return None
 
@@ -585,6 +598,7 @@ class PrefixwiseProxy:
         self.request_observer = None  # callable(provider, session_id, raw_blocks)
         self.check_mode = False  # POST /api/v1/check/scenario may rename default_session
         self.mock_tool_calls = False
+        self._mock_calls: OrderedDict = OrderedDict()  # (session, model) -> was the last mock answer a tool call
         self.mock_first_turn_delay = 0.0
         self.engine_notes: list[str] = []  # what the engine check found; printed by serve()
         # Fields Prefixwise adds to requests that an upstream rejected, by provider: they are
@@ -1127,7 +1141,17 @@ class PrefixwiseProxy:
                 cached = 0
             elif not cached:
                 write = 2000
-        call = _mock_tool_call(body, provider, api) if self.mock_tool_calls and body is not None else None
+        call = None
+        if self.mock_tool_calls and body is not None:
+            # One tool call at a time: a turn that follows a tool call gets text, however the agent
+            # rendered the result (a plain user message included), so the mock never drives a loop.
+            with self._lock:
+                last_was_call = self._mock_calls.get((session_id, model), False)
+                call = None if last_was_call else _mock_tool_call(body, provider, api)
+                self._mock_calls[(session_id, model)] = call is not None
+                self._mock_calls.move_to_end((session_id, model))
+                while len(self._mock_calls) > 10_000:
+                    self._mock_calls.popitem(last=False)
         if self.mock_first_turn_delay and prev is None:
             time.sleep(self.mock_first_turn_delay)
         # Ids shaped like the real APIs' (msg_, resp_, chatcmpl-): diagnostics chaining checks them.

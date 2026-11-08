@@ -157,9 +157,11 @@ def test_warns_on_a_static_date_in_the_system_prompt_and_on_no_multi_turn_sequen
     assert "2025" not in r.stdout  # the text itself never appears
     r = run_check(tmp_path, "--first-turn-delay", "0", scenarios=("single",))
     assert r.returncode == 0 and "WARN 0 cache-eligible multi-turn sequences observed" in r.stdout
-    # a changing date is a finding, not a warning: no double report
+    # a changing date is a finding, not a warning: no double report; nor a warning when it is not gated
     r = run_check(tmp_path, scenarios=("dated",))
     assert r.returncode == 2 and "WARN" not in r.stdout
+    r = run_check(tmp_path, "--fail-on", "tool_reserialize", scenarios=("dated",))
+    assert r.returncode == 0 and "WARN" not in r.stdout
 
 
 def test_bodies_mode_judges_saved_trajectories_offline(tmp_path):
@@ -231,6 +233,33 @@ def test_mock_answers_a_user_turn_that_offers_tools_with_a_typed_tool_call_then_
     assert json.loads(post(base, "/v1/messages", {**body, "tools": []})[1])["stop_reason"] == "end_turn"
 
 
+def test_mock_tool_calls_alternate_and_honour_tool_choice(mock_server):
+    _, base = mock_server
+    # An agent that renders tool output as a plain user message: tool call, text, tool call, text...
+    body = {"model": "claude-haiku-5-5", "max_tokens": 5, "tools": ANTH_TOOLS, "messages": [{"role": "user", "content": "hi"}]}
+    seen = []
+    for i in range(4):
+        r = json.loads(post(base, "/v1/messages", body)[1])
+        seen.append(r["stop_reason"])
+        body["messages"] += [{"role": "assistant", "content": r["content"]}, {"role": "user", "content": f"Tool output {i}"}]
+    assert seen == ["tool_use", "end_turn", "tool_use", "end_turn"]
+    # tool_choice none: never a call; a forced tool: that one
+    fresh = {"model": "claude-haiku-5-5", "max_tokens": 5, "tools": ANTH_TOOLS, "messages": [{"role": "user", "content": "hi"}]}
+    assert json.loads(post(base, "/v1/messages", {**fresh, "tool_choice": {"type": "none"}}, {"x-prefixwise-session-id": "a"})[1])["stop_reason"] == "end_turn"
+    two = ANTH_TOOLS + [{"name": "second", "input_schema": {"type": "object", "properties": {}}}]
+    r = json.loads(post(base, "/v1/messages", {**fresh, "tools": two, "tool_choice": {"type": "tool", "name": "second"}},
+                        {"x-prefixwise-session-id": "b"})[1])
+    assert r["content"][0]["name"] == "second"
+    chat_tools = [{"type": "function", "function": {"name": "f", "parameters": {}}}, {"type": "function", "function": {"name": "g", "parameters": {}}}]
+    r = json.loads(post(base, "/v1/chat/completions", {"model": "gpt-5.6", "tools": chat_tools, "tool_choice": "none",
+                                                       "messages": [{"role": "user", "content": "hi"}]}, {"x-prefixwise-session-id": "c"})[1])
+    assert r["choices"][0]["finish_reason"] == "stop"
+    r = json.loads(post(base, "/v1/chat/completions", {"model": "gpt-5.6", "tools": chat_tools,
+                                                       "tool_choice": {"type": "function", "function": {"name": "g"}},
+                                                       "messages": [{"role": "user", "content": "hi"}]}, {"x-prefixwise-session-id": "d"})[1])
+    assert r["choices"][0]["message"]["tool_calls"][0]["function"]["name"] == "g"
+
+
 def test_mock_tool_calls_in_openai_chat_and_responses_and_in_streams(mock_server):
     _, base = mock_server
     chat_tools = [{"type": "function", "function": {"name": "f", "parameters": {"type": "object", "properties": {"a": {"type": "string"}}, "required": ["a"]}}}]
@@ -247,13 +276,14 @@ def test_mock_tool_calls_in_openai_chat_and_responses_and_in_streams(mock_server
     assert chunks[1]["choices"][0]["finish_reason"] == "tool_calls"
     # responses: a function_call item; function_call_output ends the round
     resp_tools = [{"type": "function", "name": "g", "parameters": {"type": "object", "properties": {}}}]
-    r = json.loads(post(base, "/v1/responses", {"model": "gpt-5.6", "tools": resp_tools, "input": "hi"})[1])
+    rs = {"x-prefixwise-session-id": "resp"}  # its own conversation: tool calls alternate per conversation
+    r = json.loads(post(base, "/v1/responses", {"model": "gpt-5.6", "tools": resp_tools, "input": "hi"}, rs)[1])
     item = r["output"][0]
     assert item["type"] == "function_call" and item["name"] == "g" and item["arguments"] == "{}"
     r2 = json.loads(post(base, "/v1/responses", {"model": "gpt-5.6", "tools": resp_tools, "input": [
-        {"role": "user", "content": "hi"}, item, {"type": "function_call_output", "call_id": item["call_id"], "output": "ok"}]})[1])
+        {"role": "user", "content": "hi"}, item, {"type": "function_call_output", "call_id": item["call_id"], "output": "ok"}]}, rs)[1])
     assert r2["output"][0]["type"] == "message"
-    _, raw = post(base, "/v1/responses", {"model": "gpt-5.6", "tools": resp_tools, "input": "hi", "stream": True})
+    _, raw = post(base, "/v1/responses", {"model": "gpt-5.6", "tools": resp_tools, "input": "hi", "stream": True}, rs)
     names = [e["type"] for e in sse_json(raw)]
     assert "response.function_call_arguments.done" in names and names[-1] == "response.completed"
     assert sse_json(raw)[-1]["response"]["output"][0]["type"] == "function_call"
@@ -289,15 +319,16 @@ def test_the_mock_without_check_never_calls_tools_and_the_scenario_route_is_chec
 
 def test_first_turn_delay_holds_only_a_conversations_first_response(mock_server):
     proxy, base = mock_server
-    proxy.mock_first_turn_delay = 0.4
+    proxy.mock_first_turn_delay = 0.6
     body = {"model": "claude-haiku-5-5", "max_tokens": 5, "messages": [{"role": "user", "content": "hi"}]}
     t = time.monotonic()
     first = json.loads(post(base, "/v1/messages", body)[1])
-    assert time.monotonic() - t >= 0.4
+    first_took = time.monotonic() - t
+    assert first_took >= 0.6
     body["messages"] += [{"role": "assistant", "content": first["content"]}, {"role": "user", "content": "next"}]
     t = time.monotonic()
     post(base, "/v1/messages", body)
-    assert time.monotonic() - t < 0.3
+    assert time.monotonic() - t < first_took - 0.3  # the second response is not held
 
 
 # -- the pytest plugin ----------------------------------------------------------------------
@@ -323,7 +354,7 @@ def test_two():
     for k in ("ANTHROPIC_BASE_URL", "OPENAI_BASE_URL", "PREFIXWISE_URL", "PREFIXWISE_CHECK"):
         env.pop(k, None)
     r = subprocess.run([sys.executable, "-m", "prefixwise", "check", "--first-turn-delay", "0", "--strict", "--json", "--",
-                        sys.executable, "-m", "pytest", "-q", "-p", "prefixwise.pytest_plugin", "-p", "no:cacheprovider",
+                        sys.executable, "-m", "pytest", "-q", "-p", "no:prefixwise", "-p", "prefixwise.pytest_plugin", "-p", "no:cacheprovider",  # the same module whether or not the package (and its pytest11 entry point) is installed
                         str(tmp_path / "test_agent.py")], capture_output=True, text=True, env=env, timeout=120, cwd=tmp_path)
     assert r.returncode == 2, r.stdout + r.stderr
     rep = json.loads(r.stdout)
@@ -379,6 +410,9 @@ def test_baseline_from_a_ledger_scales_to_a_month_and_holds_counts_only(tmp_path
     path.write_text(json.dumps({"version": 99}))
     with pytest.raises(ValueError):
         check.load_baseline(path)
+    path.write_text(json.dumps({"version": 1, "models": {"m": {"turns_per_month": "lots"}}}))
+    with pytest.raises(ValueError):
+        check.load_baseline(path)
 
 
 def test_projection_uses_the_eligible_denominator_and_the_write_minus_read_rate():
@@ -389,6 +423,8 @@ def test_projection_uses_the_eligible_denominator_and_the_write_minus_read_rate(
             for c in ("first_write", "tool_reserialize", "none", "none", "tool_reserialize")]
     rep = check.judge(rows, check.DEFAULT_FAIL_ON)
     assert rep.requests == 5 and rep.eligible == 4 and len(rep.findings) == 2  # the first turn is not eligible
+    switched = check.judge(rows + [{**rows[2], "model": "claude-haiku-5-5", "cause": "model_switch"}], check.DEFAULT_FAIL_ON)
+    assert switched.eligible == 4 and "claude-haiku-5-5" not in switched.eligible_by_model  # nor a model switch
     prices = PriceTable.load()
     base = {"version": 1, "models": {"claude-sonnet-5-5": {"provider": "anthropic", "turns_per_month": 500_000,
                                                             "eligible_turns_per_month": 400_000, "mean_reusable_tokens": 10_000}}}

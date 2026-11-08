@@ -386,10 +386,10 @@ def cmd_check(args) -> int:
         allow = check.load_allow(args.allow) if args.allow else []
         baseline_path = args.baseline or (check.BASELINE_FILE if os.path.exists(check.BASELINE_FILE) else None)
         baseline = check.load_baseline(baseline_path) if baseline_path else None
+        prices = PriceTable.load(args.prices) if getattr(args, "prices", None) else PriceTable.load()
     except (OSError, ValueError) as exc:
         print(f"prefixwise: {exc}", file=sys.stderr)
         return 2
-    prices = PriceTable.load(args.prices) if getattr(args, "prices", None) else PriceTable.load()
     cmd = args.agent_command[1:] if args.agent_command[:1] == ["--"] else args.agent_command
     if bool(cmd) == bool(args.bodies):
         print("usage: prefixwise check [options] -- <command that runs the agent's scenarios>\n"
@@ -438,31 +438,33 @@ def cmd_check(args) -> int:
     print(f"prefixwise check: mock proxy on {base}; gate: {', '.join(fail_on)}", file=sys.stderr, flush=True)
     start = time.time()
     code = 127
-    try:  # with --json, stdout is the report: the command's own output goes to stderr
-        child = subprocess.Popen(cmd, env=env, stdout=sys.stderr if args.json else None)
-    except FileNotFoundError:
-        child = None
-        print(f"prefixwise: command not found: {cmd[0]}", file=sys.stderr)
-    if child is not None:
-        old_int = signal.signal(signal.SIGINT, signal.SIG_IGN)
-        old_term = signal.signal(signal.SIGTERM, lambda *_: child.terminate())
-        try:
-            code = child.wait()
-        finally:
-            signal.signal(signal.SIGINT, old_int)
-            signal.signal(signal.SIGTERM, old_term)
-    server.shutdown()
-    server.drain(5)
-    server.server_close()
-    code = 128 - code if code < 0 else code
-    rows = check.rows_since(proxy.ledger, start)
-    rep = check.judge(rows, fail_on, allow, mock=True)
-    rep.agent_exit = code
-    rep.warnings = watch.warnings(rep) + rep.warnings
-    check.project(rep, baseline, prices)
-    proxy.close()
-    if tmp is not None:
-        tmp.cleanup()
+    try:
+        try:  # with --json, stdout is the report: the command's own output goes to stderr
+            child = subprocess.Popen(cmd, env=env, stdout=sys.stderr if args.json else None)
+        except FileNotFoundError:
+            child = None
+            print(f"prefixwise: command not found: {cmd[0]}", file=sys.stderr)
+        if child is not None:
+            old_int = signal.signal(signal.SIGINT, signal.SIG_IGN)
+            old_term = signal.signal(signal.SIGTERM, lambda *_: child.terminate())
+            try:
+                code = child.wait()
+            finally:
+                signal.signal(signal.SIGINT, old_int)
+                signal.signal(signal.SIGTERM, old_term)
+        server.shutdown()
+        server.drain(5)
+        server.server_close()
+        code = 128 - code if code < 0 else code
+        rows = check.rows_since(proxy.ledger, start)
+        rep = check.judge(rows, fail_on, allow, mock=True)
+        rep.agent_exit = code
+        rep.warnings = watch.warnings(rep) + rep.warnings
+        check.project(rep, baseline, prices)
+    finally:
+        proxy.close()
+        if tmp is not None:
+            tmp.cleanup()
     return _emit_check(rep, args)
 
 
@@ -488,6 +490,9 @@ def cmd_export(args) -> int:
     led = _open_existing_ledger(args)
     if args.baseline:
         from .check import BASELINE_FILE, baseline_from_ledger
+        if args.where or args.format != "jsonl":
+            print("prefixwise: --baseline takes --since and -o only (it summarises every row per model)", file=sys.stderr)
+            return 2
         try:
             since = api._time(args.since, "--since")
         except (ValueError, api.ApiError) as exc:

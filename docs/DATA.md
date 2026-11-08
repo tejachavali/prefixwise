@@ -136,7 +136,7 @@ names a permanent cause (a schema mismatch) drops the batch and is counted, whil
 ## Baseline (`prefixwise export --baseline`)
 
 `.prefixwise-baseline.json`, for `prefixwise check`'s monthly projection: per model, `turns_per_month`,
-`eligible_turns_per_month` (turns with a previous turn to reuse: first turns are not eligible) and
+`eligible_turns_per_month` (turns with a previous turn to reuse: first turns and model switches are not eligible) and
 `mean_reusable_tokens` (what an eligible turn read from the cache, or could have), scaled from the
 ledger's span (`window_days`, at least one day) to 30 days. Counts and means only: no ids, no text. The
 projection is `affected eligible turns / eligible turns in the run x eligible_turns_per_month x

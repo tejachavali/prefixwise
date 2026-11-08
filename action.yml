@@ -32,9 +32,9 @@ inputs:
     required: false
     default: ""
   python-version:
-    description: Python to run Prefixwise with (actions/setup-python).
+    description: Set to run actions/setup-python with this version first. Leave empty (the default) to use the job's own python, where the agent's dependencies and pytest are installed.
     required: false
-    default: "3.12"
+    default: ""
 outputs:
   report:
     description: Path of the JSON report (prefixwise check --json).
@@ -43,6 +43,7 @@ runs:
   using: composite
   steps:
     - uses: actions/setup-python@v5
+      if: inputs.python-version != ''
       with:
         python-version: ${{ inputs.python-version }}
     - name: Install Prefixwise
