@@ -145,9 +145,12 @@ default, the same on every edge and collector). Each collector owns a set of par
   (no rows, no metrics; pending records left out; a record that breaks the classifier is skipped
   and counted), in each partition's own thread, so `/health` answers meanwhile and shows
   `replaying`; the first turn after a deploy is then compared with its real predecessor;
-- a starting collector takes over everything its predecessor left unacknowledged at once; a record
-  a dead collector took is claimed by a live one after a minute; a second collector active on the
-  same partition is reported in stderr and `/health` (`conflicts`), since it would split sessions;
+- a starting collector takes over everything a dead predecessor left unacknowledged at once; when
+  another consumer is still active on the partition (a rolling restart), it leaves that consumer's
+  batch alone (taking it would write those rows twice: XACK is per group, not per owner) and claims
+  only what stays idle for a minute, and it reports the conflict in stderr and `/health`. Deploy
+  collectors so that the old one stops before the new one starts (`strategy: Recreate`, or
+  `maxSurge: 0`); two live collectors on one partition split its sessions between them;
 - Redis 7.0 or later (XAUTOCLAIM drops trimmed entries from the pending list only from 7.0);
 - the stream is capped per partition (`PREFIXWISE_LOG_MAXLEN`, 1,000,000 records); records that
   fall off before a collector read them are lost, visibly a capacity decision.

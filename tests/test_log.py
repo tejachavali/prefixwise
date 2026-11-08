@@ -146,7 +146,15 @@ def test_a_restarted_collector_finds_its_state_and_adds_no_duplicate_rows(redis_
         lc2.stop(1)
 
 
-def test_a_record_a_dead_consumer_took_is_processed_once(redis_url, prefix):
+def _dead(monkeypatch):
+    """Liveness is recent activity: make a consumer that stopped 0.1 s ago count as dead."""
+    import prefixwise.log as log_mod
+
+    monkeypatch.setattr(log_mod, "CLAIM_IDLE_MS", 50)
+    time.sleep(0.1)
+
+
+def test_a_record_a_dead_consumer_took_is_processed_once(redis_url, prefix, monkeypatch):
     import json
 
     r = redis.Redis.from_url(redis_url)
@@ -159,7 +167,8 @@ def test_a_record_a_dead_consumer_took_is_processed_once(redis_url, prefix):
     # A consumer that died after reading, before acknowledging: the record sits in its pending list.
     r.xreadgroup("prefixwise", "dead-consumer", {stream: ">"}, count=10)
     assert r.xpending(stream, "prefixwise")["pending"] == 1
-    # A starting collector takes over everything its predecessor left pending, idle or not: one
+    _dead(monkeypatch)
+    # A starting collector takes over everything a dead predecessor left pending at once: one
     # collector per partition means they are its own.
     c, lc = consumer(redis_url, prefix, [partition_of("s", 4)], replay=False)
     try:
@@ -205,7 +214,7 @@ def test_the_proxy_takes_a_redis_collector_url(redis_url, prefix, monkeypatch):
     assert args.func is cmd_collect and args.log == redis_url and args.partitions == "0-3"
 
 
-def test_records_a_crashed_collector_took_but_never_wrote_are_written_after_the_restart(redis_url, prefix):
+def test_records_a_crashed_collector_took_but_never_wrote_are_written_after_the_restart(redis_url, prefix, monkeypatch):
     # Review: replay must not mark delivered-but-unwritten records as seen, or they are acked as
     # duplicates and lost. Three records sit in a dead consumer's pending list; the restarted
     # collector replays (nothing to replay: nothing was written), claims them, writes all three.
@@ -222,6 +231,7 @@ def test_records_a_crashed_collector_took_but_never_wrote_are_written_after_the_
                                                       "prompt_tokens_details": {"cached_tokens": 0}})
         r.xadd(stream, {"r": json.dumps(rec.to_dict())})
     r.xreadgroup("prefixwise", "dead-consumer", {stream: ">"}, count=10)  # taken, then the process died
+    _dead(monkeypatch)
     c, lc = consumer(redis_url, prefix, [partition_of("s", 4)])  # replay on
     try:
         wait_for(lambda: len(rows(c.ledger)) == 3)
@@ -278,3 +288,51 @@ def test_seeding_keeps_the_newest_ids():
         assert list(c._seen) == ["r2", "r3"]
     finally:
         mod.SEEN_REQUESTS = old
+
+
+def test_a_live_predecessors_batch_is_not_taken_during_a_rolling_restart(redis_url, prefix):
+    # Review: XACK is per group, so taking a live consumer's in-flight batch writes its rows twice.
+    import json
+
+    from prefixwise.records import TurnRecord
+
+    r = redis.Redis.from_url(redis_url)
+    stream = f"{prefix}:{partition_of('s', 4)}"
+    r.xgroup_create(stream, "prefixwise", id="0", mkstream=True)
+    for i in range(2):
+        rec = TurnRecord(provider="openai", api="chat", model="gpt-5.6", session_id="s", agent_id="a",
+                         request_id=f"r-{i}", usage={"prompt_tokens": 2000, "completion_tokens": 1,
+                                                      "prompt_tokens_details": {"cached_tokens": 0}})
+        r.xadd(stream, {"r": json.dumps(rec.to_dict())})
+    r.xreadgroup("prefixwise", "old-pod", {stream: ">"}, count=10)  # the old collector, mid-batch, still alive
+    c, lc = consumer(redis_url, prefix, [partition_of("s", 4)], replay=False, consumer="new-pod")
+    try:
+        time.sleep(0.5)
+        assert lc.snapshot()["conflicts"] and lc.snapshot()["claimed"] == 0 and len(rows(c.ledger)) == 0
+        assert r.xpending(stream, "prefixwise")["pending"] == 2  # still the old pod's to acknowledge
+    finally:
+        lc.stop(1)
+
+
+def test_startup_takeover_takes_everything_a_dead_predecessor_left(redis_url, prefix, monkeypatch):
+    import json
+
+    from prefixwise.records import TurnRecord
+
+    r = redis.Redis.from_url(redis_url)
+    stream = f"{prefix}:{partition_of('s', 4)}"
+    r.xgroup_create(stream, "prefixwise", id="0", mkstream=True)
+    n = 45
+    for i in range(n):
+        rec = TurnRecord(provider="openai", api="chat", model="gpt-5.6", session_id=f"s{i % 3}", agent_id="a",
+                         request_id=f"r-{i}", usage={"prompt_tokens": 2000, "completion_tokens": 1,
+                                                      "prompt_tokens_details": {"cached_tokens": 0}})
+        r.xadd(stream, {"r": json.dumps(rec.to_dict())})
+    r.xreadgroup("prefixwise", "dead", {stream: ">"}, count=n)  # all pending, consumer gone
+    _dead(monkeypatch)
+    c, lc = consumer(redis_url, prefix, [partition_of("s", 4)], replay=False, batch=20)  # smaller than the backlog
+    try:
+        wait_for(lambda: len(rows(c.ledger)) == n)  # not just the first batch, and not after a minute
+        assert lc.snapshot()["claimed"] == n and r.xpending(stream, "prefixwise")["pending"] == 0
+    finally:
+        lc.stop(1)

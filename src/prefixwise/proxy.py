@@ -1422,7 +1422,9 @@ def _transport_gauges(proxy) -> dict[str, tuple[str, float]]:
         "prefixwise_log_records_acked_total": ("Records acknowledged after their row was written.", log["acked"]),
         "prefixwise_log_records_claimed_total": ("Records taken over from a consumer that died.", log["claimed"]),
         "prefixwise_log_records_replayed_total": ("Records replayed at start to rebuild state.", log["replayed"]),
-        "prefixwise_log_errors_total": ("Log read errors.", log["errors"])}
+        "prefixwise_log_errors_total": ("Log read errors.", log["errors"]),
+        "prefixwise_log_replaying": ("Partitions still rebuilding state at start (0 = ready).", log["replaying"]),
+        "prefixwise_log_conflicts": ("Partitions another collector was active on at start.", len(log["conflicts"]))}
     return {**extra, "prefixwise_ingest_records_total": ("Records classified.", s["records"]),
             "prefixwise_ingest_failures_total": ("Failure records (no verdict).", s["failures"]),
             "prefixwise_ingest_duplicates_total": ("Records seen twice (retried batches), skipped.", s["duplicates"]),

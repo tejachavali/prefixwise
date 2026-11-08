@@ -235,10 +235,10 @@ class Collector:
             avoidable_cost=None, task_id=rec.task_id, request_id=rec.request_id,
             status=rec.status, error=str(rec.error or f"http_{rec.status}")[:80], api=rec.api,
             stream=rec.stream, latency_ms=rec.latency_ms, overhead_ms=rec.overhead_ms)
-        self.metrics.observe(entry)  # counted even if the ledger write fails
         with self._lock:
-            self.ledger.record(entry)
+            self.ledger.record(entry)  # the row first, as for verdicts: a redelivery is then counted once
             self.stats["failures"] += 1
+        self.metrics.observe(entry)
         return entry
 
     def _stitch(self, previous_response_id: str, fps: list) -> tuple[list | None, RequestSnapshot | None]:
@@ -289,7 +289,7 @@ class Collector:
             prev = self.last_snapshot.get(session_id)
             gap_seconds = max(0.0, started - self.last_seen[session_id]) if session_id in self.last_seen else None
             concurrent = False
-        unknown_parent = False
+        unknown_parent = concurrent_verdict = False
         if stitched:
             stitched_fps, prior = self._stitch(str(rec.previous_response_id), fps)
             if stitched_fps is None:
@@ -324,6 +324,7 @@ class Collector:
         elif concurrent and not stitched and curr.cached_tokens < prompt_tokens * 0.5:
             # It could not have read what the compared turn wrote (that was still being written), and
             # the record of an earlier turn may be the one that arrived late: no cause is claimed.
+            concurrent_verdict = True
             result = Classification(MissCause.UNKNOWN, None,
                                     f"sent {prev_done - started:.1f} s before the previous turn of this conversation "
                                     "had finished: a parallel request, or its record arrived late; it could not have "
@@ -395,7 +396,7 @@ class Collector:
             self.ledger.record(entry)
             self.metrics.observe(entry)
             self.stats["records"] += 1
-            if concurrent and result.cause is MissCause.UNKNOWN and not unknown_parent:
+            if concurrent_verdict:
                 self.stats["concurrent"] += 1
             if result.score:  # a verdict overriding the compared pair is not an (dis)agreement
                 self.scorer.record(result.cause, native_reason, provider)

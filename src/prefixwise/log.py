@@ -152,6 +152,7 @@ class LogConsumer:
         self.stats = {"consumed": 0, "acked": 0, "claimed": 0, "replayed": 0, "replaying": 0, "errors": 0,
                       "last_error": None, "conflicts": [], "partitions": list(self.partitions),
                       "consumer": self.consumer}
+        self._live_elsewhere: set[str] = set()  # streams another consumer was active on at start
 
     @property
     def name(self) -> str:
@@ -164,11 +165,17 @@ class LogConsumer:
         partition (state only) and then consumes it. Returns at once; /health shows `replaying`."""
         import redis
 
-        version = str(self._redis.info("server").get("redis_version", "0"))
-        parts = tuple(int(x) for x in version.split(".")[:2] if x.isdigit()) or (0,)
-        if parts < MIN_REDIS:
-            raise ValueError(f"the record log needs Redis {MIN_REDIS[0]}.{MIN_REDIS[1]} or later (XAUTOCLAIM over trimmed "
-                             f"entries); this server is {version}")
+        if os.environ.get("PREFIXWISE_LOG_SKIP_VERSION_CHECK", "").lower() not in ("1", "true", "yes"):
+            try:
+                version = str(self._redis.info("server").get("redis_version", "0"))
+            except redis.exceptions.ResponseError:  # INFO denied by an ACL: trust the operator
+                version = "0"
+            parts = tuple(int(x) for x in version.split(".")[:2] if x.isdigit())
+            parts = (parts + (0, 0))[:2]
+            if parts != (0, 0) and parts < MIN_REDIS:
+                raise ValueError(f"the record log needs Redis {MIN_REDIS[0]}.{MIN_REDIS[1]} or later (XAUTOCLAIM over "
+                                 f"trimmed entries); this server is {version}. A compatible server that reports an "
+                                 "older version: PREFIXWISE_LOG_SKIP_VERSION_CHECK=1")
         if self.replay:
             seed = getattr(self.collector.ledger, "recent_request_ids", None)
             if seed is not None:
@@ -209,6 +216,7 @@ class LogConsumer:
             name = name.decode() if isinstance(name, bytes) else str(name)
             with self._lock:
                 self.stats["conflicts"].append(f"{stream}: {name}")
+                self._live_elsewhere.add(stream)
             print(f"prefixwise: another collector ({name}) read {stream} in the last minute: a partition must "
                   "have one collector, or a session's turns are split between two", file=sys.stderr, flush=True)
 
@@ -275,15 +283,18 @@ class LogConsumer:
                 with self._lock:
                     self.stats["replaying"] -= 1
         pending_first = True
-        starting = True  # the predecessor's unacknowledged records are ours now, idle or not
+        # A dead predecessor's unacknowledged records are ours now, idle or not. A predecessor still
+        # alive (a rolling restart: _check_alone saw it) keeps its batch: it will acknowledge it, and
+        # taking it would write those rows twice. Its leftovers are claimed after the usual minute.
+        takeover = stream not in self._live_elsewhere
         while not self._stop.is_set():
             try:
                 if pending_first:  # what this consumer took before a crash, then what others left behind
                     entries = self._read(stream, "0")
                     if not entries:
-                        pending_first = False
-                        entries = self._claim(stream, min_idle_ms=0 if starting else CLAIM_IDLE_MS)
-                        starting = False
+                        entries = self._claim(stream, min_idle_ms=0 if takeover else CLAIM_IDLE_MS)
+                        if len(entries) < self.batch:  # the takeover is complete (a full batch may hide more)
+                            pending_first, takeover = False, False
                 else:
                     entries = self._read(stream, ">")
                     if not entries:

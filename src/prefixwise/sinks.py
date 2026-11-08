@@ -36,10 +36,11 @@ from .transport import Reject, Retry, Sender
 _TABLE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)?$")
 _RETRY_STATUSES = (408, 429, 500, 502, 503, 504)
 # ClickHouse answers most query errors with HTTP 500 and names the error in X-ClickHouse-Exception-Code.
-# These codes pass (the server is busy, not the rows wrong); any other code is permanent (a schema
-# mismatch) and the batch is dropped and counted rather than retried six times.
-_CLICKHOUSE_TRANSIENT = {"202", "209", "210", "241", "252", "439"}  # too many queries, socket, network, memory,
-#                                                                     too many parts, cannot schedule
+# These codes mean the rows or the table are wrong (a schema mismatch, a parse error, no such table):
+# the batch is dropped and counted rather than retried six times. Anything else (a busy or
+# read-only replica, Keeper, memory, timeouts) is retried as a 5xx normally is.
+_CLICKHOUSE_PERMANENT = {"16", "27", "47", "53", "60", "62", "81", "117", "497", "516",  # no such column/type
+                         "6", "26", "38", "41", "72", "130", "131"}  # cannot parse (text, quoted, date, number, ...)
 
 
 def row_dict(entry, at: float | None = None) -> dict:
@@ -102,7 +103,7 @@ class ClickHouseBackend:
         except urllib.error.HTTPError as exc:
             detail = exc.read()[:200].decode("utf-8", "replace")
             code = exc.headers.get("X-ClickHouse-Exception-Code")
-            if code is not None and code not in _CLICKHOUSE_TRANSIENT:
+            if code is not None and code in _CLICKHOUSE_PERMANENT:
                 raise Reject(f"ClickHouse error {code} (HTTP {exc.code}): {detail}") from None
             if exc.code in _RETRY_STATUSES:
                 raise Retry(f"HTTP {exc.code}: {detail}") from None
