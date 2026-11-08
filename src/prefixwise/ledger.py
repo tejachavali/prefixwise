@@ -144,6 +144,9 @@ class Ledger:
             if path != ":memory:":
                 # WAL lets `prefixwise report` read while the proxy writes.
                 self.conn.execute("PRAGMA journal_mode=WAL")
+                # WAL with NORMAL: a commit no longer waits for the disk; a power loss can lose
+                # the last few rows, never corrupt the ledger (SQLite's documented guarantee).
+                self.conn.execute("PRAGMA synchronous=NORMAL")
             self.conn.execute(
                 """CREATE TABLE IF NOT EXISTS entries (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,

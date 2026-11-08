@@ -50,9 +50,11 @@ def turn(p, b, session="s"):
 
 def idle(p, seconds, session="s", model=MODEL):
     """Pretend the previous response came `seconds` earlier."""
-    p.lane_seen[(session, model)] -= seconds
+    history = p.lane_history[(session, model)]
+    snap, done, facts = history[-1]
+    history[-1] = (snap, done - seconds, facts)
+    facts.done_at -= seconds
     p.last_seen[session] -= seconds
-    p.lane_facts[(session, model)].done_at -= seconds
 
 
 USER = {"role": "user", "content": "start"}

@@ -44,11 +44,13 @@ against current LMCache (its import path breaks; pin unverified).
 
 from __future__ import annotations
 
+import collections
 import hashlib
 import hmac
 import json
 import os
 import re
+import socket
 import sys
 import threading
 from collections import OrderedDict
@@ -251,6 +253,9 @@ def relay_headers(headers) -> dict[str, str]:
 # so a long-running proxy does not grow without bound. A dropped session's
 # next turn classifies as FIRST_WRITE (honest: no prior turn is known).
 MAX_SESSIONS = int(os.environ.get("PREFIXWISE_MAX_SESSIONS", "10000"))
+# Recent turns kept per (session, model) lane, to find each request's parent by longest common
+# prefix when a session interleaves conversations (parallel subagents on one model).
+LANE_HISTORY = max(1, int(os.environ.get("PREFIXWISE_LANE_HISTORY", "4")))
 
 
 class _SessionMap(OrderedDict):
@@ -430,6 +435,41 @@ class StreamAccumulator:
             self.saw_usage = True
 
 
+def _best_parent(history, blocks, compaction: bool = False) -> tuple[int, bool]:
+    """(how many turns back the compared turn is, whether this request starts a new thread).
+
+    A thread is known by its first conversation block (the conversation's opening message).
+    The latest turn of the same thread is the parent: normally the latest turn of the lane, as
+    always; when another conversation interleaved (parallel subagents on one model and session),
+    this thread's own newest recent turn. If no recent turn is of this thread and the system
+    prompt differs from the latest turn's (a subagent of another type), it is a new thread. With
+    the same system prompt it is compared with the latest turn as before: a rewritten first
+    message (an edit, a compaction) must not pass for a new conversation."""
+    opening = _opening(blocks)
+    if opening is None:
+        return 0, False
+    latest = history[-1][0]
+    first = _opening(latest.blocks)
+    if first is None or first == opening:
+        return 0, False
+    for depth in range(1, len(history)):
+        if _opening(history[-1 - depth][0].blocks) == opening:
+            return depth, False
+    system = [b.raw for b in blocks if b.role in ("system", "system_dynamic")]
+    theirs = [b.raw for b in latest.blocks if b.role in ("system", "system_dynamic")]
+    return 0, (not compaction and bool(system) and system != theirs)
+
+
+def _opening(blocks):
+    for b in blocks:
+        if b.role in _CONVERSATION:
+            return b.raw
+    return None
+
+
+_CONVERSATION = ("messages", "tool_results", "user")
+
+
 def _sources_of(events) -> list:
     """The per-cache event readers: a fleet's sources, or the one reader."""
     return list(getattr(events, "sources", None) or [events])
@@ -532,7 +572,6 @@ class PrefixwiseProxy:
         self._rejections: dict[tuple[str, str], int] = {}  # a field is dropped for good on its second rejection
         # Sub-reasons (prefixwise.details): request facts per lane and session, requests in
         # flight by tools+system prefix, and when another session last finished one.
-        self.lane_facts: dict[tuple, Facts] = _SessionMap(MAX_SESSIONS)
         self.session_facts: dict[str, Facts] = _SessionMap(MAX_SESSIONS)
         self.prefix_inflight: dict[str, dict[str, float]] = _SessionMap(MAX_SESSIONS)
         self.prefix_done: dict[str, tuple[float, str]] = _SessionMap(MAX_SESSIONS)
@@ -558,8 +597,8 @@ class PrefixwiseProxy:
         # so a side call never masks a cause on the main thread (dogfood,
         # 2026-11-06). The session-level maps above still say "has this
         # session been seen", which decides FIRST_WRITE vs MODEL_SWITCH.
-        self.lane_snapshot: dict[tuple, RequestSnapshot] = _SessionMap(MAX_SESSIONS)
-        self.lane_seen: dict[tuple, float] = _SessionMap(MAX_SESSIONS)
+        # (session, model) -> recent turns, newest last: (snapshot, response end time, facts).
+        self.lane_history: dict[tuple, collections.deque] = _SessionMap(MAX_SESSIONS)
         self.lane_response_id: dict[tuple, str] = _SessionMap(MAX_SESSIONS)
 
     def _start_events(self, sources: list[tuple[str, str]], full_attention: bool = False,
@@ -874,18 +913,26 @@ class PrefixwiseProxy:
                          native_reason, response_id, fps) -> tuple[dict, LedgerEntry]:
         provider, body, session_id = ctx["provider"], ctx["body"], ctx["session_id"]
         now = time.time()
+        # The gap a cache entry had to survive: from the previous response to this request's send
+        # (not to its response: this request's own generation time is not idle time).
+        started = ctx.get("span_start") or ctx.get("sent_at") or now
         lane = (session_id, ctx["model"])
-        if lane in self.lane_snapshot:
-            # Compare with this model's previous turn, and time the gap from it.
-            prev = self.lane_snapshot.get(lane)
-            gap_seconds = now - self.lane_seen[lane] if lane in self.lane_seen else None
+        history = self.lane_history.get(lane)
+        new_thread, depth, parent_facts = False, 0, None
+        if history:
+            # Compare with the turn this request continues: the recent turn on this model sharing
+            # the longest prefix (interleaved subagents each continue their own), newest on ties.
+            if not (ctx.get("api") == "responses" and body.get("previous_response_id")):
+                # (A Responses turn names its parent by previous_response_id: stitched below.)
+                depth, new_thread = _best_parent(history, fps, compaction=bool(ctx["compaction_event"]))
+            prev, prev_done, parent_facts = history[-1 - depth]
+            gap_seconds = max(0.0, started - prev_done)
         else:
             # First turn on this model: FIRST_WRITE for a new session, else
             # MODEL_SWITCH (the classifier compares models first).
             prev = self.last_snapshot.get(session_id)
-            gap_seconds = (now - self.last_seen[session_id]) if session_id in self.last_seen else None
+            gap_seconds = max(0.0, started - self.last_seen[session_id]) if session_id in self.last_seen else None
         self.last_seen[session_id] = now
-        self.lane_seen[lane] = now
         unknown_parent = False
         if ctx.get("api") == "responses" and body.get("previous_response_id"):
             stitched, prior = self._stitch(ctx, fps)
@@ -908,6 +955,7 @@ class PrefixwiseProxy:
                                session_id=session_id)
         curr.engine = self.engine is not None
         curr.engine_caches = self.engine_caches
+        curr.new_thread, curr.parent_depth = new_thread, depth
         if ctx.get("engine_verdict") is not None:
             verdict = ctx["engine_verdict"]
             curr.evicted_blocks, curr.resident_blocks = verdict[0], verdict[1]
@@ -919,12 +967,16 @@ class PrefixwiseProxy:
                                     native_reason=native_reason)
         else:
             result = classify(prev, curr, native_reason=native_reason)
+            if depth and not new_thread:
+                result.evidence = (f"{result.evidence}; compared with the turn it continues, {depth} "
+                                   f"turn{'s' if depth > 1 else ''} back (another conversation in this "
+                                   "session came between)")
         # The why behind the cause, where the evidence allows (prefixwise.details).
         parts = breakdown(provider, usage)
         facts = usage_facts(ctx.get("facts") or Facts(provider=provider), usage,
                             parts.cache_write_5m + parts.cache_write_1h + parts.cache_write)
         facts.done_at = now
-        prev_facts = self.lane_facts.get(lane) if lane in self.lane_facts else self.session_facts.get(session_id)
+        prev_facts = parent_facts if history else self.session_facts.get(session_id)
         if prev is None or (ctx.get("api") == "responses" and body.get("previous_response_id")):
             prev_facts = None  # a stitched branch: the lane's latest request may be another branch
         new_cause, detail, why = detail_for(result.cause.value, prev_facts, facts,
@@ -937,11 +989,12 @@ class PrefixwiseProxy:
         elif why:
             result.evidence = f"{result.evidence}; {why}"
         self._release_prefix(ctx, done_session=session_id)
-        self.lane_facts[lane] = facts
         self.session_facts[session_id] = facts
         self.scorer.record(result.cause, native_reason, provider)
         self.last_snapshot[session_id] = curr
-        self.lane_snapshot[lane] = curr
+        if history is None:
+            history = self.lane_history[lane] = collections.deque(maxlen=LANE_HISTORY)
+        history.append((curr, now, facts))
         if response_id:
             self.last_response_id[session_id] = response_id
             self.lane_response_id[lane] = response_id
@@ -1677,6 +1730,13 @@ def make_handler(proxy: PrefixwiseProxy):
             # none: it is recorded as a failure. A stream that completed is a
             # response like any other, usage or not (no usage: verdict unknown).
             if failure is None:
+                # HTTP/1.0: the stream ends when the connection does. End it for the client now,
+                # so classifying, the ledger write and any KV-event wait never delay it.
+                try:
+                    self.wfile.flush()
+                    self.connection.shutdown(socket.SHUT_WR)
+                except OSError:
+                    pass
                 proxy.finalize_safely(ctx, status, acc.payload)
             else:
                 if proxy.engine_events is not None:

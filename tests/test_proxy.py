@@ -415,6 +415,14 @@ def test_responses_forwarding_chaining_and_usage():
         up.server.shutdown()
 
 
+def age(proxy, session, model, when):
+    """Pretend the session's previous response on `model` ended at `when`."""
+    proxy.last_seen[session] = when
+    history = proxy.lane_history[(session, model)]
+    snap, _, facts = history[-1]
+    history[-1] = (snap, when, facts)
+
+
 def test_responses_previous_response_id_is_stitched_not_history_edit():
     up = ScriptedUpstream([responses_payload("resp_a", 2000, 0),
                            responses_payload("resp_b", 2050, 1950),
@@ -495,12 +503,12 @@ def test_anthropic_ttl_expired_and_one_hour_ttl():
                     "messages": [{"role": "user", "content": "hi"}]}
         post(port, "/v1/messages", body())
         idle = _time.time() - 600  # 10 minutes idle > 5 min default
-        proxy.last_seen["ttl"] = proxy.lane_seen[("ttl", "claude-sonnet-5-5")] = idle
+        age(proxy, "ttl", "claude-sonnet-5-5", idle)
         _, _, h = post(port, "/v1/messages", body())
         assert h["X-Prefixwise-Cause"] == "ttl_expired"
         # Same 10-minute gap in a session that asked for a 1 h cache: not expiry.
         post(port, "/v1/messages", body("1h", "ttl1h"))
-        proxy.last_seen["ttl1h"] = proxy.lane_seen[("ttl1h", "claude-sonnet-5-5")] = _time.time() - 600
+        age(proxy, "ttl1h", "claude-sonnet-5-5", _time.time() - 600)
         _, _, h = post(port, "/v1/messages", body("1h", "ttl1h"))
         assert h["X-Prefixwise-Cause"] == "routing_miss"
     finally:
