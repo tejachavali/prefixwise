@@ -87,24 +87,24 @@ def test_openai_write_rate_is_used():
     assert T.avoidable_cost("gpt-5.6-terra", 10_000, 10_000, "openai", u) == pytest.approx(10_000 * 2.3 / 1e6)
 
 
-# 3. 5-minute vs 1-hour cache
+# 3. 5-minute vs 1-hour cache (claude-sonnet-5-5: 5m write 2.5, 1h write 4.0, read 0.1 per 1M)
 
-def row(cause, gap, writes, model="claude-sonnet-5-5", detail=None, provider="anthropic"):
+def row(cause, gap, writes, model="claude-sonnet-5-5", provider="anthropic", ttl=300.0, detail=None):
     return LedgerEntry(session_id="s", agent_id="a", provider=provider, model=model, cause=cause,
                        prompt_tokens=writes, cached_tokens=0, avoidable_tokens=0, avoidable_cost=None,
-                       cache_write_tokens=writes, gap_seconds=gap, detail=detail)
+                       cache_write_tokens=writes, gap_seconds=gap, cache_ttl_seconds=ttl, detail=detail)
 
 
-def test_one_hour_cache_pays_when_misses_within_the_hour_dominate():
+def test_rewrites_are_not_also_charged_as_one_hour_writes():
+    # Review finding: 5 minutes costs 2 x 100k x 2.5 = $0.50; 1 hour costs 100k x 4.0 + 100k x 0.1 = $0.41.
     led = Ledger()
-    led.record(row("first_write", None, 20_000))
-    for _ in range(5):
-        led.record(row("ttl_expired", 900, 20_000))  # 15 minutes: the 1-hour cache keeps it
+    led.record(row("first_write", None, 100_000))
+    led.record(row("ttl_expired", 900, 100_000))
     [a] = ttl_advice(led, prices=T)
-    assert a["misses"] == 5 and a["pays"]
-    assert a["saved_at_most_usd"] == pytest.approx(100_000 * (2.5 - 0.1) / 1e6)
-    assert a["extra_write_cost_usd"] == pytest.approx(120_000 * (4.0 - 2.5) / 1e6)
-    assert "worth trying" in render(findings(led))
+    assert a["saved_at_most_usd"] == pytest.approx(100_000 * 2.4 / 1e6)
+    assert a["extra_write_cost_usd"] == pytest.approx(100_000 * 1.5 / 1e6)  # the first write only
+    assert a["pays"] and a["saved_at_most_usd"] - a["extra_write_cost_usd"] == pytest.approx(0.50 - 0.41)
+    assert "worth trying" in render(findings(led, prices=T))
 
 
 def test_one_hour_cache_does_not_pay_when_writes_dominate():
@@ -113,13 +113,33 @@ def test_one_hour_cache_does_not_pay_when_writes_dominate():
         led.record(row("none", 10, 20_000))  # writes everywhere, read soon after
     led.record(row("ttl_expired", 900, 1_000))
     [a] = ttl_advice(led, prices=T)
-    assert not a["pays"] and "keep the 5-minute cache" in render(findings(led))
+    assert not a["pays"] and "keep the 5-minute cache" in render(findings(led, prices=T))
 
 
-def test_gaps_outside_the_hour_and_already_one_hour_are_not_counted():
+def test_writes_already_on_one_hour_cost_nothing_more():
     led = Ledger()
-    led.record(row("ttl_expired", 200, 1_000))  # under 5 minutes: not a TTL question
-    led.record(row("ttl_expired", 7200, 1_000))  # beyond an hour: 1 hour would not keep it
-    led.record(row("ttl_expired", 900, 1_000, detail="ttl_shortened"))  # already asked for 1 hour
+    led.record(row("first_write", None, 100_000, ttl=3600.0))
+    led.record(row("ttl_expired", 900, 10_000))
+    [a] = ttl_advice(led, prices=T)
+    assert a["extra_write_cost_usd"] == 0 and a["pays"]
+
+
+def test_only_misses_judged_against_five_minutes_within_the_hour_count():
+    led = Ledger()
+    led.record(row("ttl_expired", 3550, 1_000, ttl=3600.0))  # already on 1 hour, and it expired
+    led.record(row("ttl_expired", 7200, 1_000))  # beyond the hour: 1 hour would not keep it
+    led.record(row("ttl_expired", 900, 1_000, ttl=None))  # TTL unknown (older ledger)
+    led.record(row("ttl_expired", 900, 1_000, detail="ttl_shortened"))  # asked for 1 hour already
     led.record(row("ttl_expired", 900, 1_000, model="gpt-5.6-terra", provider="openai"))
     assert ttl_advice(led, prices=T) == []
+
+
+def test_a_rates_file_is_used():
+    led = Ledger()
+    led.record(row("ttl_expired", 900, 1_000, model="claude-custom"))
+    assert ttl_advice(led, prices=T) == []  # not in the built-in table: left out, never guessed
+    custom = PriceTable.load()
+    custom.models["claude-custom"] = {"provider": "anthropic", "input": 1.0, "output": 5.0, "cache_read": 0.1,
+                                      "cache_write_5m": 1.25, "cache_write_1h": 2.0}
+    [a] = ttl_advice(led, prices=custom)
+    assert a["saved_at_most_usd"] == pytest.approx(1_000 * 1.15 / 1e6)

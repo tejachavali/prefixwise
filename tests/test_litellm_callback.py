@@ -250,3 +250,43 @@ def test_a_cache_hit_is_never_recorded():
     c._record(_kwargs(cache_hit=True), _response({"prompt_tokens": 10, "completion_tokens": 1}), None, None)
     c._record(_kwargs(cache_hit=None), _response({"prompt_tokens": 10, "completion_tokens": 1}), None, None)
     assert len(spy.calls) == 1
+
+
+# LiteLLM runs sync success callbacks on a thread pool: a session's turns can arrive out of order
+# (seen in CI on Python 3.10: turn 1, compared with turn 2, read as rewritten history).
+
+def _kw(call, messages):
+    return {"litellm_call_id": call, "call_type": "completion", "model": "gpt-5.6", "messages": messages,
+            "litellm_params": {"litellm_session_id": "race", "custom_llm_provider": "openai"}}
+
+
+def _resp(prompt, cached):
+    return {"id": "r", "model": "gpt-5.6", "usage": {"prompt_tokens": prompt, "completion_tokens": 1,
+                                                    "prompt_tokens_details": {"cached_tokens": cached}}}
+
+
+def test_turns_are_recorded_in_send_order_when_callbacks_race():
+    c = PrefixwiseCallback(recorder=Recorder(":memory:"))
+    first = [{"role": "system", "content": SYSTEM}, {"role": "user", "content": "hi"}]
+    second = first + [{"role": "assistant", "content": "ok"}, {"role": "user", "content": "go"}]
+    c.log_pre_api_call("gpt-5.6", first, _kw("c1", first))
+    c.log_pre_api_call("gpt-5.6", second, _kw("c2", second))
+    late = threading.Thread(target=c.log_success_event, args=(_kw("c2", second), _resp(2000, 1800), None, None))
+    late.start()  # turn 2's callback first: it must wait for turn 1's
+    time.sleep(0.2)
+    assert rows(c, 0) == []
+    c.log_success_event(_kw("c1", first), _resp(1800, 0), None, None)
+    late.join(5)
+    assert [r[4] for r in rows(c, 2)] == ["first_write", "none"]
+
+
+def test_a_failed_or_lost_call_does_not_hold_the_session():
+    c = PrefixwiseCallback(recorder=Recorder(":memory:"))
+    msgs = [{"role": "system", "content": SYSTEM}, {"role": "user", "content": "hi"}]
+    c.log_pre_api_call("gpt-5.6", msgs, _kw("failed", msgs))
+    c.log_pre_api_call("gpt-5.6", msgs, _kw("ok", msgs))
+    c.log_failure_event(_kw("failed", msgs), None, None, None)
+    t0 = time.monotonic()
+    c.log_success_event(_kw("ok", msgs), _resp(1800, 0), None, None)
+    assert time.monotonic() - t0 < 1 and [r[4] for r in rows(c, 1)] == ["first_write"]
+    assert c._sent == {}  # nothing left behind

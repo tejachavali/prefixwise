@@ -98,6 +98,9 @@ def test_causes_from_the_log(tmp_path):
                                     "model_switch", "none", "ttl_expired", "unknown"]
     assert "deferred tools loaded" in main[2][5] and "appends after the cached prefix" in main[2][5]
     assert main[6][2] == "ttl_shortened"  # asked for 1h, the write was kept 5m, 15 minutes passed
+    with led.reader() as c:
+        ttls = [t for (t,) in c.execute("SELECT cache_ttl_seconds FROM entries WHERE cause = 'ttl_expired'")]
+    assert ttls == [300.0]  # the lifetime it was judged against: what the 5m/1h advice reads
     assert "a change Claude Code does not log" in main[7][5]
     assert all(r[5].startswith("from the log: ") for r in main)
     assert main[0][6] == "msg_a1" and len({r[6] for r in main}) == 8  # split responses counted once

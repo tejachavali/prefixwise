@@ -338,7 +338,7 @@ def cmd_run(args) -> int:
     else:
         server.shutdown()
     server.server_close()
-    found = findings(proxy.ledger, since=start)
+    found = findings(proxy.ledger, since=start, prices=proxy.prices)
     print("\n-- prefixwise: this run --", file=sys.stderr)
     if not (found["summary"]["requests"] or found["summary"]["requests_failed"]):
         print(f"No requests reached Prefixwise. Does {cmd[0]} read ANTHROPIC_BASE_URL or OPENAI_BASE_URL? "

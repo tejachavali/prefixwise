@@ -21,7 +21,7 @@ The rule throughout: a guess is worse than no answer.
 | 2.4 | `SessionStateStore` (Redis), `LedgerSink` (ClickHouse...) | Design below: session affinity first; a store interface only with a measured need. |
 | 2.5 | KV-event watermark | **Already built.** See below. |
 | 3 | Flowchart items | **Already done** in 0.7.0 (#52): the import route, the arrowhead, the gap, the label mask, hero fills, slate decisions, blue verdicts, emerald hit, `unknown` in the verdict column. `tests/test_figures.py` checks the drawings against the classifier's rule order, so the 1.2 change needed no change to the drawing: its first decision already reads "too short to cache?". |
-| 4 | `check` and `--optimize` specs | **Exist:** [check-and-optimize.md](check-and-optimize.md). Its cost projection now uses the rate paid. |
+| 4 | `check` and `--optimize` specs | **Exist** (not built): [check-and-optimize.md](check-and-optimize.md). The spec's cost projection now specifies the rate paid. |
 
 ## 2.2 Why there is no `unamortized_write_waste`
 
@@ -29,17 +29,25 @@ Avoidable cost is a difference between two worlds: this request missed, against 
 hit. Turn N's cache write is paid in both worlds, so adding its surcharge to turn N+1's miss
 counts money that a fix would not save. What a fix saves is turn N+1's own rewrite: those
 tokens billed at the write rate instead of the read rate. That is now the price
-(`PriceTable.avoidable_cost` with the request's usage). For Claude 5.x at 5 minutes, the old
-input-rate price understated waste by about 26%. At 1 hour it was about half the real figure.
+(`PriceTable.avoidable_cost` with the request's usage). With the built-in Claude rates, the
+true figure is about 26-28% above the old input-rate price for 5-minute writes, and about twice
+it for 1-hour writes. Rows recorded before this change keep their old price.
 
-The 5m vs 1h choice is a separate question, answered per model from the ledger by `ttl_advice`:
+The 5m vs 1h choice is a separate question, answered per model from the ledger by `ttl_advice`.
+It needs the TTL each turn was judged against (ledger column `cache_ttl_seconds`, schema 5), so
+rows from older ledgers are left out.
 
-- **What it could save, at most:** what the `ttl_expired` misses with gaps between 5 and 60 minutes wrote again (minus `ttl_shortened`), at the 5-minute write rate minus the read rate.
-- **What it costs:** every write on that model, at the 1-hour rate minus the 5-minute rate.
+- **Kept by 1 hour:** `ttl_expired` misses judged against a 5-minute cache, with a gap within
+  the hour (not `ttl_shortened`: those asked for 1 hour already).
+- **Saved, at most:** what those misses wrote again, read instead: 5-minute write rate minus
+  read rate.
+- **Extra:** every other write on that model on the 5-minute cache, at the 1-hour rate minus the
+  5-minute rate. Writes already on 1 hour cost nothing more.
 
-Saving is an upper bound, because part of each rewrite is new tail that would be written anyway.
-When even that bound is below the extra cost, the report says to keep 5 minutes. Otherwise it
-calls 1 hour worth trying, and gives both numbers.
+Rates are taken at the long-prompt tier where a row's prompt is in it. Part of each rewrite is
+new tail that would be written anyway, so saved minus extra is an upper bound on what 1 hour
+gains. When it is not positive, 1 hour cannot pay and the report says to keep 5 minutes.
+Otherwise it says 1 hour is worth trying and measuring, with both numbers.
 
 ## 2.4 Several gateway pods
 

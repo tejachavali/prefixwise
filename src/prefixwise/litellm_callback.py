@@ -25,7 +25,10 @@ OpenAI-compatible. Like the proxy, only hashes of the prompt are stored, never i
 
 from __future__ import annotations
 
+import asyncio
 import sys
+import threading
+import time
 
 from .otel import provider_name
 from .sdk import Recorder
@@ -35,6 +38,11 @@ try:  # subclass LiteLLM's base when it is installed; plain object otherwise (te
 except Exception:  # noqa: BLE001 - litellm absent or broken: the callback is still importable
     _Base = object
 
+# LiteLLM runs sync success callbacks on a pool of threads, so one session's calls can reach the
+# callback out of order, and a turn compared with the turn after it reads as rewritten history.
+# Calls are recorded in the order they were sent (the pre-call hook runs on the caller's thread,
+# in send order); a call waits at most this long for the session's earlier calls.
+ORDER_WAIT_SECONDS = 5.0
 _REDACTED = "redacted-by-litellm"  # what LiteLLM logs in place of messages with logging turned off
 
 
@@ -50,6 +58,12 @@ def _int(v) -> int:
         return int(v or 0)
     except (TypeError, ValueError):
         return 0
+
+
+def _session_of(kwargs) -> str | None:
+    params = kwargs.get("litellm_params") or {}
+    meta = params.get("metadata") or {}
+    return params.get("litellm_session_id") or meta.get("session_id") or kwargs.get("user")
 
 
 def _is_anthropic_body(body) -> bool:
@@ -92,13 +106,63 @@ class PrefixwiseCallback(_Base):
         self.recorder = recorder or Recorder(ledger_path, agent_id=agent_id)
         self._warned = False
         self._warned_redacted = False
+        self._sent: dict = {}  # session -> {call id: send time}, in send order
+        self._order = threading.Condition()
 
     # LiteLLM calls these with keyword arguments: the parameter names must be exactly these.
+    def log_pre_api_call(self, model, messages, kwargs):
+        session, call = _session_of(kwargs), kwargs.get("litellm_call_id")
+        if session and call:
+            with self._order:
+                self._sent.setdefault(session, {})[call] = time.monotonic()
+
     def log_success_event(self, kwargs, response_obj, start_time, end_time):
-        self._record(kwargs, response_obj, start_time, end_time)
+        with self._order:
+            self._order.wait_for(lambda: self._first(kwargs), timeout=ORDER_WAIT_SECONDS)
+        self._settled(kwargs, response_obj, start_time, end_time)
 
     async def async_log_success_event(self, kwargs, response_obj, start_time, end_time):
-        self._record(kwargs, response_obj, start_time, end_time)
+        # On the event loop: wait without blocking it (the earlier call may be logged by it).
+        deadline = time.monotonic() + ORDER_WAIT_SECONDS
+        while time.monotonic() < deadline:
+            with self._order:
+                if self._first(kwargs):
+                    break
+            await asyncio.sleep(0.005)
+        self._settled(kwargs, response_obj, start_time, end_time)
+
+    def log_failure_event(self, kwargs, response_obj, start_time, end_time):
+        self._done(kwargs)
+
+    async def async_log_failure_event(self, kwargs, response_obj, start_time, end_time):
+        self._done(kwargs)
+
+    def _first(self, kwargs) -> bool:
+        """No earlier call of this session is still waiting to be recorded. Caller holds _order."""
+        sent = self._sent.get(_session_of(kwargs))
+        call = kwargs.get("litellm_call_id")
+        if not sent or call not in sent:
+            return True
+        stale = time.monotonic() - 2 * ORDER_WAIT_SECONDS
+        for c in [c for c, t in sent.items() if t < stale and c != call]:
+            sent.pop(c)  # never completed (a callback LiteLLM dropped): stop waiting for it
+        return next(iter(sent)) == call
+
+    def _done(self, kwargs) -> None:
+        session, call = _session_of(kwargs), kwargs.get("litellm_call_id")
+        with self._order:
+            sent = self._sent.get(session)
+            if sent is not None:
+                sent.pop(call, None)
+                if not sent:
+                    self._sent.pop(session, None)
+            self._order.notify_all()
+
+    def _settled(self, kwargs, response_obj, start_time, end_time) -> None:
+        try:
+            self._record(kwargs, response_obj, start_time, end_time)
+        finally:
+            self._done(kwargs)
 
     def _record(self, kwargs, response_obj, start_time, end_time) -> None:
         try:
@@ -126,7 +190,7 @@ class PrefixwiseCallback(_Base):
                 latency = (end_time - start_time).total_seconds() * 1000
             except Exception:  # noqa: BLE001 - timing is optional
                 pass
-            session = params.get("litellm_session_id") or meta.get("session_id")
+            session = params.get("litellm_session_id") or meta.get("session_id")  # (_session_of adds user)
             common = dict(session_id=session or kwargs.get("user"), session_is_user=not session,
                           task_id=meta.get("task_id"), agent_id=meta.get("agent_id"), latency_ms=latency,
                           genai_provider=provider_name(provider) if provider else None)
