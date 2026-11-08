@@ -61,7 +61,7 @@ requests/s would need about 55 CPU-bound processes doing SHA-256 inline on a thr
 server; the stream-recording wait could stall a conversation under load; and there was no fleet
 ledger, so `prefixwise report` did not exist across pods.
 
-**The shape (built, unreleased: `prefixwise.records`, `prefixwise.collector`).** Two halves, one boundary.
+**The shape (built in 0.8: `prefixwise.records`, `prefixwise.collector`).** Two halves, one boundary.
 
 - **Edge (data plane).** Wherever the request already is: the proxy, `prefixwise.wrap`, the
   LiteLLM callback, later a gateway plugin. It fingerprints the request (three hashes per block,
