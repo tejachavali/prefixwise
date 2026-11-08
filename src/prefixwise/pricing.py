@@ -79,6 +79,33 @@ def breakdown(provider: str, usage: dict) -> Breakdown:
                      cache_write=write, output=out)
 
 
+def normalize_usage(provider: str, usage: dict) -> tuple[int, int]:
+    """Return (prompt_tokens, cached_tokens) from a provider usage object.
+
+    Anthropic reports input_tokens EXCLUDING cache reads and writes, so
+    the full prompt is input + cache_read + cache_creation.
+    OpenAI/vLLM report prompt_tokens with prompt_tokens_details.cached_tokens.
+    """
+    if provider == "anthropic":
+        read = int(usage.get("cache_read_input_tokens", 0) or 0)
+        write = int(usage.get("cache_creation_input_tokens", 0) or 0)
+        return int(usage.get("input_tokens", 0) or 0) + read + write, read
+    if "prompt_tokens" not in usage and "input_tokens" in usage:  # Responses API
+        details = usage.get("input_tokens_details") or {}
+        return int(usage.get("input_tokens", 0) or 0), int(details.get("cached_tokens", 0) or 0)
+    prompt = int(usage.get("prompt_tokens", 0) or 0)
+    details = usage.get("prompt_tokens_details") or {}
+    cached = int(details.get("cached_tokens", 0) or usage.get("cached_tokens", 0) or 0)
+    return prompt, cached
+
+
+def completion_tokens_of(provider: str, usage: dict) -> int:
+    if provider == "anthropic" or ("completion_tokens" not in usage and "output_tokens" in usage):
+        return int(usage.get("output_tokens", 0) or 0)
+    return int(usage.get("completion_tokens", 0) or 0)
+
+
+
 def _builtin() -> dict:
     return json.loads(resources.files("prefixwise").joinpath("prices.json").read_text())
 

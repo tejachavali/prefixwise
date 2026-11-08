@@ -18,7 +18,7 @@ The rule throughout: a guess is worse than no answer.
 | 2.1 | Dual hash and chunk sketch | Three hashes per block already (`fingerprint.py`): `raw`, `canonical`, `masked`. Equal masked hashes with different raw hashes prove `volatile_system` without text. Chunk sketches: design below, not built. |
 | 2.2 | Write surcharge, long-context tiers, 5m vs 1h | **Partly missing; fixed.** Request cost already had both write rates and `long_prompt` tiers (`pricing.py`). Avoidable cost used the input rate; it now uses the rate actually paid (the write rate on a rewrite). New: `ttl_advice` (`findings.py`). `unamortized_write_waste` is not added: see below. |
 | 2.3 | `include_usage`, Anthropic usage merge, cancelled streams | **Already built.** The proxy adds `stream_options.include_usage` and strips the extra usage chunk if the client did not ask for it. `StreamAccumulator` merges `message_start` and `message_delta`. A client hang-up records status 499 / `client_disconnected` with no verdict and leaves session history untouched. |
-| 2.4 | `SessionStateStore` (Redis), `LedgerSink` (ClickHouse...) | Design below: session affinity first; a store interface only with a measured need. |
+| 2.4 | `SessionStateStore` (Redis), `LedgerSink` (ClickHouse...) | **Redesigned and partly built** (section 2.4): an edge that emits turn records and a collector that owns state and the ledger; the transport between them is next. |
 | 2.5 | KV-event watermark | **Already built.** See below. |
 | 3 | Flowchart items | **Already done** in 0.7.0 (#52): the import route, the arrowhead, the gap, the label mask, hero fills, slate decisions, blue verdicts, emerald hit, `unknown` in the verdict column. `tests/test_figures.py` checks the drawings against the classifier's rule order, so the 1.2 change needed no change to the drawing: its first decision already reads "too short to cache?". |
 | 4 | `check` and `--optimize` specs | **Exist** (not built): [check-and-optimize.md](check-and-optimize.md). The spec's cost projection now specifies the rate paid. |
@@ -50,55 +50,74 @@ new tail that would be written anyway, so saved minus extra is an upper bound on
 gains. When it is not positive, 1 hour cannot pay and the report says to keep 5 minutes.
 Otherwise it says 1 hour is worth trying and measuring, with both numbers.
 
-## 2.4 Several gateway pods
+## 2.4 Fleet scale: an edge and a collector
 
-**Measured first.** One proxy process handles about 185 requests/s, and it is CPU-bound in
-fingerprinting (README, "Capacity"). So 10,000 requests/s takes about 55 processes, whatever
-the state store. The design question is where a session's turns are matched.
+**What was wrong with the first answer.** The 0.7.0 design put everything in one process on
+the request path: hashing, classification, conversation state and the ledger. "Hash the session
+header at the ingress" was offered for several pods. That fails in practice: most clients carry
+the session in the body (`session_id`, `metadata`, LiteLLM's id) which an ingress cannot hash
+on; every deploy wiped conversation state (a burst of false `first_write`s per pod); 10,000
+requests/s would need about 55 CPU-bound processes doing SHA-256 inline on a thread-per-request
+server; the stream-recording wait could stall a conversation under load; and there was no fleet
+ledger, so `prefixwise report` did not exist across pods.
 
-**Recommended: session affinity.** Route each session to one pod by hashing
-`X-Prefixwise-Session-Id` (consistent hashing at the ingress, e.g. Envoy/NGINX `hash_on`
-header; or Kubernetes with a header-hash load balancer). It needs no new code and no network hop
-per request. It also keeps the stream-recording wait (`begin_recording` / `_await_recording`)
-local. That wait is what stops a fast client's next turn being compared with the wrong one.
-When a pod is lost, its sessions' next turns are `first_write` once. That is a known, bounded,
-labelled error, not a wrong verdict, and it is what the README already advises.
+**The shape (built, unreleased: `prefixwise.records`, `prefixwise.collector`).** Two halves, one boundary.
 
-**A shared store, only if affinity is impossible.** The interface, so it can be added without
-touching the classifier:
+- **Edge (data plane).** Wherever the request already is: the proxy, `prefixwise.wrap`, the
+  LiteLLM callback, later a gateway plugin. It fingerprints the request (three hashes per block,
+  no text), reads the response's usage and timing, and emits one **turn record** per request
+  (`TurnRecord`, a few KB: hashes, positions, counts, digests of the prompt-affecting parameters,
+  the provider's usage, the engine join's verdict). It keeps only what a request needs on its way
+  out: requests in flight and entries written by prefix (for `sent_before_cache_written` and
+  `shared_prefix_not_reused`), streams ended but not yet recorded, fields an upstream rejected,
+  and the response id of each conversation's last turn (to chain the provider's diagnostics).
+  With several edges those are per edge: the two fan-out sub-reasons and the recording wait see
+  only the requests that passed through the same edge, which is stated here rather than solved.
+  Hashing is its whole CPU cost, and it is independent of the number of edges.
+- **Collector (control plane).** `Collector.ingest(record)`: compares the record with the previous
+  turn of its own conversation, names the cause, prices it, writes the ledger. It owns all
+  conversation state (lanes, Responses snapshots, per-session facts). One lock serializes
+  `ingest`, which is the ordering a conversation needs: turn N is recorded before N+1 is compared
+  with it. The edge asks it two things at request time (`chain_parent`: the previous turn's
+  response id for the provider's diagnostics; `stitched_opening`: which conversation a stitched
+  Responses turn continues); in one process those are a lock away. Measured here (`Collector.ingest` on the realistic three-turn record set, this VM): about 5,800
+  records/s into a file-backed SQLite ledger (WAL, `synchronous=NORMAL`), about 170 µs per record,
+  of which the ledger commit is most; one collector takes the records of some thirty 185-request/s
+  edges before it is the bottleneck, and the partitioned log below is the way past that.
+- **In one process** (`prefixwise serve`, `prefixwise.wrap`, the callback) the edge calls the
+  collector directly. Same code, same verdicts, no configuration: the single-user product is the
+  fleet product with a zero-length wire.
 
-```python
-class SessionStateStore(Protocol):
-    def get_lane(self, session_id: str, model: str) -> LaneState | None: ...
-    def put_turn(self, session_id: str, model: str, opening: str, turn: TurnState,
-                 *, max_threads: int) -> None: ...              # LRU per lane
-    def begin_recording(self, key: tuple) -> None: ...
-    def end_recording(self, key: tuple) -> None: ...
-    def await_recording(self, key: tuple, timeout: float) -> bool: ...
-```
+**The record is the contract.** `TurnRecord.to_dict()` is its wire form; `version` changes when a
+field's meaning does, and a collector refuses a version it does not read rather than guess.
+`tests/test_records.py` pins that a record holds no prompt text, that a record that crossed JSON
+yields the identical ledger row, and that malformed records are refused.
 
-`TurnState` holds what `_Lane` holds now: block hashes (64 hex characters each, no text), token
-counts and times. A Redis implementation stores one hash per lane: up to 8 openings, each with a
-snapshot of about 200 bytes per block (three 64-character hashes and counts). `put_turn` runs as a Lua script, so the LRU and the
-write are atomic. The recording wait becomes a key with a short expiry plus a pub/sub wake-up.
-Costs, to weigh against affinity:
-- two round trips per request, about 0.3 ms each in-zone, on the proxy's hot path;
-- a snapshot of a 200-block prompt is about 40 KB on the wire per turn;
-- the recording wait is now distributed, so a lost wake-up means a 10 s stall, not a missed
-  comparison.
+**Transport (next).** `prefixwise collect` runs a collector as a service; an edge given
+`PREFIXWISE_COLLECTOR=https://...` sends records instead of ingesting them:
+- one FIFO sender thread per edge, a bounded queue, batched POSTs to `/api/v1/ingest`, retries
+  with backoff; when the queue is full records are dropped and counted, never blocking a request;
+- a bearer token on the collector; TLS at the ingress;
+- ingest is idempotent by `request_id`;
+- ordering: a conversation's turns are sequential, and an edge emits turn N's record at N's
+  response end, before turn N+1 is even sent, so with a FIFO sender N arrives before N+1 unless
+  the sender is backed up by more than one turn gap. The collector detects the exception (a record
+  whose `sent_at` precedes its lane's latest `done_at`), records it as `unknown` with the reason,
+  and counts it, so the failure mode is visible, not a wrong cause;
+- the collector serves the existing `/api/v1`, `/metrics` and `prefixwise report` over the fleet's
+  one ledger.
 
-Build it when a user shows a deployment that cannot hash on a header.
+**Several collectors (later).** Partition records by session id on a log (Kafka, Redis Streams,
+NATS): each consumer owns its sessions, so ordering per conversation is guaranteed without the
+edge's FIFO assumption, and a consumer rebuilds its lanes from the log after a restart or a
+deploy, so no `first_write` burst. The `Collector` class is already the consumer; what is added
+is the partitioned source and a `LedgerSink` for ClickHouse or Postgres where one SQLite file is
+not enough (`ledger.py` stays the built-in sink).
 
-**Ledger.** One SQLite file per pod, WAL with `synchronous=NORMAL` and a 10 s busy timeout
-(`sqlite3.connect(..., timeout=10)`, `ledger.py`), one commit per request. That suits a process
-at 185 requests/s. The write happens after the client's response is complete (the stream is
-half-closed first), so it never adds latency. For the fleet view, the existing sinks are the
-answer:
-- OpenTelemetry spans with the verdict (`otel.py`), to any OTLP backend, ClickHouse included;
-- Prometheus metrics (`prom.py`), aggregated across pods by the usual `sum by`.
-
-A `LedgerSink` interface (`record(entry)`, `flush()`) with an async batch writer is worth adding
-only for a direct ClickHouse/PostgreSQL writer, which OTLP already covers.
+**Engine join.** The KV-event subscription stays on the collector side conceptually, but the
+request-time half (`request_sent` freezes the previous chain before the request goes out) needs
+the edge: today the proxy subscribes and puts the verdict in the record. With a remote collector,
+the edge that fronts the engine keeps that role; it is the one that sees the engine's requests.
 
 ## 2.1 Chunk sketches (designed, not built)
 

@@ -167,7 +167,7 @@ def test_recorder_ignores_the_proxys_engine_settings(monkeypatch):
 
 def test_a_classifier_failure_warns_once_and_still_leaves_a_row(server, capsys):
     rec = Recorder(":memory:")
-    rec.proxy._finalize_locked = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("bug"))
+    rec.proxy.collector.ingest = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("bug"))
     client = prefixwise.wrap(openai.OpenAI(base_url=server + "/v1", api_key="sk-test"), recorder=rec)
     for _ in range(3):
         client.chat.completions.create(model="gpt-5.6", messages=[{"role": "user", "content": "hi"}])

@@ -136,7 +136,9 @@ sequenceDiagram
 
 | module | job |
 |---|---|
-| `proxy.py` | HTTP server, request lifecycle, per-session state (bounded: `PREFIXWISE_MAX_SESSIONS`, default 10,000), upstream forwarding, streaming relay, routes (`/v1/*`, `/tasks`, `/requests/<id>`, `/ledger`, `/engine`, `/health`, `/metrics`, `/api/v1`) |
+| `proxy.py` | the edge as an HTTP proxy: request lifecycle, fingerprinting, upstream forwarding, streaming relay, the engine join's request side, routes (`/v1/*`, `/tasks`, `/requests/<id>`, `/ledger`, `/engine`, `/health`, `/metrics`, `/api/v1`); builds one `TurnRecord` per request and hands it to the collector |
+| `records.py` | `TurnRecord`: what an edge hands the collector (hashes, positions, counts, usage; never text), with its wire form and version |
+| `collector.py` | the control plane: per-conversation state (lanes, bounded by `PREFIXWISE_MAX_SESSIONS`, default 10,000), classification, sub-reasons, pricing, the ledger write; `ingest(record)` and `ingest_failure(record)` take records in (serialized by one lock); `chain_parent` and `stitched_opening` answer the edge's two request-time questions |
 | `fingerprint.py` | splits a request into blocks in the provider's prefix order; `raw` (exact bytes), `canonical` (sorted keys, NFC, fixed separators) and `masked` (dates, ids, numbers masked) hashes; HMAC for short, guessable blocks |
 | `classifier.py` | `RequestSnapshot` → one `MissCause`, `legit` (waste or expected), evidence text, secondary causes |
 | `details.py` | sub-reasons (`ttl_shortened`, `lookback_exceeded`, `markers_ignored`, `sent_before_cache_written`, `shared_prefix_not_reused`, `thinking_stripped`, `cache_key_changed`), each with strict preconditions |

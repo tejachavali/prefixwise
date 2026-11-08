@@ -249,7 +249,7 @@ def test_a_call_prefixwise_could_not_classify_is_not_an_error_span(spans):
     from prefixwise.otel import Spans
     proxy = PrefixwiseProxy(mock=True)
     proxy.spans = Spans("genai")
-    proxy._finalize_locked = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("bug"))
+    proxy.collector.ingest = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("bug"))
     ctx = proxy.prepare("openai", {"model": "gpt-5.6", "messages": [{"role": "user", "content": "hi"}]}, {})
     proxy.finalize_safely(ctx, 200, {"id": "c", "usage": {"prompt_tokens": 10, "completion_tokens": 1}})
     span = spans()[0]
