@@ -17,12 +17,20 @@ pip install "prefixwise[engines]"          # Python 3.10+; the extra adds pyzmq 
 python -m sglang.launch_server --model-path <model> --enable-cache-report \
   --kv-events-config '{"publisher": "zmq", "endpoint": "tcp://*:5557"}'       # SGLang >= 0.5.20
 
-prefixwise serve --upstream http://127.0.0.1:30000 --engine sglang \
-  --kv-events tcp://127.0.0.1:5557 --full-attention
+prefixwise serve --upstream http://127.0.0.1:30000 --full-attention   # detects SGLang and its KV events
 ```
 
 Point your client at `http://127.0.0.1:8080/v1` instead of SGLang, run your workload, then
 `prefixwise report`.
+
+`prefixwise serve --upstream URL` (or `PREFIXWISE_UPSTREAM_URL`) reads SGLang's `/server_info` at
+startup: it sets `--engine sglang`, sets `--kv-events auto` when the server publishes KV events
+over tcp (every data-parallel rank; the engines extra must be installed), warns when
+`--enable-cache-report` is off, and reminds you to add `--full-attention` if the model has no
+sliding-window or Mamba layers (that one is never guessed). Any flag you pass wins; `--engine
+sglang --kv-events tcp://127.0.0.1:5557` is the explicit form. The SGLang model gateway relays its
+workers' `/server_info`, so a router looks like one engine: behind one, pass `--engine none`
+(evictions cannot be told from routing there, and SGLang replicas behind a router are not joined).
 
 - `--enable-cache-report` is required: it puts `usage.prompt_tokens_details.cached_tokens` in
   every response (and the final stream chunk). Without it every request looks like a miss, and

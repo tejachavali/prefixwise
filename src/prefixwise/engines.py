@@ -517,6 +517,81 @@ class EngineFleet:
                 "caches": [{"label": label, **x} for label, x in zip(self.labels, snaps)]}
 
 
+CLOUD_HOSTS = ("api.openai.com", "api.anthropic.com")
+
+
+def probe_upstream(upstream_url: str, timeout: float = 1.5, api_key: str | None = None) -> dict:
+    """What is behind --upstream, from the endpoints the engines serve: {"engine": "vllm" | "sglang" |
+    None, "version": str | None, "publishes_events": bool | None, "cache_report": bool | None,
+    "notes": [...]}. SGLang: GET /server_info (the deprecated /get_server_info on 404), which carries
+    `version`, `model_path`, `kv_events` (the tcp publisher descriptor; None when none is usable) and
+    `enable_cache_report`. vLLM: GET /version ({"version": ...}), then /kv_event_sources (per-rank
+    publisher configs; empty when none). Anything else, or an upstream that does not answer in
+    `timeout` seconds, is no engine (a hosted API, most gateways): the caller keeps its defaults.
+    `/v1/models` is deliberately not read: routers relay it, and a router is not one engine. A
+    router that relays its worker's /server_info (the SGLang model gateway) cannot be told from the
+    worker here: `--engine none` says so. Read-only; nothing is sent but GETs."""
+    import json as _json
+    import urllib.error
+    import urllib.parse
+    import urllib.request
+
+    base = upstream_url.rstrip("/").removesuffix("/v1")
+    out: dict = {"engine": None, "version": None, "publishes_events": None, "cache_report": None, "notes": []}
+    host = urllib.parse.urlsplit(base).hostname or ""
+    if host in CLOUD_HOSTS or host.endswith(tuple("." + h for h in CLOUD_HOSTS)):
+        return out
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+
+    def get(path: str):
+        """(status, parsed JSON or None); None, None when unreachable."""
+        try:
+            req = urllib.request.Request(base + path, headers=headers)
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                raw = r.read()
+            try:
+                return r.status, _json.loads(raw)
+            except ValueError:
+                return r.status, None
+        except urllib.error.HTTPError as exc:
+            return exc.code, None
+        except (OSError, ValueError):
+            return None, None
+
+    status, info = get("/server_info")
+    if status == 404:
+        status, info = get("/get_server_info")
+    if status is None:
+        out["notes"].append("upstream did not answer: no engine detected")
+        return out
+    if status in (401, 403):
+        out["notes"].append(f"upstream answered {status} to /server_info: set PREFIXWISE_API_KEY so the engine can be "
+                            "detected, or pass --engine")
+        return out
+    if status == 200 and isinstance(info, dict) and info.get("version") and (
+            "model_path" in info or "server_args" in info or "kv_events" in info or info.get("frontend")):
+        args = info.get("server_args") if isinstance(info.get("server_args"), dict) else info
+        out.update(engine="sglang", version=str(info["version"]))
+        events = args.get("kv_events") or info.get("kv_events")  # None for ipc:// or a null publisher
+        out["publishes_events"] = isinstance(events, dict) and bool(events.get("endpoint_port_base"))
+        if "enable_cache_report" in args or "enable_cache_report" in info:
+            out["cache_report"] = bool(args.get("enable_cache_report", info.get("enable_cache_report")))
+            if not out["cache_report"]:
+                out["notes"].append("SGLang upstream has --enable-cache-report off; cached_tokens will report 0 "
+                                    "and every request will look like a miss")
+        return out
+    status, ver = get("/version")
+    if status == 200 and isinstance(ver, dict) and ver.get("version"):
+        out.update(engine="vllm", version=str(ver["version"]))
+        status, sources = get("/kv_event_sources")
+        if status == 200 and isinstance(sources, dict):
+            out["publishes_events"] = any(isinstance(c, dict) and c.get("enable_kv_cache_events")
+                                          and c.get("publisher") == "zmq" and c.get("endpoint")
+                                          for c in sources.values())
+        return out
+    return out
+
+
 class _Seg:
     """Blocks SGLang stored in one event, in chain order: one radix-tree node or part of one.
 

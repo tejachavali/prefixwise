@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **`prefixwise serve` recognises the engine behind `--upstream`:** at startup it asks the server what it is (SGLang's `/server_info`, the deprecated `/get_server_info` on older versions; vLLM's `/version`, then `/kv_event_sources`; never `/v1/models`, which routers relay) and sets `--engine` itself, plus `--kv-events auto` when the engine publishes KV events over tcp and the engines extra is installed. It prints what it detected, warns when SGLang runs with `--enable-cache-report` off or answers 401 (set `PREFIXWISE_API_KEY`), and reminds you to add `--full-attention` (never guessed). Explicit flags always win, and `--engine none` skips detection for a router that relays its worker's `/server_info` (the SGLang model gateway); a hosted API or an upstream that does not answer within 1.5 s detects as no engine and changes nothing (`prefixwise.engines.probe_upstream`).
+
 - `GET /engine` and the engine-check line of `experiments/e_evict` show `offload_tier_seen` (the stream has carried a store on a non-GPU medium, so `host_restored` can be claimed); E-evict records each turn's detail.
 
 ## 0.9.0: 2026-11-08
