@@ -62,6 +62,11 @@ For the offload runs, start the server with `KV_EVENTS=1` (`vllm_lmcache_server.
 `sglang_server.sh`) and add `--kv-events tcp://127.0.0.1:5557` (SGLang: also `--full-attention`):
 each restored hit should then carry the detail `host_restored`, printed in brackets after the
 cause, and the engine-check line should show `offload_tier_seen: true`.
+
+**Prefixwise inside vLLM** (`vllm serve ... --middleware prefixwise.PrefixwiseMiddleware`, with
+`PREFIXWISE_LEDGER=/path/mw.db`): `e_evict.py --engine vllm --url http://127.0.0.1:8000 --in-engine
+/path/mw.db` sends each turn straight to the engine and reads its verdict from the middleware's
+ledger by the `X-Prefixwise-Request-Id` header; the KV-event notes are then in the server log.
 Expected: T3 is `evicted` with evidence starting "confirmed", instead of "inferred".
 
 For SGLang (0.5.20 or later), repeat run 3 with the server publishing events:

@@ -192,6 +192,7 @@ sequenceDiagram
 | `api.py` | `/api/v1`: summary, breakdowns, request rows, fixes, prices, explain |
 | `prom.py`, `otel.py` | Prometheus exposition with bounded labels; OpenTelemetry GenAI spans with `prefixwise.cache.*` |
 | `sdk.py` | `Recorder`, `wrap`, `session` |
+| `asgi.py` | `PrefixwiseMiddleware`: the edge as ASGI middleware inside vLLM (`--middleware`) or any Starlette app |
 | `litellm_callback.py` | `PrefixwiseCallback`: classifies the body LiteLLM actually sent |
 | `importers.py` | Claude Code and Codex log import |
 | `check.py`, `pytest_plugin.py` | `prefixwise check`: the CI gate (findings, allow-list, baseline, projection); the plugin that names each test as a scenario |
