@@ -1,6 +1,18 @@
 # Changelog
 
-## Unreleased
+## 0.6.0: 2026-11-08
+
+Prefixwise where people already are: in their own code (`prefixwise.wrap`), behind LiteLLM, in
+their OpenTelemetry traces, and in front of several vLLM replicas, where it now confirms routing
+misses. Each integration was reviewed independently against the source it plugs into (the SDKs,
+LiteLLM, OpenTelemetry's GenAI conventions, vLLM) before release; every confirmed finding is a
+test. Routing misses confirmed live: 5/5 on two vLLM 0.33.0 replicas.
+
+**Upgrading:** nothing to change; no ledger migration. New, all opt-in: `prefixwise.wrap`,
+`prefixwise.litellm_callback`, `PREFIXWISE_OTEL` / `--otel` (`pip install 'prefixwise[otel]'`),
+`--kv-events auto` or several endpoints. One verdict change: with several KV caches known
+(`--kv-events auto` or several endpoints), an unchanged prefix that missed is no longer inferred
+as an eviction; one engine behaves as before.
 
 - **Several vLLM KV caches: routing misses, confirmed.** `--kv-events auto` subscribes to every data-parallel rank (vLLM's `GET /kv_event_sources`); comma-separated endpoints cover replicas behind a router that passes the request body through (not Dynamo, which takes the session from headers). Which cache served each request comes from the KV events themselves (vLLM reports a request's blocks, with its session, on the stream of the cache that ran it), so the router need not say. A turn served by another cache, while the one that served the previous turn still held the very block this turn needed, is a confirmed `routing_miss`; a prefix rendered differently, a side call served elsewhere, a replica that went away, a stream behind or two caches reporting one request claim nothing; the same cache twice keeps the one-engine verdicts. **Fixed:** with several caches known, an unchanged prefix that missed is no longer inferred as an eviction (a request sent to another cache looks the same); it is `unknown` unless the events decide. SGLang stays one data-parallel rank for now. Live on two vLLM 0.33.0 replicas behind a router (Colab L4): routing misses confirmed 5/5, sticky-routing control 5/5 hits ([record](experiments/e_route/runs/2026-11-08-colab-l4.md)).
 - **`prefixwise.wrap(client)`: Prefixwise in your own code, no proxy.** Wrap an `Anthropic`, `AsyncAnthropic`, `OpenAI` or `AsyncOpenAI` client (`messages.create`, `beta.messages.create`; `chat.completions.create` / `.parse`, `responses.create` / `.parse`; `with_raw_response` too). Calls go to the provider unchanged and each completed one is classified and recorded exactly as the proxy would, into the same ledger. `prefixwise.session(id, task_id=...)` groups calls. The request recorded is what went on the wire: SDK objects carried into the next turn (a response's message, Anthropic content blocks) count as the dicts the SDK sent, `extra_body` is included, `NOT_GIVEN`, timeouts and extra headers are not. Tested with the real SDKs over HTTP.
