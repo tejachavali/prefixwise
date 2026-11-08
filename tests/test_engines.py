@@ -4,6 +4,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 from prefixwise.proxy import PrefixwiseProxy
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -48,3 +50,11 @@ def test_e_evict_mock_offload_recovers_gpu_only_is_evicted(tmp_path):
     off = run("experiments/e_evict/e_evict.py", "--mock", "--engine", "vllm-lmcache", "--repeats", "2",
               "--output-dir", str(tmp_path))
     assert off.returncode == 0 and "`none` x2 (2/2 correct)" in off.stdout, off.stdout
+
+
+def test_e_route_mock_confirms_routing_misses_and_not_hits(tmp_path):
+    pytest.importorskip("zmq")
+    pytest.importorskip("msgspec")
+    out = run("experiments/e_route/e_route.py", "--mock", "--reps", "2")
+    assert out.returncode == 0, out.stdout + out.stderr
+    assert "routing_miss confirmed 2/2" in out.stdout and "hit 2/2" in out.stdout

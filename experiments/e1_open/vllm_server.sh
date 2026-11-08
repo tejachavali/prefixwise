@@ -48,6 +48,8 @@ set -euo pipefail
 MODEL="${MODEL:-Qwen/Qwen3-8B}"
 MODEL_ALIAS="${MODEL_ALIAS:-${MODEL}-alias}"
 PORT="${PORT:-8000}"
+# KV-event port: give each replica its own when several run on one host (E-route).
+EVENTS_PORT="${EVENTS_PORT:-5557}"
 HOST="${HOST:-0.0.0.0}"
 # Extra vLLM flags, e.g. VLLM_ARGS="--quantization fp8 --max-model-len 8192"
 VLLM_ARGS="${VLLM_ARGS:-}"
@@ -78,5 +80,5 @@ exec vllm serve "$MODEL" \
   --enable-prompt-tokens-details \
   --enable-auto-tool-choice \
   --tool-call-parser hermes \
-  --kv-events-config '{"enable_kv_cache_events": true, "publisher": "zmq", "topic": "kv-events", "endpoint": "tcp://*:5557"}' \
+  --kv-events-config '{"enable_kv_cache_events": true, "publisher": "zmq", "topic": "kv-events", "endpoint": "tcp://*:'"$EVENTS_PORT"'"}' \
   $VLLM_ARGS
