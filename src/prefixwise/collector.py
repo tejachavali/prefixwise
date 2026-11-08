@@ -351,11 +351,12 @@ class Collector:
 
         div = first_divergence(prev.blocks, curr.blocks) if prev is not None else None
         priced_model = str(rec.response_model or rec.model)
-        # Waste is capped at what the previous turn left in the cache, except for a misplaced
-        # breakpoint, whose waste is exactly the stable prefix it left out of the cache.
+        # Waste is capped at what the previous turn left in the cache, except for a breakpoint left
+        # early (the cache served all it held): there the waste is the stable prefix it left out.
         held = ((prev.cached_tokens + prev.cache_written) if prev is not None
-                and (prev.provider == "anthropic" or prev.cache_written)
-                and result.cause is not MissCause.BREAKPOINT_MISPLACED else None)
+                and (prev.provider == "anthropic" or prev.cache_written) else None)
+        if held and result.cause is MissCause.BREAKPOINT_MISPLACED and cached >= held:
+            held = None
         entry = LedgerEntry(
             session_id=session_id, agent_id=rec.agent_id,
             provider=provider, model=rec.model, cause=result.cause.value,

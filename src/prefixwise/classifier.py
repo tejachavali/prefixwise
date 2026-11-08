@@ -199,20 +199,24 @@ def _served_all(prev: RequestSnapshot, curr: RequestSnapshot) -> bool:
     return target > 0 and curr.cached_tokens >= target
 
 
-def _stable_uncached_tail(prev: RequestSnapshot, curr: RequestSnapshot) -> tuple[int, int, int]:
-    """Anthropic, blocks unchanged: (held, shared, tail). `held` is what the previous turn left in
-    the cache (its reads plus its write, which ends at its last breakpoint), `shared` the prefix
-    both turns have in common (the shorter prompt), `tail` the part of it after the breakpoint:
-    stable, yet sent uncached on every turn. The tail counts only when the cache served all it held
-    (so nothing else explains the miss) and the tail is at least the model's minimum cacheable
-    size, so a later breakpoint would have cached it; a breakpoint that moves forward each turn
-    leaves no tail. (0, 0, 0) when the rule does not apply."""
-    if prev.provider != "anthropic" or not curr.usage_known or not curr.has_breakpoint:
+def _stable_uncached_tail(prev: RequestSnapshot, curr: RequestSnapshot, secondary: list) -> tuple[int, int, int]:
+    """Anthropic, the previous turn's blocks a prefix of this one's: (held, shared, tail). `held` is
+    what the previous turn left in the cache (its reads plus its write, which ends at its last
+    breakpoint), `shared` the previous prompt, all of which this turn repeats, and `tail` the part
+    of it after the breakpoint: stable, yet sent uncached on every turn. The tail counts only when
+    the cache served all it held (so nothing else explains the miss) and the tail is at least the
+    model's minimum cacheable size: a noise floor, since a breakpoint placed after the tail would
+    cache it whatever its size. A breakpoint that moves forward each turn leaves no tail. Not
+    applied when a message block was replaced (a one-shot side call's, or a rewritten last turn:
+    HISTORY_EDIT in `secondary`) or the prompt shrank, since then the previous prompt is not all
+    repeated. (0, 0, 0) when the rule does not apply."""
+    if (prev.provider != "anthropic" or not curr.usage_known or not curr.has_breakpoint
+            or MissCause.HISTORY_EDIT in secondary or curr.prompt_tokens < prev.prompt_tokens):
         return 0, 0, 0
     held = prev.cached_tokens + prev.cache_written
-    if held <= 0 or prev.prompt_tokens <= 0 or curr.prompt_tokens <= 0 or curr.cached_tokens < held:
+    if held <= 0 or prev.prompt_tokens <= 0 or curr.cached_tokens < held:
         return 0, 0, 0
-    shared = min(prev.prompt_tokens, curr.prompt_tokens)
+    shared = prev.prompt_tokens
     tail = shared - held
     if tail < max(_min_prefix(curr) or 0, 1):
         return 0, 0, 0
@@ -343,13 +347,13 @@ def classify(prev: RequestSnapshot | None, curr: RequestSnapshot,
     # cache serves all it holds, turn after turn, and the stable part after the breakpoint is paid
     # uncached every time: that is a misplaced breakpoint, not a hit.
     if _served_all(prev, curr):
-        held, shared, tail = _stable_uncached_tail(prev, curr)
+        held, shared, tail = _stable_uncached_tail(prev, curr, secondary)
         if tail:
             return Classification(MissCause.BREAKPOINT_MISPLACED, False,
-                                  f"breakpoint too early: the cache held {held} tokens and served them all, but "
-                                  f"both turns share a {shared}-token prefix; the {tail} stable tokens after the "
-                                  "last breakpoint are sent uncached every turn (a later breakpoint would cache "
-                                  "them)", secondary, native_reason)
+                                  f"breakpoint too early: the cache held {held:,} tokens and served them all, but "
+                                  f"both turns share a {shared:,}-token prefix; the {tail:,} stable tokens after "
+                                  "the last breakpoint are sent uncached every turn (a breakpoint after them, or "
+                                  "on the last message, would cache them)", secondary, native_reason)
         if prev.params != curr.params:
             secondary.append(MissCause.PARAM_RENDERED)
         return Classification(MissCause.NONE, None,

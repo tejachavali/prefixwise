@@ -101,7 +101,8 @@ FIX_ADVICE: dict[str, dict] = {
                      "fix": "Check retry logic: identical requests within seconds are re-billed in full."},
     "breakpoint_misplaced": {"toggle": None,
                              "fix": "Anthropic: add a cache_control breakpoint after the stable prefix "
-                                    "(tools and system)."},
+                                    "(tools and system), and one on the last message so the growing "
+                                    "history is cached too."},
 }
 
 

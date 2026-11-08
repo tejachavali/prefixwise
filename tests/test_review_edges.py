@@ -24,8 +24,8 @@ BLOCKS = FP.fingerprint_blocks([("system", "Be careful."), ("messages", {"role":
 SONNET = "claude-sonnet-5-5"  # input 2.0, cache_read 0.1, 5m write 2.5 per 1M
 
 
-def snap(prompt, cached, written=0, has_breakpoint=True, provider="anthropic", model=SONNET):
-    return RequestSnapshot(model=model, provider=provider, blocks=BLOCKS, prompt_tokens=prompt,
+def snap(prompt, cached, written=0, has_breakpoint=True, provider="anthropic", model=SONNET, blocks=None):
+    return RequestSnapshot(model=model, provider=provider, blocks=blocks or BLOCKS, prompt_tokens=prompt,
                            cached_tokens=cached, cache_written=written, has_breakpoint=has_breakpoint)
 
 
@@ -69,10 +69,10 @@ def test_an_early_static_breakpoint_is_misplaced_not_a_hit():
     # reads those 2,000: the cache served all it held, yet 18,000 stable tokens were paid uncached.
     c = classify(snap(20_000, 0, written=2_000), snap(22_000, 2_000))
     assert c.cause is MissCause.BREAKPOINT_MISPLACED and c.legit is False
-    assert "breakpoint too early" in c.evidence and "18000 stable tokens" in c.evidence
+    assert "breakpoint too early" in c.evidence and "18,000 stable tokens" in c.evidence
     # steady state: turn 3 again reads 2,000 of a 22,000-token shared prefix
     c = classify(snap(22_000, 2_000, written=0), snap(24_000, 2_000))
-    assert c.cause is MissCause.BREAKPOINT_MISPLACED and "20000 stable tokens" in c.evidence
+    assert c.cause is MissCause.BREAKPOINT_MISPLACED and "20,000 stable tokens" in c.evidence
 
 
 def test_a_moving_breakpoint_or_a_short_tail_stays_a_hit():
@@ -102,3 +102,22 @@ def test_the_proxy_charges_the_stable_tail_not_the_held_cap():
     r = T.rates_for(MODEL)
     assert e.avoidable_cost == pytest.approx(18_000 * (r["input"] - r["cache_read"]) / 1e6)  # turn 2 wrote nothing
     assert e.unread_write_tokens is None  # the write was read: nothing unread
+
+
+def test_a_replaced_one_shot_or_a_shorter_turn_is_not_an_early_breakpoint():
+    # Side calls: the same 2,000-token system block (breakpoint on it) and a different 18,000-token
+    # document each time. The breakpoint is right where it should be; the documents are not stable.
+    doc_a = FP.fingerprint_blocks([("system", "Be careful."), ("messages", {"role": "user", "content": "doc A " * 50})])
+    doc_b = FP.fingerprint_blocks([("system", "Be careful."), ("messages", {"role": "user", "content": "doc B " * 50})])
+    c = classify(snap(20_000, 0, written=2_000, blocks=doc_a), snap(20_000, 2_000, blocks=doc_b))
+    assert c.cause is MissCause.NONE and MissCause.HISTORY_EDIT in c.secondary
+    # A rewritten, shorter last turn: the previous prompt is not all repeated, so no tail is claimed.
+    assert classify(snap(20_000, 0, written=2_000), snap(15_000, 2_000)).cause is MissCause.NONE
+
+
+def test_the_held_cap_still_applies_to_other_misplaced_breakpoint_verdicts():
+    # No cache_control at all (nothing held, nothing read): the existing verdict and its waste are unchanged.
+    p = proxy([a_usage(fresh=8_000), a_usage(fresh=8_300)])
+    turn(p, body([USER], system_marker=False))
+    e = turn(p, body([USER, {"role": "assistant", "content": "ok"}, {"role": "user", "content": "go"}], system_marker=False))
+    assert e.cause == "breakpoint_misplaced" and e.avoidable_tokens == 8_000
