@@ -332,6 +332,10 @@ skew, failed requests), fixed above. The rules above answer all of them.
   checks. **Live:** E-evict on SGLang 0.5.23 with KV events, Qwen3-4B on an L4: `evicted`, confirmed, 5 of
   5, with no lost messages; E1-open still 120/120 with session ids sent
   (`experiments/e_evict/runs/2026-11-07-colab-l4-sglang-events.md`).
+- **`host_restored`, live 2026-11-08** (Prefixwise 0.9.0, same flood): vLLM 0.33.0 + LMCache
+  0.5.7 and SGLang 0.5.23 + HiCache, each with KV events, 5 of 5 restored hits named `none` with
+  the detail `host_restored`, `offload_tier_seen` true on both streams, 0 lost messages
+  (`experiments/e_evict/runs/2026-11-08-colab-l4-host-restored.md`).
 - `tests/test_engine_fleet.py`: several caches, each verdict and each no-claim case (a prefix
   rendered differently, a side call served elsewhere, the next request sent before this one was
   judged, a stream behind, two caches reporting one request, a replica that went away), over

@@ -105,7 +105,7 @@ And when the prefix *was* reused (`none`), one detail separates two hits that lo
 | detail | meaning | evidence |
 |---|---|---|
 | none | the GPU served the prefix | nothing removed |
-| `host_restored` | the GPU copy had been evicted and an offload tier (LMCache, vLLM's CPU offload) loaded it back, no prefill recomputed: a hit that cost a restore, and a sign the GPU cache alone is too small for the session | GPU `BlockRemoved` for the previous request's blocks the read covered, the tier's own `BlockStored` seen on the stream, one cache only, a clean stream ([#64](https://github.com/tejachavali/prefixwise/pull/64)) |
+| `host_restored` | the GPU copy had been evicted and an offload tier (LMCache, vLLM's CPU offload) loaded it back, no prefill recomputed: a hit that cost a restore, and a sign the GPU cache alone is too small for the session | GPU `BlockRemoved` for the previous request's blocks the read covered, the tier's own `BlockStored` seen on the stream, one cache only, a clean stream ([#64](https://github.com/tejachavali/prefixwise/pull/64); live 5/5 on LMCache and HiCache, [record](../experiments/e_evict/runs/2026-11-08-colab-l4-host-restored.md)) |
 
 And when the prompt itself changed, the cause names what changed first: `volatile_system` (a
 timestamp or id in the system prompt), `tool_reserialize` (same tools, different order),
@@ -137,10 +137,11 @@ tokens and flooded with 3x that ([record](../experiments/e_evict/runs/2026-11-07
 | vLLM | prefix lost, 0/5 hits | `evicted` 5/5 (inferred) |
 | vLLM + KV events | prefix lost, 0/5 hits | `evicted` 5/5, confirmed ("211 of the previous request's KV blocks removed") |
 | vLLM + LMCache | 98% restored, 5/5 hits | `none` 5/5 |
-| vLLM + LMCache + KV events | 98% restored, 5/5 hits | `none` 5/5; recorded before #64, so without the detail: with today's code the same hits carry `host_restored` once LMCache's tier events reach the stream (verified in LMCache's current source; the next thing to run live) |
+| vLLM + LMCache + KV events | 98% restored, 5/5 hits | `none` 5/5, each with `host_restored` ("208 of the previous request's KV blocks had been removed from GPU memory ... yet this request read 3,328 of 3,404 prompt tokens"; [record](../experiments/e_evict/runs/2026-11-08-colab-l4-host-restored.md)) |
 | SGLang | prefix lost, 0/5 hits | `evicted` 5/5 (inferred) |
 | SGLang + KV events | prefix lost, 0/5 hits | `evicted` 5/5, confirmed ("3,382 of the previous request's KV blocks removed"; [record](../experiments/e_evict/runs/2026-11-07-colab-l4-sglang-events.md)) |
-| SGLang + HiCache | 99% restored, 5/5 hits | `none` 5/5; made without KV events; with them, `host_restored` (not yet run) |
+| SGLang + HiCache | 99% restored, 5/5 hits | `none` 5/5 |
+| SGLang + HiCache + KV events | 99% restored, 5/5 hits | `none` 5/5, each with `host_restored` ("3379 of the previous request's KV blocks had been removed"; [record](../experiments/e_evict/runs/2026-11-08-colab-l4-host-restored.md)) |
 
 Two vLLM replicas behind a router that never says which one it used (Qwen3-1.7B, one L4,
 [record](../experiments/e_route/runs/2026-11-08-colab-l4.md)): with the router alternating,
@@ -159,7 +160,7 @@ The classifier also scores 120/120 on injected causes on vLLM, vLLM + LMCache an
   tested over the wire and not yet run live; replicas behind a router are.
 - `host_restored` is claimed only once the offload tier's own stores have been seen on the
   stream, behind one cache; a first restore before that, or a hit behind several caches, is a
-  plain `none`.
+  plain `none`. Run live on LMCache 0.5.7 and SGLang HiCache (5/5 each).
 - On hybrid models (sliding-window + full attention), "not an eviction" is never claimed.
 - How often token-level divergence happens in real agent traffic has not been measured yet.
 
