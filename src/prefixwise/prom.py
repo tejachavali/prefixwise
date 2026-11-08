@@ -134,7 +134,9 @@ class Metrics:
                                                       "ruled out meanwhile."),
                                  ("decode_errors", "Event payloads that could not be decoded."),
                                  ("engine_restarts", "Engine restarts seen (sequence restarted)."),
-                                 ("overflows", "Times the block index overflowed (removals were missed).")):
+                                 ("overflows", "Times the block index overflowed (removals were missed)."),
+                                 ("disconnects", "Times a KV-event stream's connection dropped (engine gone or "
+                                                 "replaced): nothing is claimed across the gap.")):
                 name = f"prefixwise_kv_events_{field}_total"
                 out += [f"# HELP {name} {help_}", f"# TYPE {name} counter",
                         f"{name} {int(kv_events.get(field) or 0)}"]

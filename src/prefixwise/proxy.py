@@ -441,7 +441,7 @@ def _reachable(endpoint: str, host: str) -> str:
     if scheme == "tcp":
         h, _, port = rest.rpartition(":")
         if h in ("*", "0.0.0.0", "::", "[::]", ""):
-            return f"tcp://{host}:{port}"
+            return f"tcp://[{host}]:{port}" if ":" in host else f"tcp://{host}:{port}"
     return endpoint
 
 

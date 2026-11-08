@@ -35,8 +35,9 @@ def turn(f, session, cached, served_by, *events, prompt=None, elsewhere=()):
 def test_a_request_sent_away_from_its_cached_prefix_is_a_confirmed_routing_miss():
     f = fleet()
     assert turn(f, "s", 0, 0, stored([1, 2, 3, 4], "s")) == NOTHING  # first turn
-    # Turn 2 went to rank 1, which had nothing (cached 0); rank 0 still holds all four blocks.
-    assert turn(f, "s", 0, 1, stored([11, 12, 13, 14, 15], "s")) == (None, None, ("rank 0", "rank 1", 4))
+    # Turn 2 went to rank 1, which had nothing (cached 0) and computed the same blocks again;
+    # rank 0 still holds all four.
+    assert turn(f, "s", 0, 1, stored([1, 2, 3, 4, 5], "s")) == (None, None, ("rank 0", "rank 1", 4))
 
 
 def test_the_same_cache_twice_keeps_that_caches_own_verdict():
@@ -107,6 +108,7 @@ def publishers():
                                 ENC.encode(EventBatch(ts=time.time(), events=list(events)))])
         send.port = port
         send.endpoint = f"tcp://127.0.0.1:{port}"
+        send.close = lambda: pub.close(0)
         pubs.append(pub)
         return send
     yield make
@@ -128,13 +130,13 @@ def run_two_turns(p, a, b):
     h = {"x-prefixwise-session-id": "agent-7"}
     try:
         assert p.handle("openai", dict(BODY), h)[0]["cause"] == "first_write"
-        a(stored([111, 222, 333], "agent-7"))
+        a(stored([111, 222, 333], "agent-7"))  # turn 1's prefix, cached on a
         assert wait_for(lambda: p.engine_events.sources[0].snapshot()["stored"] >= 3)
         orig = p._forward
 
         def second(*args, **kw):  # replica b serves turn 2 and reports its blocks while it runs
-            b(stored([444, 555], "agent-7"))
-            wait_for(lambda: p.engine_events.sources[1].snapshot()["stored"] >= 2)
+            b(stored([111, 222, 333, 444], "agent-7"))  # b computes the same prefix again
+            wait_for(lambda: p.engine_events.sources[1].snapshot()["stored"] >= 4)
             return orig(*args, **kw)
         p._forward = second
         res = p.handle("openai", dict(NEXT), h)[0]
@@ -191,3 +193,93 @@ def test_several_endpoints_are_vllm_only_for_now():
         PrefixwiseProxy(upstream_url="http://unused", engine="sglang", kv_events="tcp://a:1,tcp://b:2")
     with pytest.raises(ValueError):
         PrefixwiseProxy(upstream_url="http://unused", engine="sglang", kv_events="auto")
+
+
+# -- review findings: each must make no claim (or the right one) --------------------------------
+
+
+def test_a_prefix_that_changed_where_the_read_stopped_is_not_a_routing_miss():
+    """Rank 1 has a shared system prompt (blocks 1, 2) from another session; turn 2 was rendered
+    differently from block 2 on. Rank 0 still holding the old block 2 proves nothing."""
+    f = fleet()
+    turn(f, "s", 0, 0, stored([1, 2, 3, 4], "s"))
+    f.sources[1].handle(decoded(stored([1, 2], "other")))
+    assert turn(f, "s", 32, 1, stored([1, 2, 902, 903], "s")) == NOTHING
+
+
+def test_a_side_call_served_elsewhere_is_not_the_prefix_the_main_thread_needs():
+    f = fleet()
+    turn(f, "s", 0, 0, stored([1, 2, 3, 4], "s"))
+    turn(f, "s", 0, 1, stored([77], "s"))  # a title call of the same session, on rank 1
+    assert turn(f, "s", 0, 0, stored([1, 2, 3, 4, 5], "s")) == NOTHING
+
+
+def test_each_request_is_judged_by_its_own_reports_not_the_next_ones():
+    """Streaming: turn N+1 can be sent before turn N is judged."""
+    f = fleet()
+    turn(f, "s", 0, 1, stored([1, 2, 3], "s"))              # N-1 on rank 1
+    n = f.request_sent("s")
+    f.sources[0].handle(decoded(stored([1, 2, 3, 4], "s")))  # N on rank 0
+    n1 = f.request_sent("s")
+    f.sources[1].handle(decoded(stored([1, 2, 3, 4, 5], "s")))  # N+1 on rank 1
+    f.sources[1].handle(decoded(BlockRemoved(block_hashes=[1], medium="GPU")))
+    assert f.request_done(n, 0) == NOTHING  # never "evicted on rank 1": N ran on rank 0
+    f.discard(n1)
+
+
+def test_a_hit_returns_at_once_and_a_stream_behind_claims_nothing():
+    f = fleet()
+    turn(f, "s", 0, 0, stored([1, 2, 3, 4], "s"))
+    for src in f.sources:
+        src._settle = lambda *a, **k: (_ for _ in ()).throw(AssertionError("waited on a hit"))
+    token = f.request_sent("s")
+    f.sources[0].handle(decoded(stored([1, 2, 3, 4, 5], "s")))
+    assert f.request_done(token, 3000, 4000) == NOTHING
+    g = fleet()
+    turn(g, "s", 0, 0, stored([1, 2, 3, 4], "s"))
+    g.sources[0]._settle = lambda *a, **k: False  # rank 0's stream did not catch up
+    assert turn(g, "s", 0, 1, stored([1, 2, 3, 4, 5], "s")) == NOTHING
+
+
+def test_a_previous_request_two_caches_reported_is_not_judged():
+    f = fleet(3)
+    token = f.request_sent("s")
+    f.sources[0].handle(decoded(stored([1, 2, 3], "s")))
+    f.sources[1].handle(decoded(stored([1, 2, 3], "s")))  # a retried or hedged request
+    f.request_done(token, 0)
+    assert turn(f, "s", 0, 2, stored([1, 2, 3, 4], "s")) == NOTHING
+
+
+def test_held_here_never_examines_a_hit():
+    f = fleet()
+    turn(f, "s", 0, 0, stored(list(range(1, 9)), "s"))
+    token = f.sources[0].request_sent("s")
+    assert f.sources[0].held_here(token, 64, 100, ((0, 5), 16)) is None  # 64 of 100 cached: a hit
+
+
+def test_a_replica_that_went_away_holds_nothing(publishers):
+    a, b = publishers(), publishers()
+    f = EngineFleet([("a", a.endpoint), ("b", b.endpoint)]).start()
+    try:
+        for send, src in ((a, f.sources[0]), (b, f.sources[1])):
+            assert wait_for(lambda: (send(), src.snapshot()["batches"] > 0)[1])
+        token = f.request_sent("s")
+        a(stored([1, 2, 3], "s"))
+        assert wait_for(lambda: f.sources[0].snapshot()["stored"] >= 3)
+        f.request_done(token, 0)
+        a.close()  # replica a crashed, or was scaled down
+        assert wait_for(lambda: f.sources[0].snapshot()["disconnects"] >= 1)
+        assert f.snapshot()["connected"] is False
+        token = f.request_sent("s")
+        b(stored([1, 2, 3, 4], "s"))
+        assert wait_for(lambda: f.sources[1].snapshot()["stored"] >= 4)
+        assert f.request_done(token, 0) == NOTHING  # failover, not a routing miss
+    finally:
+        f.stop()
+
+
+def test_ipv6_endpoints_are_bracketed():
+    from prefixwise.proxy import _reachable
+    assert _reachable("tcp://*:5558", "::1") == "tcp://[::1]:5558"
+    assert _reachable("tcp://*:5558", "10.0.0.5") == "tcp://10.0.0.5:5558"
+    assert _reachable("tcp://10.0.0.9:5557", "10.0.0.5") == "tcp://10.0.0.9:5557"
