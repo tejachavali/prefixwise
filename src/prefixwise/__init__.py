@@ -9,4 +9,11 @@ from .ledger import Ledger
 from .sdk import Recorder, session, wrap
 
 __all__ = ["__version__", "MissCause", "classify", "AgreementScorer", "Fingerprinter", "fingerprint_blocks", "Ledger",
-           "Recorder", "session", "wrap"]
+           "Recorder", "session", "wrap", "PrefixwiseMiddleware"]
+
+
+def __getattr__(name: str):
+    if name == "PrefixwiseMiddleware":  # `vllm serve --middleware prefixwise.PrefixwiseMiddleware`
+        from .asgi import PrefixwiseMiddleware
+        return PrefixwiseMiddleware
+    raise AttributeError(f"module 'prefixwise' has no attribute {name!r}")

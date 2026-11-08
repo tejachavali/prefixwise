@@ -49,6 +49,40 @@ no engine.
   production-stack, AIBrix and the current SGLang model gateway do; Dynamo does not):
   [ENGINES.md](ENGINES.md) has the table.
 
+## Inside vLLM, without a proxy
+
+```bash
+pip install "prefixwise[engines]"
+vllm serve <model> --enable-prefix-caching --enable-prompt-tokens-details \
+  --kv-events-config '{"enable_kv_cache_events": true, "publisher": "zmq", "endpoint": "tcp://*:5557"}' \
+  --middleware prefixwise.PrefixwiseMiddleware
+```
+
+`--middleware` loads Prefixwise as ASGI middleware in vLLM's own API server: no second process,
+no port change, clients keep talking to vLLM. It does what the proxy does to each inference
+request (session id and `vllm_xargs` for the KV join, `--fix` rewrites, `stream_options` so a
+stream carries usage), lets vLLM answer, and records the turn from the response; a stream is
+relayed chunk by chunk, never buffered. Non-streaming responses carry the same
+`X-Prefixwise-*` verdict headers as the proxy's. Classification and the ledger write run off the
+event loop, so a slow disk or a KV-event wait never stalls other streams.
+
+KV events need no endpoint: on the first inference request the middleware reads vLLM's own
+per-rank publisher configs (`app.state.engine_client`, what `GET /kv_event_sources` serves) and
+subscribes, so data-parallel ranks are covered. Configuration is by environment variable, since
+vLLM passes the class only `app`: `PREFIXWISE_LEDGER` (default `prefixwise.db` in the working
+directory), `PREFIXWISE_FIX=canonical_tools`, `PREFIXWISE_KV_EVENTS` (an endpoint, or `auto`, the
+default), `PREFIXWISE_COLLECTOR`. Read the ledger with `prefixwise report --ledger prefixwise.db`,
+or run `prefixwise collect` and point `PREFIXWISE_COLLECTOR` at it; vLLM's port serves no
+Prefixwise endpoints.
+
+**With `--api-server-count` above 1, set `PREFIXWISE_COLLECTOR`.** Each API-server process gets
+its own middleware; without one collector seeing every turn, a session's turns split across
+processes and read as misses. The middleware says so once at startup when it sees that flag
+without a collector. The same class works in your own FastAPI or Starlette app
+(`app.add_middleware(PrefixwiseMiddleware, ledger="prefixwise.db")`); SGLang has no middleware
+flag, so SGLang users run the proxy ([SGLANG.md](SGLANG.md)). Tested against a stand-in ASGI
+engine (`tests/test_asgi.py`); not yet run inside a live `vllm serve`.
+
 ## What the verdicts mean
 
 When a request's prefix was unchanged but not reused:
