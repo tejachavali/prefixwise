@@ -226,6 +226,38 @@ prefixwise serve --upstream http://router:8080 --engine vllm \
 - One subscriber thread per cache; `/metrics` sums their counters, and `GET /engine` lists each
   cache. A hit adds no wait; otherwise all streams share one catch-up deadline.
 
+## SGLang with several data-parallel ranks
+
+Each rank (`--dp-size N`, or `--enable-dp-attention`) has its own radix cache and its own
+KV-event publisher at `endpoint_port_base + rank`, every batch stamped with the rank
+(`sglang/srt/disaggregation/kv_events.py`, Nov 2026). `prefixwise serve --engine sglang
+--kv-events auto` reads `/server_info` (`kv_events`: `endpoint_host`, `endpoint_port_base`,
+`dp_size`) and follows every rank; a batch carrying another rank's stamp is counted
+(`wrong_rank`) and stops claims, so crossed endpoints cannot mislead it. One endpoint given for a
+server with several ranks: Prefixwise says to use `auto` and keeps the inference.
+
+What differs from vLLM, and how the join handles it:
+
+- **Only new blocks are reported.** A rank that reused a request's whole prefix stores only what
+  it computed, from exactly where its read stopped. So the rank that served a request is the
+  one whose stream stored the session's blocks **starting at that position**. The previous
+  turn's finish store (generated tokens, published after its response, sometimes after the next
+  turn was sent) starts where that turn ended, so it cannot pass for this one.
+- **Stores can follow the response.** A prompt's store is published after the step that
+  produced the first output; the join waits for it (`barrier_seconds`, default 0.5 s) before
+  deciding, and claims nothing if it does not come.
+- **Block identity is exact.** SGLang's block hashes are SHA-256 over the tokens, chained, with
+  no per-process seed, so the same prefix has the same hash on every rank. A routing miss is
+  confirmed only when the rank that served the previous turn still holds the very block (same
+  hash, same position) that the serving rank had to compute.
+- **Refused:** prefill/decode disaggregation (the prefill rank is chosen per request, and
+  prefill and decode keep separate caches), ranks across several nodes (`/server_info`
+  advertises one event host), and `--enable-session-radix-cache` (as for one rank). Prefixes
+  restored from HiCache's host tier are stored without a session; they count in
+  `cached_tokens`, so they are hits or move the stop point, never misattributed.
+- Tested with SGLang's wire format over real ZMQ sockets (two ranks on consecutive ports,
+  discovered from a stub `/server_info`); **not yet run live** (a single L4 runs one rank).
+
 ## Failure modes, and what the code does about them
 
 - **Lost event messages** (ZMQ PUB drops under backpressure): a missed `BlockRemoved` would
@@ -235,9 +267,9 @@ prefixwise serve --upstream http://router:8080 --engine vllm \
 - **Late subscription / tight loops:** if a session's previous request reported no blocks
   (Prefixwise subscribed later, or the next request followed within milliseconds), there is
   nothing to judge and the inference stands. Never a false claim.
-- **Several replicas or DP ranks (vLLM):** each has its own cache and stream. See
-  [Several KV caches](#several-kv-caches-vllm-data-parallel-ranks-replicas-behind-a-router) below.
-  SGLang: one data-parallel rank for now.
+- **Several replicas or DP ranks:** each has its own cache and stream. See
+  [Several KV caches](#several-kv-caches-vllm-data-parallel-ranks-replicas-behind-a-router) below
+  (vLLM) and [SGLang with several data-parallel ranks](#sglang-with-several-data-parallel-ranks).
 - **Memory:** the set of live blocks is bounded by the engine's GPU capacity (entries leave on
   `BlockRemoved`). Past a hard cap of 1,000,000 (removals must have been missed) Prefixwise
   forgets the saved chains rather than read every block as removed.
