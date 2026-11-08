@@ -17,6 +17,19 @@ from make_figures import FONT, THEMES, esc
 OUT = Path(__file__).resolve().parent
 ARROW_ID = "a"
 
+# Roles on top of the shared palette, per mode: neutral decisions, blue verdicts and hero
+# nodes, emerald for a cache hit (the one verdict that is not a miss).
+ROLES = {
+    "light": {"slate": "#94a3b8", "blue": "#2563eb", "verdict_fill": "#f8fafc", "hero_fill": "#f5f8ff",
+              "hit": "#059669", "hit_fill": "#ecfdf5"},
+    "dark": {"slate": "#64748b", "blue": "#3b82f6", "verdict_fill": "#1f2023", "hero_fill": "#18202f",
+             "hit": "#10b981", "hit_fill": "#13261f"},
+}
+
+
+def roles(t: dict) -> dict:
+    return ROLES["dark" if t["surface"] == THEMES["dark"]["surface"] else "light"]
+
 
 def svg(w: int, h: int, t: dict, body: list[str], title: str) -> str:
     marker = (f'<defs><marker id="{ARROW_ID}" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" '
@@ -52,29 +65,30 @@ def box(t, x, y, w, h, rows, *, accent=None, fill=None, bold_first=True, size=13
     return body
 
 
-def diamond(t, cx, cy, w, h, rows):
+def diamond(t, cx, cy, w, h, rows, stroke=None):
     pts = f"{cx},{cy - h / 2} {cx + w / 2},{cy} {cx},{cy + h / 2} {cx - w / 2},{cy}"
     gap = 16
     top = cy - (len(rows) - 1) * gap / 2 + 4.5
-    return (f'<polygon points="{pts}" fill="{t["surface"]}" stroke="{t["s1"]}" stroke-width="1.6"/>'
+    return (f'<polygon points="{pts}" fill="{t["surface"]}" stroke="{stroke or t["s1"]}" stroke-width="1.6"/>'
             + lines(cx, top, rows, t["ink"], size=12.5, gap=gap))
 
 
-def cylinder(t, x, y, w, h, rows):
+def cylinder(t, x, y, w, h, rows, stroke=None, fill=None):
     e = 9
+    stroke, fill = stroke or t["s1"], fill or t["surface"]
     body = (f'<path d="M{x},{y + e} V{y + h - e} A{w / 2},{e} 0 0 0 {x + w},{y + h - e} V{y + e}" '
-            f'fill="{t["surface"]}" stroke="{t["s1"]}" stroke-width="1.6"/>'
-            f'<ellipse cx="{x + w / 2}" cy="{y + e}" rx="{w / 2}" ry="{e}" fill="{t["surface"]}" '
-            f'stroke="{t["s1"]}" stroke-width="1.6"/>')
+            f'fill="{fill}" stroke="{stroke}" stroke-width="1.6"/>'
+            f'<ellipse cx="{x + w / 2}" cy="{y + e}" rx="{w / 2}" ry="{e}" fill="{fill}" '
+            f'stroke="{stroke}" stroke-width="1.6"/>')
     top = y + h / 2 - (len(rows) - 1) * 8.5 + 9
     return body + lines(x + w / 2, top, rows, t["ink"], weight=[600] + [400] * (len(rows) - 1))
 
 
-def arrow(t, pts, label=None, lx=None, ly=None, anchor="middle", dashed=False):
+def arrow(t, pts, label=None, lx=None, ly=None, anchor="middle", dashed=False, head=True):
     d = "M" + " L".join(f"{x:.1f},{y:.1f}" for x, y in pts)
     dash = ' stroke-dasharray="5 4"' if dashed else ""
-    out = (f'<path d="{d}" fill="none" stroke="{t["ink2"]}" stroke-width="1.4"{dash} '
-           f'marker-end="url(#{ARROW_ID})"/>')
+    end = f' marker-end="url(#{ARROW_ID})"' if head else ""
+    out = f'<path d="{d}" fill="none" stroke="{t["ink2"]}" stroke-width="1.4"{dash}{end}/>'
     if label:
         out += lines(lx, ly, [label], t["muted"], size=11.5, anchor=anchor)
     return out
@@ -89,10 +103,19 @@ def group(t, x, y, w, h, title, right=False):
 
 # -- figure 1: how a request flows -----------------------------------------------------------
 
+def masked(t, x, y, text, size=11.5, anchor="middle"):
+    """A label on a plain background, so a line or border behind it never strikes it through."""
+    w = len(text) * size * 0.56 + 10
+    left = {"middle": x - w / 2, "start": x - 5, "end": x - w + 5}[anchor]
+    return (f'<rect x="{left:.1f}" y="{y - size:.1f}" width="{w:.1f}" height="{size + 6:.1f}" rx="4" '
+            f'fill="{t["surface"]}"/>' + lines(x, y, [text], t["muted"], size=size, anchor=anchor))
+
+
 def architecture(t: dict) -> str:
+    r = roles(t)
     W, H = 940, 800
     b = [lines(W / 2, 34, ["How a request flows through Prefixwise"], t["ink"], size=17, weight=600),
-         lines(W / 2, 56, ["Four ways in, one classifier, one row per request; the prompt itself is never stored"],
+         lines(W / 2, 56, ["Four ways in, one row per request; the prompt itself is never stored"],
                t["muted"], size=12.5)]
     # ways in
     b.append(group(t, 20, 74, W - 40, 112, "WAYS IN"))
@@ -108,32 +131,42 @@ def architecture(t: dict) -> str:
     steps = [(234, ["1  Read the request", "session, agent, task; diagnostic fields added"]),
              (318, ["2  Forward it (proxy only)", "the client's request and auth, as sent"]),
              (402, ["3  Fingerprint the prompt", "blocks in cache order, hashed: never the text"]),
-             (486, ["4  Name one cause", "against the previous turn; sub-reason; price"])]
+             (486, ["4  Name one cause", "against this thread's previous turn; sub-reason; price"])]
     for y, rows in steps:
-        b.append(box(t, cx, y, cw, 58, rows, accent=t["s1"] if y == 486 else None))
+        hero = y == 486
+        b.append(box(t, cx, y, cw, 58, rows, accent=r["blue"] if hero else None,
+                     fill=r["hero_fill"] if hero else None))
     for (y1, _), (y2, _) in zip(steps, steps[1:]):
         b.append(arrow(t, [(cx + cw / 2, y1 + 58), (cx + cw / 2, y2 - 2)]))
     # into step 1: the proxy, and the SDK wrappers (their call already happened: not forwarded)
     b.append(arrow(t, [(150, 170), (150, 252), (cx - 2, 252)]))
     b.append(arrow(t, [(359, 170), (359, 194), (222, 194), (222, 276), (cx - 2, 276)]))
-    b.append(arrow(t, [(581, 170), (581, 194), (222, 194)]))
+    b.append(arrow(t, [(581, 170), (581, 194), (359, 194)], head=False))  # joins the wrap line
     b.append(lines(214, 300, ["wrap / LiteLLM:", "already sent, so", "recorded, not forwarded"],
                    t["muted"], size=11.5, anchor="end", gap=15))
     # back to the agent: after step 4, so the verdict can ride in the headers
     b.append(arrow(t, [(cx - 2, 528), (60, 528), (60, 172)], dashed=True))
     b.append(lines(70, 470, ["response, unchanged,", "with the verdict in", "X-Prefixwise-* headers"],
                    t["muted"], size=11.5, anchor="start", gap=15))
-    # the provider or engine
-    b.append(box(t, 724, 315, 180, 64, ["Provider or engine", "Anthropic, OpenAI,", "vLLM, SGLang"]))
-    b.append(arrow(t, [(cx + cw, 334), (722, 334)], "request", 707, 328))
-    b.append(arrow(t, [(722, 362), (cx + cw + 2, 362)], "response", 707, 378))
-    b.append(box(t, 724, 486, 180, 58, ["KV-cache events", "vLLM / SGLang (optional)"], dashed=True))
-    b.append(arrow(t, [(722, 503), (cx + cw + 2, 503)], "evicted? which replica?", 812, 562))
+    # the provider or engine (spaced so the labels clear the boxes)
+    px = cx + cw + 54
+    b.append(box(t, px, 315, 160, 64, ["Provider or engine", "Anthropic, OpenAI,", "vLLM, SGLang"]))
+    b.append(arrow(t, [(cx + cw, 334), (px - 2, 334)]))
+    b.append(lines((cx + cw + px) / 2, 327, ["request"], t["muted"], size=11.5))
+    b.append(arrow(t, [(px - 2, 362), (cx + cw + 2, 362)]))
+    b.append(lines((cx + cw + px) / 2, 378, ["response"], t["muted"], size=11.5))
+    b.append(box(t, px, 486, 160, 58, ["KV-cache events", "vLLM / SGLang, optional"], dashed=True, size=12))
+    b.append(arrow(t, [(px - 2, 503), (cx + cw + 2, 503)]))
+    b.append(masked(t, px + 80, 563, "evicted? which replica?"))
+    # agent logs: their own rules (the logs hold usage and events, never the prompt)
+    b.append(box(t, 690, 584, 200, 64, ["Log rules", "what the log shows changed:", "model, compaction, TTL, ..."],
+                 size=12))
+    b.append(arrow(t, [(803, 170), (803, 194), (912, 194), (912, 616), (892, 616)]))
+    b.append(arrow(t, [(688, 616), (562, 616)]))
     # ledger
-    b.append(cylinder(t, 380, 584, 180, 64, ["Ledger", "SQLite, one row per request"]))
+    b.append(cylinder(t, 380, 584, 180, 64, ["Ledger", "SQLite, one row per request"], stroke=r["blue"],
+                      fill=r["hero_fill"]))
     b.append(arrow(t, [(cx + cw / 2, 544), (cx + cw / 2, 582)]))
-    b.append(arrow(t, [(803, 170), (803, 194), (912, 194), (912, 616), (562, 616)],
-                   "usage from the logs", 906, 604, anchor="end"))
     # ways out: live per request, and read from the ledger
     ow, gapx, oy = 168, 10, 718
     x0 = (W - (5 * ow + 4 * gapx)) / 2
@@ -145,40 +178,41 @@ def architecture(t: dict) -> str:
         b.append(box(t, x, oy, ow, 44, [name], size=12.5))
     mids = [x + ow / 2 for x in xs]
     bar = 672
-    # live: each row as it is recorded (from step 4)
     b.append(f'<path d="M300,546 V{bar} M{mids[0]},{bar} H{mids[1]}" fill="none" stroke="{t["ink2"]}" '
              f'stroke-width="1.4" stroke-dasharray="5 4"/>')
     for m in mids[:2]:
         b.append(arrow(t, [(m, bar), (m, oy - 2)], dashed=True))
     b.append(lines(292, 600, ["live, as each", "row is recorded"], t["muted"], size=11.5, anchor="end", gap=15))
-    # read from the ledger
     b.append(f'<path d="M{W / 2},650 V{bar} M{mids[2]},{bar} H{mids[4]}" fill="none" stroke="{t["ink2"]}" '
              f'stroke-width="1.4"/>')
     for m in mids[2:]:
         b.append(arrow(t, [(m, bar), (m, oy - 2)]))
-    b.append(lines(mids[3] + 10, bar - 8, ["read from the ledger"], t["muted"], size=11.5, anchor="start"))
+    b.append(masked(t, mids[3] + 10, bar - 6, "read from the ledger", anchor="start"))
     return svg(W, H, t, b, "How a request flows through Prefixwise: four ways in; read, forward (proxy only), "
-               "fingerprint and name one cause; the response back with the verdict in headers; one ledger row; "
-               "Prometheus and OpenTelemetry live, report, API and export from the ledger")
+               "fingerprint and name one cause; the response back with the verdict in headers; agent logs "
+               "through their own rules; one ledger row; Prometheus and OpenTelemetry live, report, API and "
+               "export from the ledger")
 
 
 # -- figure 2: how the cause is decided ------------------------------------------------------
 
 def decision(t: dict) -> str:
+    r = roles(t)
     W = 940
     b = [lines(W / 2, 34, ["How Prefixwise names a cache miss"], t["ink"], size=17, weight=600),
-         lines(W / 2, 56, ["Each request is compared with the previous one to the same model in the same session. "
+         lines(W / 2, 56, ["Each request is compared with the previous turn of its own conversation. "
                            "The first rule that fires wins."], t["muted"], size=12.5)]
     cx, dw, dh = 230, 330, 74
-    ox, ow = 470, 440  # outcome column
-    y = 82
-    b.append(box(t, cx - 165, y, 330, 46, ["A request and its response", "plus the previous turn"]))
+    ox, ow = 470, 440  # the verdict column
+    b.append(box(t, cx - 165, 82, 330, 46, ["A request and its response", "plus its thread's previous turn"]))
+    b.append(lines(ox + ow / 2, 110, ["VERDICT"], t["muted"], size=12, weight=600))
     rows = [
-        (["First turn? Another model?", "Previous turn too short to cache?"],
+        (["First turn, new conversation, fork,", "other model, or too short to cache?"],
          ["first_write · fork_boundary · model_switch", "below_min_prefix: nothing could be reused yet"]),
-        (["Did a part of the prompt change?", "(system, tools, messages, tool results)"],
-         ["The first changed part names it", "volatile_system · system_edit · tool_reserialize",
-          "tool_catalog_change · history_edit · tool_result_mutation", "compaction_rewrite"]),
+        (["Did a part of the prompt change?", "(tools, system, messages, tool results)"],
+         ["The first changed part names it", "tool_reserialize · tool_catalog_change · volatile_system",
+          "system_edit · history_edit · tool_result_mutation · compaction_rewrite",
+          "unless it had expired anyway (ttl_expired)", "or the cache still served it all (none)"]),
         (["A setting, the size or", "a cache breakpoint?"],
          ["param_rendered · below_min_prefix · breakpoint_misplaced"]),
         (["Was the prefix read", "from the cache?"], ["none: a hit"]),
@@ -190,29 +224,34 @@ def decision(t: dict) -> str:
         (["Longer gap than the", "cache keeps entries?"], ["ttl_expired", "the entry expired"]),
         (["Nothing read, and", "within that time?"], ["routing_miss"]),
     ]
-    y = 128 + 22
+    y = 150
     prev_bottom = 128
-    for q, outcome in rows:
+    for i, (q, outcome) in enumerate(rows):
         cy = y + dh / 2
-        b.append(arrow(t, [(cx, prev_bottom), (cx, cy - dh / 2 - 2)],
-                       "no" if prev_bottom != 128 else None, cx + 8, prev_bottom + 15, anchor="start"))
-        b.append(diamond(t, cx, cy, dw, dh, q))
+        b.append(arrow(t, [(cx, prev_bottom), (cx, cy - dh / 2 - 2)], "no" if i else None, cx + 8,
+                       prev_bottom + 15, anchor="start"))
+        b.append(diamond(t, cx, cy, dw, dh, q, stroke=r["slate"]))
         oh = 22 + 17 * len(outcome)
-        b.append(box(t, ox, cy - oh / 2, ow, oh, outcome, accent=t["s1"]))
+        hit = outcome == ["none: a hit"]
+        b.append(box(t, ox, cy - oh / 2, ow, oh, outcome, accent=r["hit"] if hit else r["blue"],
+                     fill=r["hit_fill"] if hit else r["verdict_fill"]))
         b.append(arrow(t, [(cx + dw / 2, cy), (ox - 2, cy)], "yes", cx + dw / 2 + 12, cy - 7, anchor="start"))
         prev_bottom = cy + dh / 2
         y += dh + 26
-    # the end
-    b.append(arrow(t, [(cx, prev_bottom), (cx, y - 2)], "no", cx + 8, prev_bottom + 15, anchor="start"))
-    b.append(box(t, cx - 165, y, 330, 52, ["unknown", "with the evidence that was missing: never a guess"]))
-    y += 52 + 24
-    # the after-steps
+    # nothing fired: unknown, in the verdict column with the others
+    uy = prev_bottom + 40
+    b.append(arrow(t, [(cx, prev_bottom), (cx, uy), (ox - 2, uy)], "no", cx + 8, prev_bottom + 15,
+                   anchor="start"))
+    b.append(box(t, ox, uy - 26, ow, 52, ["unknown", "with the evidence that was missing: never a guess"],
+                 accent=r["blue"], fill=r["verdict_fill"]))
+    y = uy + 26 + 34
     b.append(lines(W / 2, y + 6, ["Then, for every verdict: a sub-reason where the evidence allows, waste or expected,"],
                    t["muted"], size=12.5))
     b.append(lines(W / 2, y + 24, ["the avoidable tokens and their price, and one row in the ledger"],
                    t["muted"], size=12.5))
     H = int(y + 52)
-    return svg(W, H, t, b, "How Prefixwise names a cache miss: a flowchart of the classifier's rules, in order")
+    return svg(W, H, t, b, "How Prefixwise names a cache miss: a flowchart of the classifier's checks in order, "
+               "with every verdict, hits and unknown included, in one column")
 
 
 def main() -> None:
