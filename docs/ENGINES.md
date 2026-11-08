@@ -75,8 +75,12 @@ add little over inference.
    SGLang's includes host-tier hits. A prefix restored from host memory is a hit (`none`), never
    an eviction; when the GPU copies of blocks the read covered had been removed (`BlockRemoved`
    on the GPU medium), the hit carries the detail `host_restored`: served from a host or offload
-   tier without recomputing prefill. Removals on the offload tiers' own media are ignored. Only
-   with one cache: behind several, which cache served is unknown.
+   tier without recomputing prefill. Claimed only once the stream has shown the tier's own
+   stores (a `BlockStored` on a CPU or storage medium, so a tier exists) and, on vLLM, when no
+   other session stored a removed block while the request was in flight: another request
+   sharing the prefix that recomputed it, or a preempted request recomputing its own, would
+   look the same. Removals on the offload tiers' own media are ignored. Only with one cache:
+   behind several, which cache served is unknown.
 
 4. **`--kv-events` on SGLang** gives the same two verdicts, built differently because SGLang's
    events differ (section "SGLang").

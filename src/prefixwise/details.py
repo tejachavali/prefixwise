@@ -195,8 +195,9 @@ def detail_for(cause: str, prev: Facts | None, curr: Facts, *, prompt_tokens: in
 
     if cause == "none" and evicted_blocks and cached_tokens > 0:
         return None, "host_restored", (
-            f"served from a host or offload tier: {evicted_blocks} of the previous request's KV blocks had been "
-            f"removed from GPU memory (KV events), yet this request {read} without recomputing them")
+            f"restored from the host or offload tier: {evicted_blocks} of the previous request's KV blocks had "
+            f"been removed from GPU memory (KV events; the tier's own stores were seen), yet this request {read} "
+            "without recomputing them")
     gap = (curr.sent_at - prev.done_at) if prev is not None and curr.sent_at and prev.done_at else None
     anthropic = curr.provider == "anthropic"
 
