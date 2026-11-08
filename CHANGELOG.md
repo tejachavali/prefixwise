@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- **A request too short to cache is not waste, whatever changed in it:** a prompt below the provider's minimum cacheable prefix, with nothing read, is `below_min_prefix` even when its system prompt or history also changed (the change stays as a secondary cause). Before, only a previous request below the minimum was caught, so a prompt that shrank below it was priced as `volatile_system` or `history_edit` waste.
+- **Avoidable cost includes the cache-write surcharge:** a miss's avoidable tokens are priced at the rate the request actually paid for its uncached prompt tokens (on Anthropic usually the cache-write rate, 1.25x input for 5 minutes or 2x for 1 hour, as they are written again) minus the cache-read rate. Before, the plain input rate was used, which understated Anthropic waste: the true figure is about 26-28% higher for 5-minute writes and 2.0-2.1x for 1-hour writes (built-in Claude rates). Without the request's usage, the input rate is still used.
+- **5-minute or 1-hour cache:** `prefixwise report` (and `findings` in the API) says, per Anthropic model, whether the 1-hour cache would have paid on this ledger: the `ttl_expired` misses that came 5 to 60 minutes after the previous turn, what they wrote again (saved at most), against every write on that model at the 1-hour rate (the extra cost). Models without both write rates are left out.
+
 ## 0.7.0: 2026-11-08
 
 Sharper verdicts where agents actually run: parallel subagents in one session are each compared

@@ -265,6 +265,14 @@ def classify(prev: RequestSnapshot | None, curr: RequestSnapshot,
 
     secondary: list[MissCause] = []
     changed = _first_change(prev, curr, secondary, native_reason)
+    if (changed is not None and floor is not None and curr.usage_known
+            and 0 < curr.prompt_tokens < floor and curr.cached_tokens == 0):
+        # This request is itself too short to cache: no version of it could have been read
+        # from the cache, so the change it carries cost nothing (it stays in secondary).
+        return Classification(MissCause.BELOW_MIN_PREFIX, None,
+                              f"cacheable prefix {curr.prompt_tokens} below provider minimum {floor}; the "
+                              f"{changed.cause.value} in it cost nothing",
+                              secondary + [changed.cause], native_reason, score=False)
     if changed is not None:
         reusable = min(prev.prompt_tokens, curr.prompt_tokens) if prev.prompt_tokens else curr.prompt_tokens
         gap, ttl = curr.gap_seconds, curr.ttl_seconds

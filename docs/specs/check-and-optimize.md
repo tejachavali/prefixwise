@@ -46,7 +46,7 @@ FAIL tool_reserialize  scenario=refactor_task turn=3  first changed block: tools
 
 **Dollar projection** (an estimate, labelled as one): with `--baseline`,
 `affected share of turns in the run x production turns per month on that model x mean reusable
-prefix tokens per turn x (input price - cache-read price)`, from `pricing.py` and the ledger. Without
+prefix tokens per turn x (rate paid for those tokens on a miss, the cache-write rate where they are written again - cache-read price)`, from `pricing.py` and the ledger. Without
 a baseline, report tokens only. Never invent a price (the pricing rule).
 
 **Exit codes:** 0 pass, 2 a gated cause found (not in `--allow`), 1 the run itself failed.

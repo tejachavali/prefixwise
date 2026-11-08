@@ -10,6 +10,10 @@ from __future__ import annotations
 
 from . import metrics
 from .fixes import FIX_ADVICE, FIX_STATUS
+from .pricing import PriceTable
+
+# Anthropic cache lifetimes, seconds: the default, and the 1-hour option (cache_control ttl "1h").
+TTL_5M, TTL_1H = 300.0, 3600.0
 
 # One sentence per cause: what happened, in words that do not need the docs.
 CAUSE_PLAIN = {
@@ -57,6 +61,53 @@ def _details(ledger, cause: str, window: dict) -> list[dict]:
                   key=lambda d: -d["requests"])
 
 
+def ttl_advice(ledger, since: float | None = None, until: float | None = None,
+               prices: PriceTable | None = None) -> list[dict]:
+    """Per Anthropic model: would the 1-hour cache have paid on this ledger?
+
+    It keeps the ttl_expired misses that came 5-60 minutes after the previous turn (minus those
+    that already asked for 1 hour: ttl_shortened). Saved at most: what those misses wrote again
+    at the 5-minute rate, read instead. Costs: every write on that model at the 1-hour rate
+    instead of the 5-minute one. Both from the ledger and the price table; a model without
+    both write rates is left out (never a guessed price)."""
+    if prices is None:
+        try:
+            prices = PriceTable.load()
+        except (OSError, ValueError):
+            return []
+    clauses, args = ["provider = 'anthropic'", "cause IS NOT NULL"], []
+    if since is not None:
+        clauses.append("recorded_at >= ?")
+        args.append(since)
+    if until is not None:
+        clauses.append("recorded_at < ?")
+        args.append(until)
+    sql = (f"""SELECT model,
+                 SUM(COALESCE(cache_write_tokens, 0)),
+                 SUM(CASE WHEN {_KEPT_BY_1H} THEN 1 ELSE 0 END),
+                 SUM(CASE WHEN {_KEPT_BY_1H} THEN COALESCE(cache_write_tokens, 0) ELSE 0 END)
+               FROM entries WHERE {" AND ".join(clauses)} GROUP BY model""")
+    out = []
+    with ledger.reader() as conn:
+        rows = conn.execute(sql, args).fetchall()
+    for model, writes, misses, rewritten in rows:
+        if not misses:
+            continue
+        r = prices.rates_for(model) or {}
+        w5, w1, read = r.get("cache_write_5m"), r.get("cache_write_1h"), r.get("cache_read")
+        if not all(isinstance(x, (int, float)) for x in (w5, w1, read)):
+            continue
+        saved = rewritten * (w5 - read) / 1e6
+        extra = writes * (w1 - w5) / 1e6
+        out.append({"model": model, "misses": misses, "saved_at_most_usd": round(saved, 6),
+                    "extra_write_cost_usd": round(extra, 6), "pays": saved > extra})
+    return sorted(out, key=lambda a: -(a["saved_at_most_usd"] - a["extra_write_cost_usd"]))
+
+
+_KEPT_BY_1H = (f"cause = 'ttl_expired' AND gap_seconds > {TTL_5M:.0f} AND gap_seconds <= {TTL_1H:.0f} "
+               "AND COALESCE(detail, '') != 'ttl_shortened'")
+
+
 def findings(ledger, since: float | None = None, until: float | None = None) -> dict:
     """The facts a person needs, for the whole ledger or a time window."""
     window = {"since": since, "until": until}
@@ -92,7 +143,8 @@ def findings(ledger, since: float | None = None, until: float | None = None) -> 
             "waste": waste, "expected": expected, "unexplained": unexplained,
             "rejected_credentials": sum(x["requests_failed"] or 0 for x in statuses if x["status"] in (401, 403)),
             "failures": [{"error": e["error"], "requests": e["requests_failed"]}
-                         for e in errors if e["error"] and e["requests_failed"]]}
+                         for e in errors if e["error"] and e["requests_failed"]],
+            "ttl": ttl_advice(ledger, **window)}
 
 
 def _usd(x) -> str:
@@ -161,6 +213,17 @@ def render(f: dict, command: str = "serve") -> str:
         for e in f["expected"]:
             for d in e.get("details") or []:
                 lines.append(f"  {d['requests']} x {e['what'].split(':')[0]}: {d['what']}.")
+    for t in f.get("ttl") or []:
+        n = t["misses"]
+        head = (f"{n} {t['model']} request{'s' if n != 1 else ''} missed because the 5-minute cache had expired, "
+                "within the hour: a 1-hour cache (cache_control ttl \"1h\") would have kept "
+                f"{'them' if n != 1 else 'it'}. ")
+        if t["pays"]:
+            lines.append(head + f"It would save at most {_usd(t['saved_at_most_usd'])} and cost "
+                         f"{_usd(t['extra_write_cost_usd'])} more in cache writes: worth trying.")
+        else:
+            lines.append(head + f"But it would cost {_usd(t['extra_write_cost_usd'])} more in cache writes and "
+                         f"save at most {_usd(t['saved_at_most_usd'])}: keep the 5-minute cache.")
     if f["failures"]:
         parts = [f"{x['requests']} x {x['error']}" for x in f["failures"]]
         lines.append("Failed requests (no verdict): " + ", ".join(parts) + ".")

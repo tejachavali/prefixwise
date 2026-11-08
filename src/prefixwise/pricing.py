@@ -18,8 +18,10 @@ Rates are USD per 1M tokens. Per model:
 
 Request cost = uncached input x input + cache reads x cache_read
              + cache writes x their rate + output x output.
-Avoidable cost = avoidable tokens x (input - cache_read): what those tokens
-cost as uncached input rather than as cache reads.
+Avoidable cost = avoidable tokens x (paid - cache_read), where paid is the rate this request
+was billed for its prompt tokens not read from the cache: on a miss those tokens are written to
+the cache again (Anthropic: 1.25x input for 5 minutes, 2x for 1 hour) or sent uncached, and a hit
+would have read them. Without the request's usage, paid is the input rate.
 """
 
 from __future__ import annotations
@@ -153,16 +155,37 @@ class PriceTable:
             total += tokens * rate / 1e6
         return round(total, 8)
 
-    def avoidable_cost(self, model: str, avoidable_tokens: int, prompt_tokens: int) -> float | None:
+    def avoidable_cost(self, model: str, avoidable_tokens: int, prompt_tokens: int,
+                       provider: str | None = None, usage: dict | None = None) -> float | None:
         if not avoidable_tokens:
             return 0.0 if self.rates_for(model) else None
         rates = self.rates_for(model)
         if rates is None:
             return None
         r = self._tier(rates, prompt_tokens)
-        if not isinstance(r.get("input"), (int, float)) or not isinstance(r.get("cache_read"), (int, float)):
+        read = r.get("cache_read")
+        if not isinstance(r.get("input"), (int, float)) or not isinstance(read, (int, float)):
             return None
-        return round(avoidable_tokens * (r["input"] - r["cache_read"]) / 1e6, 8)
+        paid = self._paid_rate(r, breakdown(provider, usage)) if provider and usage else None
+        return round(avoidable_tokens * ((r["input"] if paid is None else paid) - read) / 1e6, 8)
+
+    @staticmethod
+    def _paid_rate(r: dict, b: Breakdown) -> float | None:
+        """USD per 1M tokens this request paid for the prompt tokens it did not read from the
+        cache (uncached input and cache writes, at their own rates); None if it read them all or
+        a rate is unknown."""
+        parts = [(b.uncached_input, r.get("input")), (b.cache_write_5m, r.get("cache_write_5m", r.get("cache_write"))),
+                 (b.cache_write_1h, r.get("cache_write_1h")), (b.cache_write, r.get("cache_write"))]
+        tokens = cost = 0
+        for n, rate in parts:
+            if not n:
+                continue
+            if rate == "input":
+                rate = r.get("input")
+            if not isinstance(rate, (int, float)):
+                return None
+            tokens, cost = tokens + n, cost + n * rate
+        return cost / tokens if tokens else None
 
 
 def _validate(name: str, rates: object, path: str) -> None:

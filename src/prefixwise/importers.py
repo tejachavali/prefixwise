@@ -292,7 +292,7 @@ def import_claude_code(root: str | os.PathLike | None = None, ledger: Ledger | N
                     cache_write_tokens=parts.cache_write_5m + parts.cache_write_1h + parts.cache_write,
                     gap_seconds=gap, evidence=f"from the log: {why}", detail=detail, native_reason=r.native,
                     classifier_version="log-2")
-                entry.avoidable_cost = prices.avoidable_cost(r.model, avoidable, prompt)
+                entry.avoidable_cost = prices.avoidable_cost(r.model, avoidable, prompt, "anthropic", u)
                 if entry.cost is not None:
                     entry.price_as_of = prices.as_of
                 ledger.record(entry, at=r.done)
