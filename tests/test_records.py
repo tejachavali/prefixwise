@@ -71,7 +71,7 @@ def test_round_trip_through_the_wire_gives_the_same_rows():
     for d in wire:
         again.ingest(TurnRecord.from_dict(d))
     assert _rows(again.ledger) == _rows(direct.ledger)
-    assert _rows(again.ledger)[1][0] == "volatile_system"
+    assert _rows(again.ledger)[1][9] == "volatile_system"  # the cause column
 
 
 def test_the_collector_refuses_what_it_cannot_read():
