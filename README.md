@@ -347,10 +347,11 @@ Found a vulnerability? See [SECURITY.md](SECURITY.md).
 
 Step-by-step guides, with what each verdict means and the live numbers: **[docs/VLLM.md](docs/VLLM.md)** (vLLM, KV events, several caches), **[docs/LMCACHE.md](docs/LMCACHE.md)** (vLLM with an offload tier: which hits LMCache rescued, which misses were the agent's), **[docs/SGLANG.md](docs/SGLANG.md)** (SGLang, HiCache, data-parallel ranks).
 
-Prefixwise reads the engine's `cached_tokens` like any provider's: start vLLM with `--enable-prompt-tokens-details`, SGLang with `--enable-cache-report`. Tell it there is one self-hosted engine behind it:
+Prefixwise reads the engine's `cached_tokens` like any provider's: start vLLM with `--enable-prompt-tokens-details`, SGLang with `--enable-cache-report`. It recognises the engine behind `--upstream` at startup (vLLM's `/version`, SGLang's `/server_info`) and, when the engine publishes KV events, subscribes to them (`--kv-events auto`); `--engine` and `--kv-events` are the explicit form:
 
 ```bash
-prefixwise serve --upstream http://127.0.0.1:8000 --engine vllm      # or --engine sglang
+prefixwise serve --upstream http://127.0.0.1:8000                    # detected: vLLM or SGLang, KV events if published
+prefixwise serve --upstream http://127.0.0.1:8000 --engine vllm      # or --engine sglang, said explicitly
 ```
 
 One engine means one cache and no routing, so a request whose prefix is unchanged but was not reused is named `evicted` (the engine ran out of GPU memory). That verdict is **inferred**, and the evidence says so: a chat template that renders history differently, or data-parallel routing, looks the same.

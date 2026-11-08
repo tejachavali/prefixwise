@@ -19,11 +19,18 @@ pip install "prefixwise[engines]"          # Python 3.10+; the extra adds pyzmq 
 vllm serve <model> --enable-prefix-caching --enable-prompt-tokens-details \
   --kv-events-config '{"enable_kv_cache_events": true, "publisher": "zmq", "endpoint": "tcp://*:5557"}'
 
-prefixwise serve --upstream http://127.0.0.1:8000 --engine vllm --kv-events tcp://127.0.0.1:5557
+prefixwise serve --upstream http://127.0.0.1:8000          # detects vLLM and its KV events
 ```
 
 Point your client at `http://127.0.0.1:8080/v1` instead of the engine, run your workload,
 then `prefixwise report`.
+
+`prefixwise serve --upstream URL` asks the upstream what it is at startup (`GET /version`,
+then `/kv_event_sources`): a vLLM server sets `--engine vllm`, and one that publishes KV
+events sets `--kv-events auto` (every data-parallel rank) when the engines extra is installed.
+It prints what it detected, and any flag you pass wins: `--engine vllm --kv-events
+tcp://127.0.0.1:5557` is the explicit form of the same thing. A hosted API or a gateway detects as
+no engine.
 
 - `--enable-prompt-tokens-details` is required: without it vLLM does not report cached
   tokens and every request looks like a miss (Prefixwise warns once).
