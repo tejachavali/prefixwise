@@ -58,6 +58,7 @@ class Sender:
                        "retries": 0, "failed_batches": 0, "last_error": None}
         self._in_flight = 0  # records taken from the queue, not yet delivered or dropped
         self._abandoned = False  # close() gave up waiting: what was left is already counted dropped
+        self._closed = False
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._warned: set[str] = set()  # each kind of trouble is printed once
@@ -68,7 +69,12 @@ class Sender:
     # -- the edge's side -------------------------------------------------------------------
 
     def send(self, record: dict) -> bool:
-        """Queue one record; False (and a count) if the queue is full. Never blocks, never raises."""
+        """Queue one record; False (and a count) if the queue is full or the sender is closed. Never
+        blocks, never raises."""
+        if self._stop.is_set():
+            with self._lock:
+                self._stats["dropped"] += 1
+            return False
         try:
             self._queue.put_nowait(record)
         except queue.Full:
@@ -86,7 +92,11 @@ class Sender:
 
     def close(self, timeout: float = 5.0) -> None:
         """Send what is queued (up to `timeout` seconds), then stop. What could not be sent in
-        time is counted as dropped."""
+        time is counted as dropped, once: a second close (an explicit one, then atexit) is a no-op."""
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
         self._stop.set()
         self._thread.join(timeout)
         with self._lock:
@@ -129,12 +139,11 @@ class Sender:
         with self._lock:
             self._in_flight = 1
         deadline = time.monotonic() + self.flush_seconds
-        while len(batch) < self.batch_size and not self._stop.is_set():  # stopping: send what is in hand
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                break
+        while len(batch) < self.batch_size:
+            # Stopping: take what is already queued (full batches), but do not wait for more.
+            remaining = 0.0 if self._stop.is_set() else deadline - time.monotonic()
             try:
-                batch.append(self._queue.get(timeout=remaining))
+                batch.append(self._queue.get(timeout=remaining) if remaining > 0 else self._queue.get_nowait())
             except queue.Empty:
                 break
             with self._lock:
@@ -160,6 +169,7 @@ class Sender:
                 reply = reply if isinstance(reply, dict) else {}
                 rejected = reply.get("rejected") if isinstance(reply.get("rejected"), list) else []
                 with self._lock:
+                    self._in_flight = 0
                     if self._abandoned:
                         return  # counted as dropped at close; delivered after all, but not twice in the stats
                     self._stats["sent"] += len(batch) - len(rejected)
@@ -191,6 +201,7 @@ class Sender:
 
     def _drop(self, batch: list[dict], why: str, failed: bool = False) -> None:
         with self._lock:
+            self._in_flight = 0
             if self._abandoned:
                 return  # already counted at close
             self._stats["dropped"] += len(batch)

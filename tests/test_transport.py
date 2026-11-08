@@ -369,3 +369,27 @@ def test_a_small_clock_skew_is_not_concurrency():
     c.ingest(rec("a", 100.0, 105.0))
     _, e = c.ingest(rec("b", 104.5, 106.0))  # half a second "before": another edge's clock
     assert e.cause != "unknown" and c.stats["concurrent"] == 0
+
+
+def test_a_stopping_sender_still_sends_full_batches():
+    # Review: the stop path once sent one record per POST, so a drain budget delivered a tenth.
+    odd = _Odd([])  # answers every POST with 200 {"accepted": 1}
+    s = Sender(odd.url, batch_size=200, flush_seconds=5.0)  # a long flush: only stopping ends the batch
+    try:
+        for i in range(50):
+            s.send({"request_id": f"r{i}"})
+        s.close(timeout=3.0)
+        assert s.stats()["sent"] == 50 and odd.hits <= 2  # one batch, maybe two, not fifty
+    finally:
+        odd.srv.shutdown()
+
+
+def test_close_counts_what_is_left_once_and_send_after_close_is_a_drop():
+    s = Sender("http://127.0.0.1:1", queue_size=100, max_attempts=1, timeout=5.0)  # a slow failure
+    for i in range(10):
+        s.send({"request_id": f"r{i}"})
+    s.close(timeout=0.05)
+    first = s.stats()["dropped"] + s.stats()["sent"]
+    s.close(timeout=0.05)  # atexit after an explicit close
+    assert first == 10 and s.stats()["dropped"] + s.stats()["sent"] == 10
+    assert s.send({"request_id": "late"}) is False and s.stats()["dropped"] + s.stats()["sent"] == 11
