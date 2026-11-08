@@ -162,6 +162,14 @@ def post(proxy, path: str, body) -> tuple[int, dict]:
             return 200, collector.ingest_many(body.get("records"))
         except RecordError as exc:
             return 400, _err(str(exc))
+    if sub == "/check/scenario":  # prefixwise check: name the scenario requests without a session id join
+        if not getattr(proxy, "check_mode", False):
+            return 404, _err("scenarios are named only under prefixwise check")
+        name = body.get("name")
+        if not isinstance(name, str) or not name.strip() or len(name) > 200:
+            return 400, _err('expected {"name": "<scenario, up to 200 characters>"}')
+        proxy.default_session = name.strip()
+        return 200, {"ok": True, "scenario": proxy.default_session}
     if sub == "/explain":
         from .explain import Turn, explain_pair
 

@@ -80,6 +80,11 @@ Turn records from an edge (`prefixwise.transport`; see `docs/specs/hyperscale.md
 `{"previous": <request body>, "current": <request body>, "current_usage": {...}?}`: why would
 (or did) the cache miss between two requests? The same classifier as the proxy, offline.
 
+### `POST /api/v1/check/scenario`
+`{"name": "<scenario>"}`: under `prefixwise check` only (404 otherwise), names the scenario that
+requests without a session id of their own are recorded under from now on. The bundled pytest plugin
+posts each test's node id here.
+
 ## Raw data
 
 `prefixwise export [--format jsonl|csv] [--since 7d] [--where session=s1] [-o FILE]` writes

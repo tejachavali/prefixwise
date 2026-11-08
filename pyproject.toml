@@ -34,6 +34,9 @@ Issues = "https://github.com/tejachavali/prefixwise/issues"
 prefixwise = "prefixwise.cli:main"
 prefixwise-proxy = "prefixwise.proxy:serve"
 
+[project.entry-points.pytest11]
+prefixwise = "prefixwise.pytest_plugin"  # names each test to `prefixwise check`; inert otherwise
+
 [project.optional-dependencies]
 engines = ["pyzmq>=25", "msgspec>=0.18"]
 otel = ["opentelemetry-sdk>=1.30", "opentelemetry-exporter-otlp-proto-http>=1.30"]

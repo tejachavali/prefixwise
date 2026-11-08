@@ -194,7 +194,8 @@ sequenceDiagram
 | `sdk.py` | `Recorder`, `wrap`, `session` |
 | `litellm_callback.py` | `PrefixwiseCallback`: classifies the body LiteLLM actually sent |
 | `importers.py` | Claude Code and Codex log import |
-| `cli.py` | `serve`, `run`, `report`, `import`, `explain`, `export`, `task`, `fixes`, `prices`, `prune`, `request` |
+| `check.py`, `pytest_plugin.py` | `prefixwise check`: the CI gate (findings, allow-list, baseline, projection); the plugin that names each test as a scenario |
+| `cli.py` | `serve`, `collect`, `run`, `check`, `report`, `import`, `explain`, `export`, `task`, `fixes`, `prices`, `prune`, `request` |
 
 ## How a cause is decided
 

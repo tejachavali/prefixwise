@@ -75,6 +75,7 @@ Ways in, each about thirty seconds; all write the same ledger and the same repor
 | Your own Python code | `client = prefixwise.wrap(Anthropic())` (or OpenAI) | unchanged: calls go straight to the provider |
 | LiteLLM (SDK or proxy server) | `litellm.callbacks = [PrefixwiseCallback()]` | unchanged |
 | Claude Code or Codex on a subscription (no API key) | `prefixwise import claude-code` / `prefixwise import codex` | nothing is sent anywhere: reads the local logs |
+| Your CI | `prefixwise check -- pytest tests/agent_scenarios` (or the GitHub Action) | nothing is sent anywhere: a local mock answers |
 
 In every case Prefixwise stores hashes and counts, never the prompt.
 
@@ -124,6 +125,20 @@ It reports the same way, plus a line per agent (the main conversation, each suba
 **Codex, signed in with ChatGPT?** The same, from Codex's own logs: `prefixwise import codex` (reads `~/.codex`). It names a model switch, a compaction, or a changed tool catalog; OpenAI's cache lifetime is not a fixed number, so other misses stay `unknown`. Checked on real Codex 0.167 logs.
 
 Ctrl-C goes to the agent as usual. If you already set `ANTHROPIC_BASE_URL` or `OPENAI_BASE_URL` (a gateway), Prefixwise forwards there, so the agent reaches the same place. It works with agents that use an **API key**; an agent signed in with a subscription instead cannot be routed through a proxy, and the report says so if the provider rejects it. **Codex** ignores `OPENAI_BASE_URL`, so `prefixwise run -- codex ...` adds `-c` settings that point it at the proxy as a custom provider (plain HTTP, the key from `OPENAI_API_KEY`, no sign-in screen, nothing written to `~/.codex`).
+
+### Gate it in CI
+
+```bash
+prefixwise check -- pytest tests/agent_scenarios      # exit 2 on a cache regression, 0 otherwise, 1 if the command fails
+```
+
+The costly regressions are code changes that pass every functional test: a tool list built from a set (its order drifts), a timestamp added to the system prompt, a `cache_control` marker moved or dropped, an earlier tool result re-rendered. `prefixwise check` runs your agent's scenarios against a local mock provider (no API calls, nothing leaves the machine), compares each turn with its conversation's previous turn exactly as in production, and fails on `tool_reserialize`, `volatile_system`, `breakpoint_misplaced` and `tool_result_mutation` (`--strict` adds `history_edit`, `system_edit`, `param_rendered`; `--fail-on` names any set). The mock answers a turn that offers tools with a tool call (placeholder arguments the agent must accept; `tool_choice` honoured; never two in a row, so no loop), so an agent's loop runs a second turn, the one the gate judges; it holds each conversation's first response for a second so a per-second timestamp changes between turns, and warns about a date or time it sees in a system prompt that did not change within the run. Under pytest, each test's node id is the scenario name (a bundled plugin), so a finding reads `scenario=tests/test_agent.py::test_refactor`, and `--allow FILE` passes known findings by (scenario, cause, first changed block) while you fix them. With a baseline from production (`prefixwise export --baseline`, read from `.prefixwise-baseline.json`), each finding gets a monthly projection, labelled as the estimate it is; without one, tokens. `--bodies FILE...` judges saved request bodies instead (`prefixwise explain`'s format). As a GitHub Action:
+
+```yaml
+- uses: tejachavali/prefixwise@v0.9
+  with:
+    command: pytest tests/agent_scenarios
+```
 
 ### Running the proxy yourself
 
@@ -279,6 +294,7 @@ Each detail is claimed only when all of its conditions hold; otherwise there is 
 |---|---|
 | `prefixwise serve [--upstream URL] [--mock] [--fix canonical_tools] [--engine vllm\|sglang] [--kv-events ENDPOINT] [--host H] [--port P] [--ledger FILE]` | Run the proxy. `--engine`/`--kv-events`: see Self-hosted engines. Ledger defaults to `./prefixwise.db`. `--fix` applies an opt-in, reversible rewrite to every request (see below). |
 | `prefixwise run [--mock] [--fix NAME] -- <agent>` | Run an agent through Prefixwise and report on that run when it exits. |
+| `prefixwise check [--fail-on CAUSES] [--strict] [--allow FILE] [--baseline FILE] [--json] -- <command>` / `check --bodies FILE...` | CI gate: run the agent's scenarios through a local mock and exit 2 on a cache regression that is a code bug (tool order, a timestamp in the system prompt, a dropped breakpoint, a mutated tool result). `prefixwise export --baseline` writes the production baseline for its monthly projection. |
 | `prefixwise prices [--json]` | The dated price table behind dollar costs, and where each rate came from. |
 | `prefixwise prune --older-than 30d` | Delete ledger entries older than that (retention). Add `--include-undated` to also drop rows written before 0.3.1. |
 | `prefixwise export [--format jsonl\|csv] [--since 7d] [--where session=s1]` | Every ledger row (facts, never prompt text) for a spreadsheet, notebook or warehouse. |
