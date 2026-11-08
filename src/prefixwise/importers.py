@@ -269,7 +269,8 @@ def import_claude_code(root: str | os.PathLike | None = None, ledger: Ledger | N
                 write = _int(u.get("cache_creation_input_tokens"))
                 prompt = _int(u.get("input_tokens")) + read + write
                 cause, legit, why, detail = _classify(prev, prev_ttl, r, prompt, read, prev_prompt, subagent)
-                judged_ttl = prev_ttl
+                # This request's own cache lifetime: what its write was granted, else what it asked for.
+                own_ttl = _granted_ttl(u) or {"1h": 3600.0, "5m": 300.0}.get(r.ttl_requested or "")
                 gap = (r.sent or r.done) - prev.done if prev is not None else None
                 avoidable = avoidable_for_turn(legit, prompt, read, prev_prompt)
                 prev, prev_prompt = r, prompt
@@ -292,7 +293,7 @@ def import_claude_code(root: str | os.PathLike | None = None, ledger: Ledger | N
                     uncached_tokens=parts.uncached_input,
                     cache_write_tokens=parts.cache_write_5m + parts.cache_write_1h + parts.cache_write,
                     gap_seconds=gap, evidence=f"from the log: {why}", detail=detail, native_reason=r.native,
-                    cache_ttl_seconds=judged_ttl,
+                    cache_ttl_seconds=own_ttl,
                     classifier_version="log-2")
                 entry.avoidable_cost = prices.avoidable_cost(r.model, avoidable, prompt, "anthropic", u)
                 if entry.cost is not None:

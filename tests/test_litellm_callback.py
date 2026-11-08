@@ -289,4 +289,52 @@ def test_a_failed_or_lost_call_does_not_hold_the_session():
     t0 = time.monotonic()
     c.log_success_event(_kw("ok", msgs), _resp(1800, 0), None, None)
     assert time.monotonic() - t0 < 1 and [r[4] for r in rows(c, 1)] == ["first_write"]
-    assert c._sent == {}  # nothing left behind
+    assert c._turns == {} and not c._key  # nothing left behind
+
+
+def test_streams_and_other_conversations_never_hold_a_turn():
+    # Review: a stream may never send a success callback; parallel subagents need no order.
+    c = PrefixwiseCallback(recorder=Recorder(":memory:"))
+    msgs = [{"role": "system", "content": SYSTEM}, {"role": "user", "content": "hi"}]
+    other = [{"role": "system", "content": SYSTEM}, {"role": "user", "content": "another task"}]
+    c.log_pre_api_call("gpt-5.6", msgs, {**_kw("stream", msgs), "stream": True})
+    c.log_pre_api_call("gpt-5.6", other, _kw("subagent", other))  # in flight, never completes here
+    c.log_pre_api_call("gpt-5.6", msgs, _kw("turn", msgs))
+    t0 = time.monotonic()
+    c.log_success_event(_kw("turn", msgs), _resp(1800, 0), None, None)
+    assert time.monotonic() - t0 < 0.5 and len(rows(c, 1)) == 1
+
+
+def test_abandoned_calls_are_forgotten_and_tracking_is_capped(monkeypatch):
+    import prefixwise.litellm_callback as mod
+
+    c = PrefixwiseCallback(recorder=Recorder(":memory:"))
+    msgs = [{"role": "user", "content": "hi"}]
+    clock = [1000.0]
+    monkeypatch.setattr(mod.time, "monotonic", lambda: clock[0])
+    for i in range(50):  # one-call sessions whose callback never came
+        c.log_pre_api_call("gpt-5.6", msgs, {**_kw(f"lost{i}", msgs),
+                                             "litellm_params": {"litellm_session_id": f"s{i}"}})
+    clock[0] += 2 * mod.ORDER_WAIT_SECONDS + 1
+    c.log_pre_api_call("gpt-5.6", msgs, _kw("fresh", msgs))
+    assert list(c._key) == ["fresh"] and len(c._turns) == 1
+    monkeypatch.setattr(mod, "ORDER_MAX_CALLS", 10)
+    for i in range(30):
+        c.log_pre_api_call("gpt-5.6", msgs, {**_kw(f"x{i}", msgs), "litellm_params": {"litellm_session_id": f"y{i}"}})
+    assert len(c._key) <= 10
+
+
+def test_a_cancelled_async_callback_releases_its_turn():
+    c = PrefixwiseCallback(recorder=Recorder(":memory:"))
+    msgs = [{"role": "user", "content": "hi"}]
+    c.log_pre_api_call("gpt-5.6", msgs, _kw("a", msgs))
+    c.log_pre_api_call("gpt-5.6", msgs, _kw("b", msgs))
+
+    async def go():
+        waiting = asyncio.ensure_future(c.async_log_success_event(_kw("b", msgs), _resp(1800, 0), None, None))
+        await asyncio.sleep(0.05)  # b waits for a
+        waiting.cancel()  # LiteLLM's logging worker cancels slow callbacks
+        with pytest.raises(asyncio.CancelledError):
+            await waiting
+    asyncio.run(go())
+    assert "b" not in c._key and "a" in c._key

@@ -49,7 +49,7 @@ Added (observed today, previously dropped):
 | `evidence`, `secondary_causes` | why the verdict was given, in Prefixwise's own words |
 | `divergence_role`, `divergence_index` | where the prompt first changed (system, tools, messages, ...) |
 | `schema_version` | rows say which schema wrote them |
-| `cache_ttl_seconds` (schema 5) | the cache lifetime the turn was judged against (Anthropic 300 or 3,600; the `X-Prefixwise-Cache-Ttl` header; empty when unknown): what the 5-minute vs 1-hour advice reads |
+| `cache_ttl_seconds` (schema 5) | the request's own cache lifetime: what its write was granted, or asked for (Anthropic 300 or 3,600; the `X-Prefixwise-Cache-Ttl` header; empty when unknown): what the 5-minute vs 1-hour advice reads |
 | `detail` (schema 4) | the why behind the cause, where the evidence allows: `ttl_shortened`, `lookback_exceeded`, `markers_ignored`, `sent_before_cache_written`, `shared_prefix_not_reused`, `thinking_stripped`, `cache_key_changed` (`prefixwise.details`); a dimension and filter in `/api/v1` |
 
 ## Metrics (v1 catalog)

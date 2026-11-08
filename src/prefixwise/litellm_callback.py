@@ -26,9 +26,12 @@ OpenAI-compatible. Like the proxy, only hashes of the prompt are stored, never i
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import sys
 import threading
 import time
+from collections import OrderedDict
 
 from .otel import provider_name
 from .sdk import Recorder
@@ -38,11 +41,13 @@ try:  # subclass LiteLLM's base when it is installed; plain object otherwise (te
 except Exception:  # noqa: BLE001 - litellm absent or broken: the callback is still importable
     _Base = object
 
-# LiteLLM runs sync success callbacks on a pool of threads, so one session's calls can reach the
-# callback out of order, and a turn compared with the turn after it reads as rewritten history.
-# Calls are recorded in the order they were sent (the pre-call hook runs on the caller's thread,
-# in send order); a call waits at most this long for the session's earlier calls.
-ORDER_WAIT_SECONDS = 5.0
+# LiteLLM runs sync success callbacks on a pool of threads, so a conversation's turns can reach
+# the callback out of order, and a turn compared with the turn after it reads as rewritten history.
+# Turns of one conversation are sequential (the next is sent after the previous answer), so the
+# previous turn's callback is due when the next one's arrives: each turn waits at most this long
+# for earlier turns of its own conversation, never for other conversations or streams.
+ORDER_WAIT_SECONDS = 2.0
+ORDER_MAX_CALLS = 10_000  # calls tracked at once; past this the oldest are dropped
 _REDACTED = "redacted-by-litellm"  # what LiteLLM logs in place of messages with logging turned off
 
 
@@ -64,6 +69,20 @@ def _session_of(kwargs) -> str | None:
     params = kwargs.get("litellm_params") or {}
     meta = params.get("metadata") or {}
     return params.get("litellm_session_id") or meta.get("session_id") or kwargs.get("user")
+
+
+def _conversation(model, messages, kwargs) -> tuple | None:
+    """(session, model, opening message): the turns that must be recorded in order. None when
+    the call is not recorded (streams, other call types) or has no session."""
+    if kwargs.get("stream") or kwargs.get("call_type") not in (None, "completion", "acompletion"):
+        return None
+    session = _session_of(kwargs)
+    if not session:
+        return None
+    opening = next((m.get("content") for m in messages or [] if isinstance(m, dict)
+                    and m.get("role") not in ("system", "developer")), None)
+    digest = hashlib.sha256(json.dumps(opening, sort_keys=True, default=str).encode()).hexdigest()
+    return session, str(model), digest
 
 
 def _is_anthropic_body(body) -> bool:
@@ -106,30 +125,40 @@ class PrefixwiseCallback(_Base):
         self.recorder = recorder or Recorder(ledger_path, agent_id=agent_id)
         self._warned = False
         self._warned_redacted = False
-        self._sent: dict = {}  # session -> {call id: send time}, in send order
+        self._turns: dict = {}  # conversation -> OrderedDict(call id -> send time), in send order
+        self._key: OrderedDict = OrderedDict()  # call id -> (conversation, send time), oldest first
         self._order = threading.Condition()
 
     # LiteLLM calls these with keyword arguments: the parameter names must be exactly these.
     def log_pre_api_call(self, model, messages, kwargs):
-        session, call = _session_of(kwargs), kwargs.get("litellm_call_id")
-        if session and call:
-            with self._order:
-                self._sent.setdefault(session, {})[call] = time.monotonic()
+        key, call = _conversation(model, messages, kwargs), kwargs.get("litellm_call_id")
+        if key is None or not call:
+            return
+        now = time.monotonic()
+        with self._order:
+            self._sweep(now)
+            self._turns.setdefault(key, OrderedDict())[call] = now
+            self._key[call] = (key, now)
 
     def log_success_event(self, kwargs, response_obj, start_time, end_time):
-        with self._order:
-            self._order.wait_for(lambda: self._first(kwargs), timeout=ORDER_WAIT_SECONDS)
-        self._settled(kwargs, response_obj, start_time, end_time)
+        try:
+            with self._order:
+                self._order.wait_for(lambda: self._first(kwargs), timeout=ORDER_WAIT_SECONDS)
+            self._record(kwargs, response_obj, start_time, end_time)
+        finally:
+            self._done(kwargs)
 
     async def async_log_success_event(self, kwargs, response_obj, start_time, end_time):
-        # On the event loop: wait without blocking it (the earlier call may be logged by it).
-        deadline = time.monotonic() + ORDER_WAIT_SECONDS
-        while time.monotonic() < deadline:
-            with self._order:
-                if self._first(kwargs):
-                    break
-            await asyncio.sleep(0.005)
-        self._settled(kwargs, response_obj, start_time, end_time)
+        try:  # on the event loop: wait without blocking it (the earlier turn may be logged by it)
+            deadline = time.monotonic() + ORDER_WAIT_SECONDS
+            while time.monotonic() < deadline:
+                with self._order:
+                    if self._first(kwargs):
+                        break
+                await asyncio.sleep(0.01)
+            self._record(kwargs, response_obj, start_time, end_time)
+        finally:  # also when LiteLLM cancels the coroutine
+            self._done(kwargs)
 
     def log_failure_event(self, kwargs, response_obj, start_time, end_time):
         self._done(kwargs)
@@ -138,31 +167,40 @@ class PrefixwiseCallback(_Base):
         self._done(kwargs)
 
     def _first(self, kwargs) -> bool:
-        """No earlier call of this session is still waiting to be recorded. Caller holds _order."""
-        sent = self._sent.get(_session_of(kwargs))
+        """No earlier turn of this call's conversation is still to be recorded. Caller holds _order."""
         call = kwargs.get("litellm_call_id")
-        if not sent or call not in sent:
-            return True
-        stale = time.monotonic() - 2 * ORDER_WAIT_SECONDS
-        for c in [c for c, t in sent.items() if t < stale and c != call]:
-            sent.pop(c)  # never completed (a callback LiteLLM dropped): stop waiting for it
-        return next(iter(sent)) == call
+        entry = self._key.get(call)
+        turns = self._turns.get(entry[0]) if entry else None
+        return not turns or next(iter(turns)) == call
 
-    def _done(self, kwargs) -> None:
-        session, call = _session_of(kwargs), kwargs.get("litellm_call_id")
-        with self._order:
-            sent = self._sent.get(session)
-            if sent is not None:
-                sent.pop(call, None)
-                if not sent:
-                    self._sent.pop(session, None)
+    def _drop(self, call) -> None:
+        """Caller holds _order."""
+        entry = self._key.pop(call, None)
+        if entry is not None:
+            turns = self._turns.get(entry[0])
+            if turns is not None:
+                turns.pop(call, None)
+                if not turns:
+                    self._turns.pop(entry[0], None)
+
+    def _sweep(self, now: float) -> None:
+        """Forget calls whose callback never came (an abandoned call, a task LiteLLM dropped), and
+        keep at most ORDER_MAX_CALLS. Caller holds _order."""
+        stale = now - 2 * ORDER_WAIT_SECONDS
+        dropped = False
+        while self._key:
+            call, (_, sent) = next(iter(self._key.items()))
+            if sent >= stale and len(self._key) < ORDER_MAX_CALLS:
+                break
+            self._drop(call)
+            dropped = True
+        if dropped:
             self._order.notify_all()
 
-    def _settled(self, kwargs, response_obj, start_time, end_time) -> None:
-        try:
-            self._record(kwargs, response_obj, start_time, end_time)
-        finally:
-            self._done(kwargs)
+    def _done(self, kwargs) -> None:
+        with self._order:
+            self._drop(kwargs.get("litellm_call_id"))
+            self._order.notify_all()
 
     def _record(self, kwargs, response_obj, start_time, end_time) -> None:
         try:

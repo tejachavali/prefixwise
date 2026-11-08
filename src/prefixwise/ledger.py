@@ -70,8 +70,8 @@ class LedgerEntry:
     # ttl_shortened, lookback_exceeded, markers_ignored, sent_before_cache_written,
     # shared_prefix_not_reused, thinking_stripped, cache_key_changed.
     detail: str | None = None
-    # Schema 5: the cache lifetime this turn was judged against (Anthropic 300 or 3600; an
-    # X-Prefixwise-Cache-Ttl header; None when unknown, as on OpenAI by default).
+    # Schema 5: this request's own cache lifetime: what its write was granted or what it asked for
+    # (Anthropic 300 or 3600; an X-Prefixwise-Cache-Ttl header; None when unknown, as on OpenAI).
     cache_ttl_seconds: float | None = None
     schema_version: int = SCHEMA_VERSION
 

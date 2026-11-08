@@ -143,3 +143,12 @@ def test_a_rates_file_is_used():
                                       "cache_write_5m": 1.25, "cache_write_1h": 2.0}
     [a] = ttl_advice(led, prices=custom)
     assert a["saved_at_most_usd"] == pytest.approx(1_000 * 1.15 / 1e6)
+
+
+def test_rows_without_a_known_lifetime_add_no_extra_cost():
+    # Review: an upgraded schema-4 ledger's old writes must not outweigh the new misses.
+    led = Ledger()
+    led.record(row("none", 10, 1_000_000, ttl=None))
+    led.record(row("ttl_expired", 900, 10_000))
+    [a] = ttl_advice(led, prices=T)
+    assert a["extra_write_cost_usd"] == 0 and a["pays"]

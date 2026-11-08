@@ -65,14 +65,15 @@ def ttl_advice(ledger, since: float | None = None, until: float | None = None,
                prices: PriceTable | None = None) -> list[dict]:
     """Per Anthropic model: could the 1-hour cache have paid on this ledger?
 
-    Kept by 1 hour: the ttl_expired misses judged against a 5-minute cache whose gap was within
-    the hour, except ttl_shortened (they asked for 1 hour already). Under 1 hour their rewritten tokens would have been read instead of written at the
-    5-minute rate (saved), and every other write on the model is billed at the 1-hour rate instead
-    of the 5-minute one (extra). Part of each rewrite is new tail that would be written anyway, so
-    saved - extra is an upper bound on what 1 hour gains: when it is not positive, 1 hour cannot
-    pay. Rows without a known TTL (older ledgers, OpenAI) are left out; so is a model without both
-    write rates (never a guessed price). Rates at the long-prompt tier where the row's prompt
-    is in it."""
+    Each row's own cache lifetime is in `cache_ttl_seconds` (schema 5). Kept by 1 hour: the
+    ttl_expired misses on the 5-minute cache whose gap was within the hour, except ttl_shortened
+    (they asked for 1 hour already). Under 1 hour their rewrites would have been reads (saved);
+    every other 5-minute write is billed at the 1-hour rate instead (extra). Writes already on
+    1 hour cost nothing more; rows without a known lifetime (older ledgers, OpenAI) are left out.
+    Part of each rewrite is new tail that would be written anyway, so saved - extra is an upper
+    bound on what 1 hour gains: when it is not positive, 1 hour cannot pay. A model without both
+    write rates is left out (never a guessed price). Rates at the long-prompt tier where the
+    row's prompt is in it."""
     if prices is None:
         try:
             prices = PriceTable.load()
@@ -103,7 +104,7 @@ def ttl_advice(ledger, since: float | None = None, until: float | None = None,
                 and detail != "ttl_shortened":  # asked for 1 hour already: the downgrade is the problem
             a["misses"] += 1
             a["saved"] += writes * (w5 - read) / 1e6
-        elif ttl != TTL_1H and detail != "ttl_shortened":  # a write already on the 1-hour cache costs nothing more
+        elif ttl == TTL_5M and detail != "ttl_shortened":  # on 1 hour already, or unknown: not counted
             a["extra"] += writes * (w1 - w5) / 1e6
     out = [{"model": m, "misses": a["misses"], "saved_at_most_usd": round(a["saved"], 6),
             "extra_write_cost_usd": round(a["extra"], 6), "pays": a["saved"] > a["extra"]}

@@ -34,15 +34,16 @@ true figure is about 26-28% above the old input-rate price for 5-minute writes, 
 it for 1-hour writes. Rows recorded before this change keep their old price.
 
 The 5m vs 1h choice is a separate question, answered per model from the ledger by `ttl_advice`.
-It needs the TTL each turn was judged against (ledger column `cache_ttl_seconds`, schema 5), so
+It needs each request's own cache lifetime (ledger column `cache_ttl_seconds`, schema 5), so
 rows from older ledgers are left out.
 
-- **Kept by 1 hour:** `ttl_expired` misses judged against a 5-minute cache, with a gap within
+- **Kept by 1 hour:** `ttl_expired` misses on the 5-minute cache, with a gap within
   the hour (not `ttl_shortened`: those asked for 1 hour already).
 - **Saved, at most:** what those misses wrote again, read instead: 5-minute write rate minus
   read rate.
 - **Extra:** every other write on that model on the 5-minute cache, at the 1-hour rate minus the
-  5-minute rate. Writes already on 1 hour cost nothing more.
+  5-minute rate. Writes already on 1 hour cost nothing more; writes of unknown lifetime are not
+  counted.
 
 Rates are taken at the long-prompt tier where a row's prompt is in it. Part of each rewrite is
 new tail that would be written anyway, so saved minus extra is an upper bound on what 1 hour
