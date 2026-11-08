@@ -61,15 +61,17 @@ import urllib.request
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from .classifier import Classification, MissCause, RequestSnapshot, classify, first_divergence, _blocks_by_role, _role_unchanged
-from .details import Facts, body_facts, detail_for, keeps_thinking, usage_facts
-from .diagnostics import AgreementScorer, anthropic_diagnostics
+from .classifier import _blocks_by_role, _role_unchanged
+from .details import Facts, body_facts, keeps_thinking, usage_facts
+from .diagnostics import anthropic_diagnostics
 from .fingerprint import Fingerprinter
 from .fixes import apply_fixes, parse_fixes
 from . import api
-from .pricing import PriceTable, breakdown
-from .prom import Metrics
-from .ledger import Ledger, LedgerEntry, avoidable_for_turn, unread_write
+from .pricing import PriceTable, breakdown, completion_tokens_of, normalize_usage  # noqa: F401 (re-exported)
+from .ledger import Ledger, LedgerEntry
+from .collector import (Collector, LANE_THREADS, MAX_SESSIONS, _CONVERSATION, _Lane,  # noqa: F401 (re-exported)
+                        _SessionMap, _best_parent, _identity)
+from .records import PARAM_KEYS, TurnRecord
 
 
 def extract_blocks(body: dict, provider: str) -> list[tuple[str, object]]:
@@ -258,53 +260,6 @@ def relay_headers(headers) -> dict[str, str]:
 # Sessions remembered for classification; least recently used are dropped,
 # so a long-running proxy does not grow without bound. A dropped session's
 # next turn classifies as FIRST_WRITE (honest: no prior turn is known).
-MAX_SESSIONS = int(os.environ.get("PREFIXWISE_MAX_SESSIONS", "10000"))
-# Conversations (threads) remembered per (session, model) lane: each one's latest turn, so a
-# session interleaving conversations (parallel subagents on one model) compares each request with
-# its own thread's last turn, however long the others ran in between.
-LANE_THREADS = max(1, int(os.environ.get("PREFIXWISE_LANE_THREADS", "8")))
-
-
-class _SessionMap(OrderedDict):
-    """LRU dict: reads and writes refresh a key; oldest keys are evicted."""
-
-    def __init__(self, limit: int):
-        super().__init__()
-        self.limit = limit
-
-    def __setitem__(self, key, value):
-        super().__setitem__(key, value)
-        self.move_to_end(key)
-        while len(self) > self.limit:
-            self.popitem(last=False)
-
-
-def normalize_usage(provider: str, usage: dict) -> tuple[int, int]:
-    """Return (prompt_tokens, cached_tokens) from a provider usage object.
-
-    Anthropic reports input_tokens EXCLUDING cache reads and writes, so
-    the full prompt is input + cache_read + cache_creation.
-    OpenAI/vLLM report prompt_tokens with prompt_tokens_details.cached_tokens.
-    """
-    if provider == "anthropic":
-        read = int(usage.get("cache_read_input_tokens", 0) or 0)
-        write = int(usage.get("cache_creation_input_tokens", 0) or 0)
-        return int(usage.get("input_tokens", 0) or 0) + read + write, read
-    if "prompt_tokens" not in usage and "input_tokens" in usage:  # Responses API
-        details = usage.get("input_tokens_details") or {}
-        return int(usage.get("input_tokens", 0) or 0), int(details.get("cached_tokens", 0) or 0)
-    prompt = int(usage.get("prompt_tokens", 0) or 0)
-    details = usage.get("prompt_tokens_details") or {}
-    cached = int(details.get("cached_tokens", 0) or usage.get("cached_tokens", 0) or 0)
-    return prompt, cached
-
-
-def completion_tokens_of(provider: str, usage: dict) -> int:
-    if provider == "anthropic" or ("completion_tokens" not in usage and "output_tokens" in usage):
-        return int(usage.get("output_tokens", 0) or 0)
-    return int(usage.get("completion_tokens", 0) or 0)
-
-
 def has_cache_breakpoint(body: dict) -> bool:
     """Anthropic: cache_control anywhere (top level, tools, system, messages)."""
     if body.get("cache_control"):
@@ -450,47 +405,6 @@ class StreamAccumulator:
             self.saw_usage = True
 
 
-class _Lane:
-    """One (session, model) lane: each conversation's latest turn, by opening message (LRU)."""
-
-    __slots__ = ("latest", "threads")
-
-    def __init__(self):
-        self.latest = None
-        self.threads: OrderedDict = OrderedDict()
-
-
-def _identity(blocks) -> tuple:
-    """(opening message hash or None, masked system hashes): what names a conversation, and
-    what tells a subagent of another type (its system prompt beyond dates and ids)."""
-    opening = next((b.raw for b in blocks if b.role in _CONVERSATION), None)
-    return opening, tuple(b.masked for b in blocks if b.role in ("system", "system_dynamic"))
-
-
-def _best_parent(lane: _Lane, identity: tuple, compaction: bool = False) -> tuple[tuple, bool, bool]:
-    """(the turn to compare with, whether another conversation came between, whether this
-    request starts a new one).
-
-    A conversation is known by its opening message. Its previous turn is the lane's latest turn
-    when that is the same conversation (the usual case), else this conversation's own latest turn
-    if remembered (interleaved subagents). If neither, it is a new conversation only when its
-    system prompt differs beyond dates and ids from the latest turn's (a subagent of another
-    type); otherwise it is compared with the latest turn as before, so a rewritten first message
-    (an edit, a compaction) never passes for a new conversation."""
-    opening, system = identity
-    latest = lane.threads[lane.latest]
-    if opening is None or lane.latest is None or opening == lane.latest:
-        return latest, False, False
-    mine = lane.threads.get(opening)
-    if mine is not None:
-        return mine, True, False
-    theirs = _identity(latest[0].blocks)[1]
-    return latest, False, bool(not compaction and system and system != theirs)
-
-
-_CONVERSATION = ("messages", "tool_results", "user")
-
-
 def _sources_of(events) -> list:
     """The per-cache event readers: a fleet's sources, or the one reader."""
     return list(getattr(events, "sources", None) or [events])
@@ -538,8 +452,9 @@ class PrefixwiseProxy:
                  prices: str | None = None, engine: str | None = None, kv_events: str | None = None,
                  upstreams: dict[str, str] | None = None, full_attention: bool | None = None,
                  otel: bool | str | None = None):
-        self.ledger = Ledger(ledger_path)
-        self.metrics = Metrics()  # GET /metrics (Prometheus), fed by every recorded row
+        # The control plane (prefixwise.collector): classification, pricing, the ledger and all
+        # conversation state. In this process the edge below calls it directly.
+        self.collector = Collector(Ledger(ledger_path), PriceTable.load(prices))
         self.spans = _spans(otel if otel is not None else os.environ.get("PREFIXWISE_OTEL"))
         # Self-hosted engine behind the proxy (vllm, sglang), and its KV-event
         # stream for the engine join (prefixwise.engines).
@@ -570,10 +485,7 @@ class PrefixwiseProxy:
         self.fixes = parse_fixes(fixes if fixes is not None else os.environ.get("PREFIXWISE_FIXES"))
         # Set by serve() from --auth-token / PREFIXWISE_AUTH_TOKEN; None = open.
         self.auth_token: str | None = None
-        # Dated price table: built-in verified rates + PREFIXWISE_PRICES / prices file.
-        self.prices = PriceTable.load(prices)
         self.fingerprinter = Fingerprinter(hmac_key=hmac_key)
-        self.scorer = AgreementScorer()
         self.upstream_url = (upstream_url or os.environ.get("PREFIXWISE_UPSTREAM_URL") or "").rstrip("/")
         # Per-provider upstreams ({"anthropic": url, "openai": url}) override upstream_url, so
         # one proxy can serve an agent that talks to both (prefixwise run).
@@ -593,7 +505,6 @@ class PrefixwiseProxy:
         self._rejections: dict[tuple[str, str], int] = {}  # a field is dropped for good on its second rejection
         # Sub-reasons (prefixwise.details): request facts per lane and session, requests in
         # flight by tools+system prefix, and when another session last finished one.
-        self.session_facts: dict[str, Facts] = _SessionMap(MAX_SESSIONS)
         self.prefix_inflight: dict[str, dict[str, float]] = _SessionMap(MAX_SESSIONS)
         self.prefix_done: dict[str, tuple[float, str]] = _SessionMap(MAX_SESSIONS)
         if self._kv_auto and self.engine == "vllm" and not self.mock:
@@ -603,33 +514,25 @@ class PrefixwiseProxy:
         # Per-session state, shared across the threaded server's handlers.
         # Every read and write holds self._lock: the classifier must compare
         # a turn with the turn recorded just before it, never a torn state.
-        self._lock = threading.Lock()
+        self._lock = threading.Lock()  # edge state: requests in flight, recordings pending
         self._upstream = threading.local()  # last upstream response headers, per thread
-        self.last_snapshot: dict[str, RequestSnapshot] = _SessionMap(MAX_SESSIONS)
-        self.last_response_id: dict[str, str | None] = _SessionMap(MAX_SESSIONS)
-        self.last_seen: dict[str, float] = _SessionMap(MAX_SESSIONS)
-        # Responses API: snapshot per response id, so a turn sent with
-        # previous_response_id (input = new items only) can be stitched
-        # onto the exact turn it continues, including branches.
-        self.snapshot_by_response: dict[str, RequestSnapshot] = _SessionMap(MAX_SESSIONS)
-        # Per-model lanes within a session, keyed (session, model). Agents
-        # interleave small-model side calls (titles, summaries) with the main
-        # thread; each turn is compared with the last turn to the SAME model,
-        # so a side call never masks a cause on the main thread (dogfood,
-        # 2026-11-06). The session-level maps above still say "has this
-        # session been seen", which decides FIRST_WRITE vs MODEL_SWITCH.
-        # (session, model) -> its threads: each one's latest (snapshot, response end, facts, response id).
-        self.lane_threads: dict[tuple, _Lane] = _SessionMap(MAX_SESSIONS)
-        # Sessions whose streamed turn has ended for the client but is still being recorded: the
-        # session's next request waits for it, so it is compared and chained with that turn.
+        self._recording: dict[tuple, threading.Event] = {}  # streams ended for the client, not yet recorded
         self._recording: dict[str, threading.Event] = {}
 
+    # The collector's state and services, as the proxy's own names (the API, the CLI, tests).
+    ledger = property(lambda self: self.collector.ledger)
+    prices = property(lambda self: self.collector.prices)
+    metrics = property(lambda self: self.collector.metrics)
+    scorer = property(lambda self: self.collector.scorer)
+    lane_threads = property(lambda self: self.collector.lane_threads)
+    last_snapshot = property(lambda self: self.collector.last_snapshot)
+    last_seen = property(lambda self: self.collector.last_seen)
+    last_response_id = property(lambda self: self.collector.last_response_id)
+    snapshot_by_response = property(lambda self: self.collector.snapshot_by_response)
+    session_facts = property(lambda self: self.collector.session_facts)
+
     def _stitched_opening(self, previous_response_id: str):
-        """The opening of the conversation a stitched Responses turn continues, if its parent is
-        known (None otherwise)."""
-        with self._lock:
-            prior = self.snapshot_by_response.get(str(previous_response_id))
-        return _identity(prior.blocks)[0] if prior is not None else None
+        return self.collector.stitched_opening(previous_response_id)
 
     def _await_recording(self, lane, thread_key, stitched: bool) -> None:
         """Wait (at most 10 s) while this conversation's previous streamed turn has ended for the
@@ -865,17 +768,10 @@ class PrefixwiseProxy:
         self._await_recording(lane, thread_key, stitched)
         if stitched:
             thread_key = (lane, self._stitched_opening(body["previous_response_id"]))
-        with self._lock:
-            # Chain the provider's diagnostics to the previous turn of this request's own
-            # conversation, so its verdict compares the pair the classifier compares.
-            state = self.lane_threads.get(lane)
-            if stitched:
-                previous_id = str(body["previous_response_id"])  # the turn it names
-            elif state is not None:
-                parent, _, new_thread = _best_parent(state, identity, compaction)
-                previous_id = None if new_thread else parent[3]
-            else:
-                previous_id = self.last_response_id.get(session_id)
+        # Chain the provider's diagnostics to the previous turn of this request's own
+        # conversation, so its verdict compares the pair the classifier compares.
+        previous_id = self.collector.chain_parent(session_id, lane, identity, compaction,
+                                                  body["previous_response_id"] if stitched else None)
         # Chain only to an id from the same API: a session can mix Chat Completions
         # (chatcmpl-...) and Responses (resp_...) on one model, and OpenAI rejects a
         # foreign id with a 400 (found by the compatibility check, 2026-11-07).
@@ -934,32 +830,65 @@ class PrefixwiseProxy:
         }
 
     def finalize(self, ctx: dict, status: int, payload: dict) -> tuple[dict, LedgerEntry]:
-        """Classify and record one completed request from its (rebuilt) payload."""
-        provider, body, session_id = ctx["provider"], ctx["body"], ctx["session_id"]
+        """Classify and record one completed request from its (rebuilt) payload: build the turn
+        record (the edge's half) and hand it to the collector."""
+        provider = ctx["provider"]
         usage = payload.get("usage") or {}
         prompt_tokens, cached = normalize_usage(provider, usage)
-        native_reason = native_reason_from(payload)
-        response_id = payload.get("id")
-
         # Fingerprint what the provider actually received: with a fix on,
         # that is the rewritten request, not the client's original.
         fps = self.fingerprinter.fingerprint_blocks(extract_blocks(ctx["forward_body"], provider))
-        if ctx.get("engine_token") is not None:  # outside the lock: it may wait a few ms for events
+        verdict = None
+        if ctx.get("engine_token") is not None:  # may wait a few ms for events
             reported = "prompt_tokens_details" in usage  # vLLM needs --enable-prompt-tokens-details
             if not reported and not getattr(self, "_warned_details", False):
                 self._warned_details = True
                 flag = "--enable-cache-report" if self.engine == "sglang" else "--enable-prompt-tokens-details"
                 print(f"prefixwise: {self.engine} is not reporting cached tokens; start it with "
                       f"{flag}, or every request looks like a miss", file=sys.stderr)
-            ctx["engine_verdict"] = self.engine_events.request_done(
-                ctx["engine_token"], cached if reported else None, prompt_tokens)
+            verdict = self.engine_events.request_done(ctx["engine_token"], cached if reported else None,
+                                                      prompt_tokens)
+        rec = self._record(ctx, status, fps, usage=usage, payload=payload, engine_verdict=verdict)
+        result, entry = self.collector.ingest(rec)
         with self._lock:
-            result = self._finalize_locked(ctx, status, payload, usage, prompt_tokens, cached,
-                                           native_reason, response_id, fps)
-        if self.spans is not None:  # outside the lock; never raises
-            self.spans.export(ctx, result[1], payload, default_session=self.default_session,
+            self._release_prefix(ctx, done_session=ctx["session_id"])
+        result["response"] = payload
+        if self.spans is not None:  # never raises
+            self.spans.export(ctx, entry, payload, default_session=self.default_session,
                               upstream=self._span_upstream(ctx))
-        return result
+        return result, entry
+
+    def _record(self, ctx: dict, status: int, fps: list, *, usage: dict | None = None,
+                payload: dict | None = None, engine_verdict=None, error: str | None = None) -> TurnRecord:
+        """The turn record for this request: everything the collector needs, no prompt text."""
+        body, provider = ctx["body"], ctx["provider"]
+        usage = usage or {}
+        parts = breakdown(provider, usage)
+        facts = ctx.get("facts") or Facts(provider=provider)
+        if usage:
+            facts = usage_facts(facts, usage, parts.cache_write_5m + parts.cache_write_1h + parts.cache_write)
+        facts.done_at = time.time()
+        payload = payload if isinstance(payload, dict) else {}
+        verdict = None  # (evicted, resident[, routed]) from the engine join, as a list on the wire
+        if engine_verdict is not None:
+            routed = engine_verdict[2] if len(engine_verdict) > 2 and engine_verdict[2] is not None else None
+            verdict = [engine_verdict[0], engine_verdict[1], list(routed) if routed is not None else None]
+        return TurnRecord(
+            provider=provider, api=ctx.get("api") or "chat", model=ctx["model"], session_id=ctx["session_id"],
+            agent_id=ctx["agent_id"], request_id=ctx["request_id"], task_id=ctx["task_id"],
+            session_is_user=bool(ctx.get("session_is_user")), fork_of=ctx.get("fork_of"),
+            compaction_event=bool(ctx["compaction_event"]), stream=bool(ctx.get("stream")),
+            previous_response_id=(str(body["previous_response_id"]) if ctx.get("api") == "responses"
+                                  and body.get("previous_response_id") else None),
+            blocks=fps, params={k: body.get(k) for k in PARAM_KEYS if body.get(k) is not None},
+            has_breakpoint=has_cache_breakpoint(body), ttl_seconds=ctx.get("ttl_seconds"), facts=facts,
+            fixes_applied=list(ctx.get("fixes_applied") or []),
+            sent_at=ctx.get("span_start") or ctx.get("sent_at") or facts.done_at,
+            engine=self.engine, engine_caches=self.engine_caches, engine_verdict=verdict,
+            status=status, error=error, usage=usage, response_model=(str(payload["model"]) if payload.get("model")
+                                                                      else None),
+            response_id=payload.get("id"), native_reason=native_reason_from(payload) if payload else None,
+            latency_ms=ctx.get("upstream_ms"), overhead_ms=self._overhead_ms(ctx), done_at=facts.done_at)
 
     def finalize_safely(self, ctx: dict, status: int, payload: dict) -> tuple[dict, LedgerEntry | None]:
         """finalize(), failing open: the client already paid for this response,
@@ -974,182 +903,6 @@ class PrefixwiseProxy:
             return {"request_id": ctx["request_id"], "status": status, "cause": None,
                     "recorded": False, "response": payload}, None
 
-    def _stitch(self, ctx: dict, fps: list) -> tuple[list | None, RequestSnapshot | None]:
-        """Responses API with previous_response_id: the input holds only new
-        items. The cached prefix is the prior turn's blocks plus these, so
-        the comparable request is prior message blocks + new message blocks,
-        under this turn's own tools and instructions (both are resent).
-        Returns (blocks, prior snapshot); (None, None) if the prior turn was
-        never seen by this proxy. Caller holds self._lock."""
-        prev_id = ctx["body"].get("previous_response_id")
-        prior = self.snapshot_by_response.get(prev_id)
-        if prior is None:
-            return None, None
-        convo = ("messages", "tool_results")
-        head = [b for b in fps if b.role not in convo]
-        new_msgs = [b for b in fps if b.role in convo]
-        old_msgs = [b for b in prior.blocks if b.role in convo]
-        return head + old_msgs + new_msgs, prior
-
-    def _finalize_locked(self, ctx, status, payload, usage, prompt_tokens, cached,
-                         native_reason, response_id, fps) -> tuple[dict, LedgerEntry]:
-        provider, body, session_id = ctx["provider"], ctx["body"], ctx["session_id"]
-        now = time.time()
-        # The gap a cache entry had to survive: from the previous response to this request's send
-        # (not to its response: this request's own generation time is not idle time).
-        started = ctx.get("span_start") or ctx.get("sent_at") or now
-        lane = (session_id, ctx["model"])
-        state = self.lane_threads.get(lane)
-        identity = _identity(fps)
-        new_thread, interleaved, parent_facts = False, False, None
-        prior_latest = state.latest if state is not None else None
-        prior_threads = len(state.threads) if state is not None else 0  # before this turn is added
-        if state is not None:
-            # Compare with the previous turn of this request's own conversation: the lane's latest
-            # turn, unless another conversation interleaved (parallel subagents on one model).
-            if ctx.get("api") == "responses" and body.get("previous_response_id"):
-                parent = state.threads[state.latest]  # (its parent is named: stitched below)
-            else:
-                parent, interleaved, new_thread = _best_parent(state, identity, bool(ctx["compaction_event"]))
-            prev, prev_done, parent_facts, _ = parent
-            gap_seconds = max(0.0, started - prev_done)
-        else:
-            # First turn on this model: FIRST_WRITE for a new session, else
-            # MODEL_SWITCH (the classifier compares models first).
-            prev = self.last_snapshot.get(session_id)
-            gap_seconds = max(0.0, started - self.last_seen[session_id]) if session_id in self.last_seen else None
-        self.last_seen[session_id] = now
-        unknown_parent = False
-        if ctx.get("api") == "responses" and body.get("previous_response_id"):
-            stitched, prior = self._stitch(ctx, fps)
-            if stitched is None:
-                unknown_parent = True  # continues a turn this proxy never saw
-            else:
-                fps, prev = stitched, prior
-                # Its conversation is its parent's: file it there, and time the gap from it.
-                identity = _identity(fps)
-                mine = state.threads.get(identity[0]) if state is not None else None
-                if mine is not None:
-                    gap_seconds, parent_facts = max(0.0, started - mine[1]), mine[2]
-        curr = RequestSnapshot(model=ctx["model"], provider=provider, blocks=fps,
-                               prompt_tokens=prompt_tokens, cached_tokens=cached,
-                               gap_seconds=gap_seconds, compaction_event=ctx["compaction_event"],
-                               params={k: body.get(k) for k in
-                                       ("tool_choice", "thinking", "reasoning", "output_format",
-                                        # SGLang leaves extra_key out of its KV-event hashes, so a change
-                                        # must be seen here (cache_salt is in them)
-                                        "extra_key",
-                                        "text_format", "text", "verbosity") if body.get(k) is not None},
-                               has_breakpoint=has_cache_breakpoint(body),
-                               ttl_seconds=ctx.get("ttl_seconds"),
-                               fork_parent_session_id=ctx.get("fork_of"),
-                               session_id=session_id)
-        curr.engine = self.engine is not None
-        curr.engine_caches = self.engine_caches
-        parts = breakdown(provider, usage)
-        curr.cache_written = parts.cache_write_5m + parts.cache_write_1h + parts.cache_write
-        curr.new_thread, curr.interleaved = new_thread, interleaved
-        if ctx.get("engine_verdict") is not None:
-            verdict = ctx["engine_verdict"]
-            curr.evicted_blocks, curr.resident_blocks = verdict[0], verdict[1]
-            curr.routed = verdict[2] if len(verdict) > 2 else None
-        if unknown_parent:
-            result = Classification(MissCause.UNKNOWN, None,
-                                    "previous_response_id points to a response this proxy never saw;"
-                                    " the cached prefix cannot be reconstructed",
-                                    native_reason=native_reason)
-        else:
-            result = classify(prev, curr, native_reason=native_reason)
-            if interleaved:
-                result.evidence = (f"{result.evidence}; compared with this conversation's last turn "
-                                   "(another conversation in this session came between)")
-        # The why behind the cause, where the evidence allows (prefixwise.details).
-        facts = usage_facts(ctx.get("facts") or Facts(provider=provider), usage,
-                            parts.cache_write_5m + parts.cache_write_1h + parts.cache_write)
-        facts.done_at = now
-        prev_facts = parent_facts if state is not None else self.session_facts.get(session_id)
-        if prev is None or (ctx.get("api") == "responses" and body.get("previous_response_id")):
-            prev_facts = None  # a stitched branch: the lane's latest request may be another branch
-        new_cause, detail, why = detail_for(result.cause.value, prev_facts, facts,
-                                            prompt_tokens=prompt_tokens, cached_tokens=cached)
-        if new_cause:
-            cause_name, legit = new_cause
-            result = Classification(MissCause(cause_name), legit,
-                                    f"{why} (classifier: {result.cause.value}, {result.evidence})",
-                                    result.secondary + [result.cause], native_reason)
-        elif why:
-            result.evidence = f"{result.evidence}; {why}"
-        self._release_prefix(ctx, done_session=session_id)
-        self.session_facts[session_id] = facts
-        if result.score:  # a verdict overriding the compared pair is not an (dis)agreement
-            self.scorer.record(result.cause, native_reason, provider)
-        self.last_snapshot[session_id] = curr
-        if state is None:
-            state = _Lane()
-        state.threads[identity[0]] = (curr, now, facts, response_id)
-        state.threads.move_to_end(identity[0])
-        while len(state.threads) > LANE_THREADS:
-            state.threads.popitem(last=False)
-        state.latest = identity[0]
-        self.lane_threads[lane] = state  # (re)assigning refreshes the lane in the LRU
-        if response_id:
-            self.last_response_id[session_id] = response_id
-            if ctx.get("api") == "responses":
-                self.snapshot_by_response[response_id] = curr
-
-        div = first_divergence(prev.blocks, curr.blocks) if prev is not None else None
-        entry = LedgerEntry(
-            session_id=session_id, agent_id=ctx["agent_id"],
-            provider=provider, model=ctx["model"], cause=result.cause.value,
-            prompt_tokens=prompt_tokens, cached_tokens=cached,
-            avoidable_tokens=avoidable_for_turn(result.legit, prompt_tokens, cached,
-                                                prev.prompt_tokens if prev else None,
-                                                (prev.cached_tokens + prev.cache_written) if prev is not None
-                                                and (prev.provider == "anthropic" or prev.cache_written) else None),
-            avoidable_cost=None, legit=result.legit, native_reason=native_reason,
-            cost=self.prices.request_cost(str(payload.get("model") or ctx["model"]), provider, usage),
-            task_id=ctx["task_id"], request_id=ctx["request_id"],
-            completion_tokens=completion_tokens_of(provider, usage),
-            fixes=",".join(ctx.get("fixes_applied") or []) or None,
-            status=status, api=ctx.get("api"), stream=ctx.get("stream"),
-            uncached_tokens=parts.uncached_input,
-            cache_write_tokens=parts.cache_write_5m + parts.cache_write_1h + parts.cache_write,
-            latency_ms=ctx.get("upstream_ms"), gap_seconds=gap_seconds,
-            evidence=result.evidence,
-            secondary_causes=",".join(c.value for c in result.secondary) or None,
-            divergence_role=div["role"] if div else None, divergence_index=div["index"] if div else None,
-            detail=detail, cache_ttl_seconds=ctx.get("ttl_seconds"),
-        )
-        priced_model = str(payload.get("model") or ctx["model"])
-        entry.avoidable_cost = self.prices.avoidable_cost(priced_model, entry.avoidable_tokens, prompt_tokens,
-                                                     provider, usage)
-        # The previous turn's cache write, left unread: only when that turn is this conversation's
-        # own: the same opening message, its own interleaved turn, or a compaction (which rewrites
-        # the opening). Not another conversation this request fell back to (a same-model side
-        # call), nor an edited opening message, which identity alone cannot tell from one.
-        own = state is not None and not new_thread and (
-            interleaved or identity[0] == prior_latest
-            # a compaction while several conversations share the lane: the turn it fell back to may
-            # be another conversation's (whose next turn will read that write): claim nothing
-            or (bool(ctx["compaction_event"]) and prior_threads <= 1))
-        if own and prev_facts is not None and prev is not None and prompt_tokens > 0:
-            w5, w1, cw = unread_write(result.cause.value, cached, prev_facts.write_5m, prev_facts.write_1h,
-                                      prev_facts.cache_write)
-            if w5 or w1 or cw:
-                entry.unread_write_tokens = w5 + w1 + cw
-                entry.unread_write_cost = self.prices.write_surcharge(priced_model, prev.prompt_tokens, w5, w1, cw)
-        if entry.cost is not None:
-            entry.price_as_of = self.prices.as_of
-        entry.overhead_ms = self._overhead_ms(ctx)
-        self.ledger.record(entry)
-        self.metrics.observe(entry)
-        return {"request_id": ctx["request_id"], "status": status, "cause": result.cause.value,
-                "legit": result.legit, "native_reason": native_reason, "usage": usage,
-                "prompt_tokens": prompt_tokens, "cached_tokens": cached,
-                "avoidable_tokens": entry.avoidable_tokens, "fixes_applied": ctx.get("fixes_applied") or [],
-                "cost": entry.cost, "avoidable_cost": entry.avoidable_cost, "evidence": result.evidence,
-                "response": payload}, entry
-
     @staticmethod
     def _overhead_ms(ctx: dict) -> float | None:
         """Prefixwise's own time: everything since the request arrived, minus upstream."""
@@ -1160,7 +913,7 @@ class PrefixwiseProxy:
     def _release_prefix(self, ctx: dict, done_session: str | None = None) -> None:
         """The request is no longer in flight; if it succeeded, its prefix is now cached
         (as far as this proxy knows) for other sessions to reuse. Caller holds the lock
-        when called from _finalize_locked; record_failure takes it."""
+        by finalize and record_failure."""
         facts = ctx.get("facts")
         if facts is None or not facts.prefix_key:
             return
@@ -1191,23 +944,24 @@ class PrefixwiseProxy:
         denominator (docs/DATA.md). Never fails the request."""
         err = (payload or {}).get("error") if isinstance(payload, dict) else None
         kind = error or (err.get("type") if isinstance(err, dict) else None) or f"http_{status}"
-        entry = LedgerEntry(
-            session_id=ctx["session_id"], agent_id=ctx["agent_id"], provider=ctx["provider"],
-            model=ctx["model"], cause=None, prompt_tokens=0, cached_tokens=0, avoidable_tokens=0,
-            avoidable_cost=None, task_id=ctx["task_id"], request_id=ctx["request_id"],
-            status=status, error=str(kind)[:80], api=ctx.get("api"), stream=ctx.get("stream"),
-            latency_ms=ctx.get("upstream_ms"), overhead_ms=self._overhead_ms(ctx))
-        self.metrics.observe(entry)  # counted even if the ledger write fails
-        if self.spans is not None:
-            self.spans.export(ctx, entry, payload if isinstance(payload, dict) else None,
-                              default_session=self.default_session, upstream=self._span_upstream(ctx))
+        rec = self._record(ctx, status, [], error=str(kind)[:80])
         with self._lock:
             self._release_prefix(ctx)
+        entry = None
         try:
-            self.ledger.record(entry)
+            entry = self.collector.ingest_failure(rec)
         except Exception as exc:
             print(f"prefixwise: failure for {ctx['request_id']} not recorded: {type(exc).__name__}",
                   file=sys.stderr, flush=True)
+        if self.spans is not None:
+            if entry is None:  # the row never made it: still a span, from the same facts
+                entry = LedgerEntry(session_id=rec.session_id, agent_id=rec.agent_id, provider=rec.provider,
+                                    model=rec.model, cause=None, prompt_tokens=0, cached_tokens=0,
+                                    avoidable_tokens=0, avoidable_cost=None, task_id=rec.task_id,
+                                    request_id=rec.request_id, status=status, error=rec.error, api=rec.api,
+                                    stream=rec.stream, latency_ms=rec.latency_ms, overhead_ms=rec.overhead_ms)
+            self.spans.export(ctx, entry, payload if isinstance(payload, dict) else None,
+                              default_session=self.default_session, upstream=self._span_upstream(ctx))
 
     # -- non-streaming ---------------------------------------------------------------
 
