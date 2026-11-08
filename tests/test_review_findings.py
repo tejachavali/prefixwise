@@ -90,12 +90,24 @@ def run(proxy, *bodies):
     return [proxy.handle("anthropic", b, h)[0] for b in bodies]
 
 
+def realistic(p):
+    """An upstream whose cache reads nothing on a conversation's first turn, most of it after."""
+    ids = iter(range(1, 10**6))
+
+    def forward(provider, b, *a, **k):
+        cached = 0 if len(b["messages"]) == 1 else 1800
+        return 200, {"id": f"msg_{next(ids)}", "usage": {"input_tokens": 2000 - cached,
+                                                         "cache_read_input_tokens": cached, "output_tokens": 1}}
+    p._forward = forward
+    return p
+
+
 def test_interleaved_subagents_are_each_compared_with_their_own_last_turn():
-    p = PrefixwiseProxy(mock=True)
+    p = realistic(PrefixwiseProxy(upstream_url="http://unused", api_key="k"))
     a, b = ("You are the code reviewer.", "review x"), ("You are the test writer.", "test x")
     got = run(p, body(*a, 1), body(*b, 1), body(*a, 2), body(*b, 2), body(*a, 3))
     assert [r["cause"] for r in got] == ["first_write", "first_write", "none", "none", "none"]
-    assert "new conversation" in got[1]["evidence"] and "1 turn back" in got[2]["evidence"]
+    assert "new conversation" in got[1]["evidence"] and "came between" in got[2]["evidence"]
 
 
 def test_a_rewritten_opening_with_the_same_system_prompt_is_not_a_new_thread():
@@ -119,9 +131,9 @@ def test_the_gap_is_measured_to_the_send_not_to_the_response():
     p._forward = forward
     h = {"x-prefixwise-session-id": "g"}
     p.handle("anthropic", body("You are careful.", "q", 1), h)
-    hist = p.lane_history[("g", "claude-sonnet-5-5")]
-    snap0, done, facts = hist[-1]
-    hist[-1] = (snap0, done - 100, facts)
+    lane = p.lane_threads[("g", "claude-sonnet-5-5")]
+    snap0, done, facts, rid = lane.threads[lane.latest]
+    lane.threads[lane.latest] = (snap0, done - 100, facts, rid)
     slow.append(1)
     _, entry = p.handle("anthropic", body("You are careful.", "q", 2), h)
     assert 99.9 <= entry.gap_seconds < 100.4  # not ~100.6: generation time is not idle time
@@ -153,3 +165,69 @@ def test_a_stream_is_not_held_open_while_it_is_classified():
         time.sleep(1.6)
         server.shutdown()
         up.server.shutdown()
+
+
+# -- independent review of the fixes above: each must hold too ------------------------------
+
+def test_a_timestamp_in_the_system_prompt_is_not_a_new_conversation():
+    """One-shot calls, a different question each time, a fresh timestamp in the system prompt:
+    the same system prompt beyond the date, so volatile_system (waste), never first_write."""
+    p = realistic(PrefixwiseProxy(upstream_url="http://unused", api_key="k"))
+    got = run(p, *[body(f"You are careful. Now: 2026-11-08T12:0{i}:00Z", f"question {i}", 1) for i in range(4)])
+    assert [r["cause"] for r in got] == ["first_write"] + ["volatile_system"] * 3
+
+
+def test_the_main_thread_is_remembered_however_long_a_subagent_runs():
+    p = realistic(PrefixwiseProxy(upstream_url="http://unused", api_key="k"))
+    main, sub = ("You are the orchestrator.", "build it"), ("You are the explorer.", "look around")
+    got = run(p, body(*main, 1), body(*main, 2), *[body(*sub, i) for i in range(1, 8)], body(*main, 3))
+    assert got[-1]["cause"] == "none" and "came between" in got[-1]["evidence"]
+
+
+def test_many_parallel_subagents_of_one_type_are_each_followed():
+    p = realistic(PrefixwiseProxy(upstream_url="http://unused", api_key="k"))
+    agents = [("You are an explorer.", f"area {k}") for k in range(6)]
+    turns = [body(*a, 1) for a in agents] + [body(*a, n) for n in (2, 3) for a in agents]
+    got = run(p, *turns)
+    assert all(r["cause"] == "none" for r in got[6:])  # every later turn: its own conversation's
+
+
+def test_one_conversation_keeps_one_snapshot_and_busy_lanes_stay():
+    p = realistic(PrefixwiseProxy(upstream_url="http://unused", api_key="k"))
+    run(p, *[body("You are careful.", "q", n) for n in range(1, 30)])
+    assert len(p.lane_threads[("orchestrator", "claude-sonnet-5-5")].threads) == 1  # memory as before
+    p.lane_threads.limit = 2
+    for session in ("A", "B", "A", "C"):  # A stays active, B goes quiet
+        p.handle("anthropic", body("You are careful.", "q", 1), {"x-prefixwise-session-id": session})
+    assert ("A", "claude-sonnet-5-5") in p.lane_threads and ("B", "claude-sonnet-5-5") not in p.lane_threads
+
+
+def test_diagnostics_are_chained_to_the_requests_own_conversation():
+    p = realistic(PrefixwiseProxy(upstream_url="http://unused", api_key="k"))
+    sent, real = [], p._forward
+
+    def spy(provider, b, *a, **k):
+        sent.append(b.get("diagnostics"))
+        return real(provider, b, *a, **k)
+    p._forward = spy
+    a, b = ("You are the code reviewer.", "review x"), ("You are the test writer.", "test x")
+    first = run(p, body(*a, 1))[0]
+    run(p, body(*b, 1), body(*a, 2))
+    assert sent[1] == {"previous_message_id": None}  # a new conversation: like a first turn
+    assert sent[2] == {"previous_message_id": first["response"]["id"]}  # A's own turn, not B's
+
+
+def test_a_sessions_next_request_waits_for_its_streamed_turn_to_be_recorded():
+    import threading
+    p = PrefixwiseProxy(mock=True)
+    pending = threading.Event()
+    p._recording["w"] = pending
+    done = []
+    t = threading.Thread(target=lambda: done.append(
+        p.prepare("anthropic", body("You are careful.", "q", 2), {"x-prefixwise-session-id": "w"})))
+    t.start()
+    time.sleep(0.2)
+    assert not done  # held until the previous turn is recorded
+    pending.set()
+    t.join(2)
+    assert done

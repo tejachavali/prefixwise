@@ -85,8 +85,10 @@ class Recorder:
             ctx["session_is_user"] = bool(session_is_user)
             if genai_provider:
                 ctx["genai_provider"] = genai_provider
-            if latency_ms is not None:  # the call is already over: its span starts when it was sent
+            if latency_ms is not None:  # the call is already over: it was sent latency_ms ago
                 ctx["span_start"] = time.time() - latency_ms / 1000
+                if ctx.get("facts") is not None:  # sub-reasons time the gap from the send too
+                    ctx["facts"].sent_at = ctx["span_start"]
             self.proxy.response_started(ctx)
             ctx["upstream_ms"] = latency_ms if latency_ms is not None else 0.0
             _, entry = self.proxy.finalize(ctx, 200, _plain(response))

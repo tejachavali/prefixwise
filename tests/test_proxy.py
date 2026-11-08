@@ -418,9 +418,9 @@ def test_responses_forwarding_chaining_and_usage():
 def age(proxy, session, model, when):
     """Pretend the session's previous response on `model` ended at `when`."""
     proxy.last_seen[session] = when
-    history = proxy.lane_history[(session, model)]
-    snap, _, facts = history[-1]
-    history[-1] = (snap, when, facts)
+    lane = proxy.lane_threads[(session, model)]
+    snap, _, facts, rid = lane.threads[lane.latest]
+    lane.threads[lane.latest] = (snap, when, facts, rid)
 
 
 def test_responses_previous_response_id_is_stitched_not_history_edit():

@@ -164,14 +164,16 @@ sequenceDiagram
 The classifier (`classify(prev, curr)`) compares a request with **the previous turn of its own
 conversation**: the same session and model (a lane, so a side call to a small model never masks a
 cause on the main thread), and the same thread within it. A thread is known by its opening
-message; the proxy keeps the lane's last few turns (`PREFIXWISE_LANE_HISTORY`, default 4), so
-parallel subagents interleaving in one session are each compared with their own last turn. The
+message; the proxy remembers each conversation's latest turn (up to `PREFIXWISE_LANE_THREADS`,
+default 8, per lane; one conversation costs one snapshot, as before), so parallel subagents
+interleaving in one session are each compared with their own last turn, however long the others
+ran in between, and the provider's diagnostics are chained to that same turn. The
 first rule that fires wins; later ones are kept as secondary causes. In order:
 
 1. **No previous turn:** `first_write` (or `fork_boundary` for a forked session's first turn).
    **Another model:** `model_switch`. **A new conversation in the session** (its opening message
-   matches none of the recent turns and its system prompt differs: a subagent of another type):
-   `first_write`. **The previous turn was too short to cache at all:** `below_min_prefix`, whatever
+   matches none of the remembered conversations and its system prompt differs beyond dates and
+   ids: a subagent of another type): `first_write`, or `none` if the cache served most of it. **The previous turn was too short to cache at all:** `below_min_prefix`, whatever
    else changed. All expected, not waste.
 2. **The first part of the prompt that changed**, in the provider's prefix order (Anthropic and
    OpenAI: tools, system, messages, tool results; a self-hosted engine's template: system first),

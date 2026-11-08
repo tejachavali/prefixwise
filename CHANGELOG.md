@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- **Interleaved conversations in one session** (parallel subagents on one model): each request is compared with the newest recent turn of its own thread (known by its opening message), not with whichever turn came last; a thread with a different system prompt and no recent turn is a new conversation (`first_write`). Before, the subagents' turns were compared with each other and named `system_edit` or `history_edit`.
+- **Interleaved conversations in one session** (parallel subagents on one model): each request is compared with its own conversation's latest turn (known by its opening message; up to `PREFIXWISE_LANE_THREADS`, default 8, per session and model), however long the others ran, and the provider's diagnostics are chained to that same turn. A conversation none of them shares, whose system prompt differs beyond dates and ids, is a new one (`first_write`, or `none` if the cache served most of it). Before, the subagents' turns were compared with each other and named `system_edit` or `history_edit`. One conversation still costs one snapshot. A session's next request waits for its previous streamed turn to be recorded, so it is never compared with stale state.
 - **Fixed:** the gap behind `ttl_expired` and `routing_miss` included the request's own generation time; it now runs from the previous response to this request's send.
 - **A change that cost nothing is not a miss:** when the cache still served all of the reusable prefix, the turn is `none` (the change kept as secondary); when the entry had expired anyway (nothing read, gap over the TTL), it is `ttl_expired`. Partial hits stay priced for the part the change cost only.
 - Hosted providers' prefix order is respected: tools are checked before the system prompt.

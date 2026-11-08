@@ -114,9 +114,9 @@ class RequestSnapshot:
     # False when the usage is a placeholder (offline `explain` without usage): rules that read
     # the cache's response must not fire.
     usage_known: bool = True
-    # How many turns back the compared turn is (0: the latest), when the proxy matched this
-    # request to an earlier turn by longest common prefix (interleaved subagents).
-    parent_depth: int = 0
+    # The compared turn is not the session's latest on this model: another conversation came
+    # between (interleaved subagents), so this request was matched to its own conversation.
+    interleaved: bool = False
     # Anthropic cache_control present anywhere in the request.
     has_breakpoint: bool = False
     breakpoint_after_volatile: bool = False
@@ -131,6 +131,9 @@ class Classification:
     secondary: list[MissCause] = field(default_factory=list)
     native_reason: str | None = None
     classifier_version: str = "2.0"
+    # False when the verdict overrides the pair the provider compared (an expired entry, a change
+    # that cost nothing): its native reason then describes another question, not a disagreement.
+    score: bool = True
 
 
 def _blocks_by_role(blocks: list[BlockFingerprint]) -> dict[str, list[BlockFingerprint]]:
@@ -242,10 +245,14 @@ def classify(prev: RequestSnapshot | None, curr: RequestSnapshot,
         return Classification(MissCause.MODEL_SWITCH, True,
                               f"model {prev.model} -> {curr.model}", native_reason=native_reason)
     if curr.new_thread:
+        if curr.usage_known and curr.prompt_tokens > 0 and curr.cached_tokens >= curr.prompt_tokens * 0.5:
+            return Classification(MissCause.NONE, None,
+                                  "a new conversation in this session, its shared prefix served from the cache",
+                                  native_reason=native_reason)
         return Classification(MissCause.FIRST_WRITE, True,
-                              "a new conversation in this session: its first message matches none of the "
-                              "session's recent turns on this model (a subagent, or a new thread)",
-                              native_reason=native_reason)
+                              "a new conversation in this session: its opening matches none of the session's "
+                              "conversations on this model and its system prompt differs (a subagent of "
+                              "another type)", native_reason=native_reason)
 
     # The previous request was too short for the provider to cache at all, so
     # nothing could have been reused, whatever changed since: not waste.
@@ -267,14 +274,14 @@ def classify(prev: RequestSnapshot | None, curr: RequestSnapshot,
             return Classification(MissCause.TTL_EXPIRED, True,
                                   f"gap {gap:.0f}s since last turn exceeds the cache TTL {ttl:.0f}s and nothing "
                                   f"was read; the {changed.cause.value} after it cost nothing more",
-                                  secondary + [changed.cause], native_reason)
+                                  secondary + [changed.cause], native_reason, score=False)
         if curr.usage_known and curr.prompt_tokens > 0 and reusable > 0 and curr.cached_tokens >= reusable:
             # The provider served all of the prefix the previous turn could share: the change
             # was after it (or did not reach the rendered prompt) and cost nothing.
             return Classification(MissCause.NONE, None,
                                   f"{changed.cause.value} seen, but the cache served all of the reusable "
                                   f"prefix ({curr.cached_tokens} of {reusable} tokens): it cost nothing",
-                                  secondary + [changed.cause], native_reason)
+                                  secondary + [changed.cause], native_reason, score=False)
         return changed
 
     # Blocks equal (or only the user turn changed): check params, prefix, TTL, eviction.
