@@ -1,6 +1,38 @@
 # Changelog
 
-## Unreleased
+## 0.8.0: 2026-11-08
+
+Prefixwise now has the shape a fleet needs. The proxy is two halves with one boundary: the **edge**,
+wherever the request already is (the proxy, `prefixwise.wrap`, the LiteLLM callback), fingerprints
+it and reads its usage into a turn record of hashes and counts; the **collector** (`prefixwise
+collect`) owns conversation state, the verdicts, the dollars and the one ledger. Between them, an
+HTTP sender that never makes a request wait, or a session-partitioned Redis Stream so several
+collectors share a fleet with every conversation's turns reaching one of them in order. Every
+committed row can also go to a JSONL file or ClickHouse. One process with nothing configured
+behaves as before. The verdicts got more honest too: a full hit is a hit whatever else changed, a
+turn sent while its predecessor was in flight claims nothing, avoidable tokens stop at what the
+cache held, and avoidable cost is priced at the write rate the request actually paid. Every change
+was reviewed independently; each confirmed finding is a test.
+
+**Upgrading:** nothing to change for one process. The ledger moves to schema 6 in place on first
+open (new columns `cache_ttl_seconds`, `unread_write_tokens`, `unread_write_cost`; rows recorded
+before have none there and are left out of the TTL advice and the unread-writes line). Verdicts and
+dollars change in these cases, so a report that spans the upgrade can shift:
+- a full cache hit is `none` even when a parameter changed, there was no `cache_control`, or the
+  prompt is below the minimum in the table (before: `param_rendered`, `breakpoint_misplaced`,
+  `below_min_prefix`); a prompt that shrank below the minimum is `below_min_prefix`, not waste;
+- a turn sent before its conversation's previous turn had finished is `unknown`, counted as
+  `prefixwise_ingest_concurrent_total` (before: `routing_miss` or `retry_replay`);
+- on Anthropic, avoidable tokens are capped at what the previous turn left in the cache, and
+  avoidable cost includes the cache-write surcharge (about 26-28% higher for 5-minute writes, about
+  2x for 1-hour writes, on the built-in Claude rates); existing rows keep the cost they were
+  recorded with;
+- `overhead_ms` is now the edge's own time, before classification;
+- the LiteLLM callback records a conversation's calls in the order they were sent, waiting up to 2 s
+  for an earlier call of the same conversation.
+New: `prefixwise collect` and `prefixwise serve --collector URL` (`PREFIXWISE_COLLECTOR`,
+`PREFIXWISE_COLLECTOR_TOKEN`), `--log redis://` with `pip install 'prefixwise[log]'`
+(`PREFIXWISE_LOG_PARTITIONS`, 16), `--sink` (`PREFIXWISE_SINKS`), `PREFIXWISE_CLOCK_SKEW` (1 s).
 
 - **Docs:** the architecture figure and `docs/ARCHITECTURE.md` show the two halves: the edge where the request is, the turn record, the collector where the ledger is, the HTTP and Redis Stream wires between them, and sinks as a way out.
 - **Several collectors, one log:** `prefixwise collect --log redis://...` reads a session-partitioned Redis Stream (`prefixwise.log`; `pip install 'prefixwise[log]'`), and edges started with `PREFIXWISE_COLLECTOR=redis://...` write to it. Each collector owns a set of partitions (`--partitions 0-7`), so all of a session's turns reach one collector, in the order they reached the log, and no two collectors see one session. A record is acknowledged only after its row is written, and the row before the collector's state changes, so a restart mid-batch writes no row twice and loses none; a restarted collector takes over a dead predecessor's unacknowledged records at once (a live one, as in a rolling restart, keeps its batch: deploy collectors with `strategy: Recreate` or `maxSurge: 0`) and replays the last day of its partitions to rebuild its conversation state (the first turn after a deploy is not a `first_write`), seeding its duplicate check from the ledger; a second collector on the same partition is reported. Needs Redis 7.0 or later. Partition count: `PREFIXWISE_LOG_PARTITIONS` (16), the same on every edge and collector. What the log orders is which collector a session reaches and the consumption order; an edge still appends in its own send order, so keeping a conversation's turns on one edge remains the way to never see a late record.

@@ -1,6 +1,6 @@
 # Prefixwise architecture
 
-How Prefixwise is built today (0.8, unreleased, November 2026): the parts, how a request flows through
+How Prefixwise is built today (0.8, November 2026): the parts, how a request flows through
 them, where data lives, and the rules every part keeps. For why it was designed this way, the
 original research is in [DESIGN.md](DESIGN.md) (kept as written); the detailed designs are
 [DATA.md](DATA.md) (data and metrics), [API.md](API.md), [ENGINES.md](ENGINES.md) (vLLM and
