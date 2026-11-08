@@ -187,10 +187,20 @@ prefixwise serve --upstream http://router:8080 --engine vllm \
   None of the routers reports this in its response by default (research, Nov 2026: only Dynamo
   with `nvext.extra_fields` and AIBrix with `target-pod` do).
 - **What a router must do:** pass the request body's `session_id` and `vllm_xargs` through to
-  vLLM, which a router that forwards OpenAI requests as they are does. **Dynamo does not**: its
-  vLLM worker takes the session from `x-dynamo-session-id` / agent headers, not the body
-  (`components/src/dynamo/vllm/handlers.py`), so behind Dynamo the events carry no session and
-  Prefixwise makes no claim. Not yet checked: llm-d, the SGLang router, production-stack, AIBrix.
+  vLLM (vLLM accepts both on `/v1/chat/completions`; `kv_cache_report_mode: "full"` can only
+  be set through `vllm_xargs`). Checked against each router's source (main, Nov 2026):
+
+  | router | passes both through? | how |
+  |---|---|---|
+  | llm-d router (EPP), and GAIE's lightweight EPP | **yes** | forwards the client's bytes; any rewrite (model, priority, P/D sidecar or coordinator) re-encodes the whole JSON object (tested) |
+  | vLLM production-stack | **yes** | forwards the raw body; its rewrites (alias, priority, both P/D modes) keep every field. `--session-key session_id` makes its session routing key on the field Prefixwise already sends |
+  | AIBrix gateway | **yes** | forwards the raw body; edits single keys in place (priority, P/D `max_tokens`/`stream`) |
+  | SGLang model gateway, current (`smg-project/smg`) | **yes** | its typed request keeps unknown fields (tested) |
+  | SGLang model gateway, the older copy in the sglang repo | **no** | re-serializes a typed request without unknown fields, in every mode (tested): no claim behind it |
+  | NVIDIA Dynamo | **no** | its vLLM worker takes the session from `x-dynamo-session-id` / agent headers, not the body (`components/src/dynamo/vllm/handlers.py`): no claim behind it |
+
+  Prefixwise never sends a session header itself: llm-d, the SGLang router and AIBrix route by
+  `x-session-id` when session affinity is on, and Prefixwise does not change routing.
 - **Prefill/decode disaggregation:** the prefill and the decode worker both report a request's
   blocks, so with both listed no request can be attributed and nothing is claimed.
 - **Verdicts at the response:**

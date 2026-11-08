@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Docs: which routers pass Prefixwise's `session_id` and `vllm_xargs` through to vLLM, checked against each router's source (Nov 2026): llm-d, production-stack, AIBrix and the current SGLang model gateway do; Dynamo and the older SGLang gateway copy in the sglang repo do not, so behind them no routing claim is made.
+
 ## 0.6.0: 2026-11-08
 
 Prefixwise where people already are: in their own code (`prefixwise.wrap`), behind LiteLLM, in
