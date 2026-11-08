@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- `GET /engine` and the engine-check line of `experiments/e_evict` show `offload_tier_seen` (the stream has carried a store on a non-GPU medium, so `host_restored` can be claimed); E-evict records each turn's detail.
+
 ## 0.9.0: 2026-11-08
 
 Prefixwise now stops cache regressions before they ship. `prefixwise check -- pytest

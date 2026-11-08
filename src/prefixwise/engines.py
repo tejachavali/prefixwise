@@ -331,6 +331,7 @@ class EngineEvents:
         with self._lock:
             alive = self._thread is not None and self._thread.is_alive() and self._connected
             return {"endpoint": self.endpoint, "connected": alive, **self.stats, "hybrid_model": self.hybrid,
+                    "offload_tier_seen": self.offload_seen,  # a BlockStored on a non-GPU medium: host_restored possible
                     "gpu_blocks_tracked": len(self._alive), "sessions_tracked": len(self._windows),
                     "requests_in_flight": len(self._checks)}
 
