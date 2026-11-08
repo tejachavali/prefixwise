@@ -26,6 +26,7 @@ import time
 
 import json
 import sqlite3
+import sys
 from dataclasses import astuple, dataclass, fields
 
 SCHEMA_VERSION = 6
@@ -240,7 +241,6 @@ class Ledger:
                 key = getattr(sink, "name", type(sink).__name__)
                 if key not in self._sink_warned:
                     self._sink_warned.add(key)
-                    import sys
                     print(f"prefixwise: sink {key} failed ({type(exc).__name__}: {exc}); the ledger is unaffected",
                           file=sys.stderr, flush=True)
         return rowid

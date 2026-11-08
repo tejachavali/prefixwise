@@ -84,6 +84,10 @@ def cmd_collect(args) -> int:
               log_url=args.log, log_partitions=args.partitions, sinks=args.sink)
     except (ValueError, ImportError, OSError) as exc:  # bad --partitions or --sink, or redis-py missing
         sys.exit(f"prefixwise: {exc}")
+    except Exception as exc:  # noqa: BLE001 - an unreachable or refusing Redis
+        if type(exc).__module__.startswith("redis"):
+            sys.exit(f"prefixwise: the record log is not reachable ({type(exc).__name__}: {exc})")
+        raise
     return 0
 
 

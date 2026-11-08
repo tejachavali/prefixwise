@@ -1765,7 +1765,9 @@ def serve(host: str = "127.0.0.1", port: int = 8080, *, ledger_path: str | None 
     for sink_url in sinks or (os.environ.get("PREFIXWISE_SINKS") or "").split(","):
         if sink_url.strip():
             if getattr(proxy.collector, "remote", False):
-                raise ValueError("--sink needs a ledger here: an edge has none (give the sink to the collector)")
+                print(f"prefixwise: sink {sink_url.strip()} ignored: this is an edge with no ledger; give the sink "
+                      "to the collector", file=sys.stderr)
+                continue
             from .sinks import sink_from_url
             proxy.ledger.add_sink(sink_from_url(sink_url.strip()))
     otel_where = None

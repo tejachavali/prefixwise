@@ -35,11 +35,17 @@ from .transport import Reject, Retry, Sender
 
 _TABLE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)?$")
 _RETRY_STATUSES = (408, 429, 500, 502, 503, 504)
+# ClickHouse answers most query errors with HTTP 500 and names the error in X-ClickHouse-Exception-Code.
+# These codes pass (the server is busy, not the rows wrong); any other code is permanent (a schema
+# mismatch) and the batch is dropped and counted rather than retried six times.
+_CLICKHOUSE_TRANSIENT = {"202", "209", "210", "241", "252", "439"}  # too many queries, socket, network, memory,
+#                                                                     too many parts, cannot schedule
 
 
 def row_dict(entry, at: float | None = None) -> dict:
-    """A ledger row as a sink receives it: the entry's fields plus recorded_at."""
-    d = asdict(entry)
+    """A ledger row as a sink receives it: the entry's fields (booleans as 0/1, as in the ledger)
+    plus recorded_at."""
+    d = {k: (int(v) if isinstance(v, bool) else v) for k, v in asdict(entry).items()}
     d["recorded_at"] = at if at is not None else time.time()
     return d
 
@@ -95,6 +101,9 @@ class ClickHouseBackend:
                 r.read()
         except urllib.error.HTTPError as exc:
             detail = exc.read()[:200].decode("utf-8", "replace")
+            code = exc.headers.get("X-ClickHouse-Exception-Code")
+            if code is not None and code not in _CLICKHOUSE_TRANSIENT:
+                raise Reject(f"ClickHouse error {code} (HTTP {exc.code}): {detail}") from None
             if exc.code in _RETRY_STATUSES:
                 raise Retry(f"HTTP {exc.code}: {detail}") from None
             raise Reject(f"HTTP {exc.code} from ClickHouse: {detail}") from None
@@ -137,7 +146,9 @@ def sink_from_url(url: str):
         table = parts.path.lstrip("/")
         if not table:
             raise ValueError(f"sink {url!r} names no table: clickhouse://host:8123/db.table")
-        return ClickHouseSink(f"{scheme}://{host}:{port}", table, parts.username, parts.password)
+        unq = urllib.parse.unquote
+        return ClickHouseSink(f"{scheme}://{host}:{port}", table, unq(parts.username) if parts.username else None,
+                              unq(parts.password) if parts.password else None)
     raise ValueError(f"unknown sink {url!r}: file:///path.jsonl or clickhouse://host:8123/db.table")
 
 

@@ -83,7 +83,10 @@ def test_partitioning_is_stable_and_specs_parse():
     with pytest.raises(ValueError):
         parse_partitions("0-16", 16)
     assert redacted("redis://u:secret@host:6379/0") == "redis://u:***@host:6379/0"
+    assert redacted("redis://:secret@[::1]:6379/0") == "redis://:***@[::1]:6379/0"
     assert redacted("redis://host:6379/0") == "redis://host:6379/0"
+    with pytest.raises(ValueError):
+        parse_partitions("3-1", 16)
 
 
 def test_edges_write_the_log_and_collectors_split_it_by_session(redis_url, prefix):
@@ -130,6 +133,7 @@ def test_a_restarted_collector_finds_its_state_and_adds_no_duplicate_rows(redis_
     # The collector process restarts: a new Collector over the same ledger, state rebuilt from the log.
     c2, lc2 = consumer(redis_url, prefix, [0, 1, 2, 3], ledger=ledger)
     try:
+        wait_for(lambda: lc2.snapshot()["replaying"] == 0)  # replay runs in the partition threads
         assert lc2.snapshot()["replayed"] == 2 and c2.lane_threads  # lanes are back
         body, headers = bodies[2]
         e.handle("anthropic", dict(body), headers)
@@ -155,20 +159,16 @@ def test_a_record_a_dead_consumer_took_is_processed_once(redis_url, prefix):
     # A consumer that died after reading, before acknowledging: the record sits in its pending list.
     r.xreadgroup("prefixwise", "dead-consumer", {stream: ">"}, count=10)
     assert r.xpending(stream, "prefixwise")["pending"] == 1
-    import prefixwise.log as log_mod
-    old = log_mod.CLAIM_IDLE_MS
-    log_mod.CLAIM_IDLE_MS = 0  # take it over at once (default: after a minute idle)
+    # A starting collector takes over everything its predecessor left pending, idle or not: one
+    # collector per partition means they are its own.
+    c, lc = consumer(redis_url, prefix, [partition_of("s", 4)], replay=False)
     try:
-        c, lc = consumer(redis_url, prefix, [partition_of("s", 4)], replay=False)
-        try:
-            wait_for(lambda: c.stats["records"] == 1)
-            assert lc.snapshot()["claimed"] == 1
-            wait_for(lambda: r.xpending(stream, "prefixwise")["pending"] == 0)
-            assert len(rows(c.ledger)) == 1
-        finally:
-            lc.stop(1)
+        wait_for(lambda: c.stats["records"] == 1)
+        assert lc.snapshot()["claimed"] == 1
+        wait_for(lambda: r.xpending(stream, "prefixwise")["pending"] == 0)
+        assert len(rows(c.ledger)) == 1
     finally:
-        log_mod.CLAIM_IDLE_MS = old
+        lc.stop(1)
 
 
 def test_an_unwritable_ledger_leaves_records_unacknowledged_for_a_retry(redis_url, prefix):
@@ -187,6 +187,8 @@ def test_an_unwritable_ledger_leaves_records_unacknowledged_for_a_retry(redis_ur
         c.ledger.record = real  # the disk is back
         wait_for(lambda: len(rows(c.ledger)) == 1, timeout=15)
         assert lc.snapshot()["acked"] == 1
+        # The failed attempt left no state behind: the retry is still the conversation's first turn.
+        assert rows(c.ledger)[0][1] == "first_write" and c.stats["records"] == 1
     finally:
         e.close(1)
         lc.stop(1)
@@ -201,3 +203,78 @@ def test_the_proxy_takes_a_redis_collector_url(redis_url, prefix, monkeypatch):
     from prefixwise.cli import build_parser, cmd_collect
     args = build_parser().parse_args(["collect", "--log", redis_url, "--partitions", "0-3"])
     assert args.func is cmd_collect and args.log == redis_url and args.partitions == "0-3"
+
+
+def test_records_a_crashed_collector_took_but_never_wrote_are_written_after_the_restart(redis_url, prefix):
+    # Review: replay must not mark delivered-but-unwritten records as seen, or they are acked as
+    # duplicates and lost. Three records sit in a dead consumer's pending list; the restarted
+    # collector replays (nothing to replay: nothing was written), claims them, writes all three.
+    import json
+
+    from prefixwise.records import TurnRecord
+
+    r = redis.Redis.from_url(redis_url)
+    stream = f"{prefix}:{partition_of('s', 4)}"
+    r.xgroup_create(stream, "prefixwise", id="0", mkstream=True)
+    for i in range(3):
+        rec = TurnRecord(provider="openai", api="chat", model="gpt-5.6", session_id="s", agent_id="a",
+                         request_id=f"r-{i}", usage={"prompt_tokens": 2000, "completion_tokens": 1,
+                                                      "prompt_tokens_details": {"cached_tokens": 0}})
+        r.xadd(stream, {"r": json.dumps(rec.to_dict())})
+    r.xreadgroup("prefixwise", "dead-consumer", {stream: ">"}, count=10)  # taken, then the process died
+    c, lc = consumer(redis_url, prefix, [partition_of("s", 4)])  # replay on
+    try:
+        wait_for(lambda: len(rows(c.ledger)) == 3)
+        assert c.stats["duplicates"] == 0 and r.xpending(stream, "prefixwise")["pending"] == 0
+    finally:
+        lc.stop(1)
+
+
+def test_a_record_that_once_broke_the_classifier_does_not_break_every_restart(redis_url, prefix):
+    import json
+
+    from prefixwise.records import TurnRecord
+
+    r = redis.Redis.from_url(redis_url)
+    stream = f"{prefix}:{partition_of('s', 4)}"
+    bad = TurnRecord(provider="openai", api="chat", model="gpt-5.6", session_id="s", agent_id="a", request_id="bad",
+                     usage={"prompt_tokens": "not a number"}).to_dict()  # normalize_usage raises
+    r.xadd(stream, {"r": json.dumps(bad)})
+    ledger = Ledger()
+    c1, lc1 = consumer(redis_url, prefix, [partition_of("s", 4)], ledger=ledger)
+    try:
+        wait_for(lambda: len(rows(ledger)) == 1)
+        assert rows(ledger)[0][14] == "not_recorded"  # a failure row, acknowledged
+    finally:
+        lc1.stop(1)
+    c2, lc2 = consumer(redis_url, prefix, [partition_of("s", 4)], ledger=ledger)  # restart: replays the bad record
+    try:
+        wait_for(lambda: lc2.snapshot()["replaying"] == 0)
+        assert c2.stats["errors"] == 1 and len(rows(ledger)) == 1  # skipped, counted, nothing crashed
+    finally:
+        lc2.stop(1)
+
+
+def test_a_second_collector_on_the_same_partition_is_reported(redis_url, prefix):
+    c1, lc1 = consumer(redis_url, prefix, [0], consumer="one")
+    try:
+        c2, lc2 = consumer(redis_url, prefix, [0], consumer="two")
+        try:
+            assert any("one" in x for x in lc2.snapshot()["conflicts"])
+        finally:
+            lc2.stop(1)
+    finally:
+        lc1.stop(1)
+
+
+def test_seeding_keeps_the_newest_ids():
+    import prefixwise.collector as mod
+
+    c = Collector(Ledger(), PriceTable.load())
+    old = mod.SEEN_REQUESTS
+    mod.SEEN_REQUESTS = 2
+    try:
+        c.seed_seen(["r3", "r2", "r1"])  # newest first, as the ledger gives them
+        assert list(c._seen) == ["r2", "r3"]
+    finally:
+        mod.SEEN_REQUESTS = old

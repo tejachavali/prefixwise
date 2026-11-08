@@ -71,6 +71,7 @@ def test_clickhouse_sink_posts_json_each_row_in_batches():
         assert headers["x-clickhouse-user"] == "writer" and headers["x-clickhouse-key"] == "pw"
         rows = [json.loads(l) for l in body.splitlines()]
         assert rows[0]["request_id"] == "r0" and rows[0]["model"] == "claude-haiku-5-5"
+        assert rows[0]["legit"] is None and isinstance(rows[0]["prompt_tokens"], int)
         assert sink.stats()["sent"] == 3 and sink.stats()["dropped"] == 0
     finally:
         led.close_sinks(1)
@@ -94,8 +95,11 @@ def test_a_failing_sink_never_fails_the_ledger(capsys):
     assert capsys.readouterr().err.count("prefixwise:") == 1  # said once
 
 
-def test_sink_urls():
-    assert isinstance(sink_from_url("/tmp/x.jsonl"), JSONLSink)
+def test_sink_urls(tmp_path):
+    assert isinstance(sink_from_url(str(tmp_path / "x.jsonl")), JSONLSink)
+    s = sink_from_url("clickhouse://us%40er:p%40ss%25@h:8123/db.t")
+    assert (s.sender.backend.user, s.sender.backend.password) == ("us@er", "p@ss%")
+    s.close(0.1)
     with pytest.raises(ValueError):
         sink_from_url("clickhouse://host:8123/")  # no table
     with pytest.raises(ValueError):

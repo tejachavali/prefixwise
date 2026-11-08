@@ -130,15 +130,25 @@ instead of ingesting them:
 Redis Stream partitioned by session id (`crc32(session_id) % PREFIXWISE_LOG_PARTITIONS`, 16 by
 default, the same on every edge and collector). Each collector owns a set of partitions
 (`--partitions 0-7`) and reads each in order through a consumer group, so:
-- a conversation's turns are compared in sequence whatever edge they came through, and no two
-  collectors ever see one session: the ordering and clock caveats of the HTTP transport are gone
-  (the record's own `sent_at`/`done_at` still drive the gap and the concurrent rule);
-- a record is acknowledged only after its ledger row is written (at-least-once); a redelivery is a
-  duplicate by request id, and the duplicate set is seeded from the ledger at start, so a restart
-  mid-batch writes no row twice;
-- at start a collector replays its partitions' retained records into its conversation state (no
-  rows, no metrics), so the first turn after a deploy is compared with its real predecessor;
-- a record a dead collector took and never acknowledged is claimed by a live one after a minute;
+- one collector sees all of a session's turns, in the order they reached the log, and no two
+  collectors ever see one session. What the log fixes is which collector a session reaches and the
+  consumption order; an edge still appends in its own send order, so a backed-up edge can append
+  turn N after another edge appended N+1, and that record is named `unknown` as under HTTP. One
+  edge per conversation remains the way to never see that;
+- a record is acknowledged only after its ledger row is written, and the row is written before
+  the collector's state changes, so a refused row leaves nothing behind and the redelivery is
+  compared with the same predecessor (at-least-once); a redelivery of a written record is a
+  duplicate by request id, with the duplicate set seeded from the ledger at start, so a restart
+  mid-batch writes no row twice and loses none (records delivered but not written are not marked
+  seen by the replay);
+- at start a collector replays its partitions' records of the last day into its conversation state
+  (no rows, no metrics; pending records left out; a record that breaks the classifier is skipped
+  and counted), in each partition's own thread, so `/health` answers meanwhile and shows
+  `replaying`; the first turn after a deploy is then compared with its real predecessor;
+- a starting collector takes over everything its predecessor left unacknowledged at once; a record
+  a dead collector took is claimed by a live one after a minute; a second collector active on the
+  same partition is reported in stderr and `/health` (`conflicts`), since it would split sessions;
+- Redis 7.0 or later (XAUTOCLAIM drops trimmed entries from the pending list only from 7.0);
 - the stream is capped per partition (`PREFIXWISE_LOG_MAXLEN`, 1,000,000 records); records that
   fall off before a collector read them are lost, visibly a capacity decision.
 Tested here against a real Redis (`tests/test_log.py`): two collectors split sessions and together

@@ -145,15 +145,14 @@ class Collector:
         the ledger row). Raises on a broken record or ledger; the edge decides what that means
         for the request (the proxy fails open)."""
         with self._lock:
-            self.stats["records"] += 1
             return self._ingest_locked(rec)
 
     def seed_seen(self, request_ids) -> None:
         """Request ids already in the ledger (after a restart): their redelivery is a duplicate."""
+        ids = [rid for rid in request_ids if rid]
         with self._lock:
-            for rid in request_ids:
-                if rid:
-                    self._seen[rid] = None
+            for rid in reversed(ids):  # given newest first: insert oldest first, so the newest survive eviction
+                self._seen[rid] = None
             while len(self._seen) > SEEN_REQUESTS:
                 self._seen.popitem(last=False)
 
@@ -172,25 +171,37 @@ class Collector:
         if len(items) > MAX_BATCH:
             raise RecordError(f"at most {MAX_BATCH} records per batch")
         accepted, duplicates, rejected = 0, 0, []
+        replayed: set = set()
         for i, item in enumerate(items):
             try:
                 rec = TurnRecord.from_dict(item)
             except RecordError as exc:
                 rejected.append({"index": i, "error": str(exc)})
                 continue
+            if replay:
+                # State only. The duplicate set is seeded from the ledger, not from here: a record that
+                # was delivered but never written must still be written when it is delivered again.
+                if rec.request_id in replayed:
+                    continue
+                replayed.add(rec.request_id)
+                if not rec.failed:
+                    try:
+                        with self._lock:
+                            self._ingest_locked(rec, write=False)
+                    except Exception as exc:  # noqa: BLE001 - a record that broke once must not break every start
+                        with self._lock:
+                            self.stats["errors"] += 1
+                        print(f"prefixwise: record {rec.request_id} skipped in replay ({type(exc).__name__}: {exc})",
+                              file=sys.stderr, flush=True)
+                accepted += 1
+                continue
             with self._lock:
-                if rec.request_id in self._seen and not replay:
+                if rec.request_id in self._seen:
                     duplicates += 1
                     continue
                 self._seen[rec.request_id] = None
                 while len(self._seen) > SEEN_REQUESTS:
                     self._seen.popitem(last=False)
-            if replay:
-                if not rec.failed:
-                    with self._lock:
-                        self._ingest_locked(rec, write=False)
-                accepted += 1
-                continue
             try:
                 if rec.failed:
                     self.ingest_failure(rec)
@@ -226,8 +237,8 @@ class Collector:
             stream=rec.stream, latency_ms=rec.latency_ms, overhead_ms=rec.overhead_ms)
         self.metrics.observe(entry)  # counted even if the ledger write fails
         with self._lock:
-            self.stats["failures"] += 1
             self.ledger.record(entry)
+            self.stats["failures"] += 1
         return entry
 
     def _stitch(self, previous_response_id: str, fps: list) -> tuple[list | None, RequestSnapshot | None]:
@@ -245,6 +256,9 @@ class Collector:
         return head + old_msgs + new_msgs, prior
 
     def _ingest_locked(self, rec: TurnRecord, write: bool = True) -> tuple[dict, LedgerEntry]:
+        """Classify against the conversation's previous turn, write the row, then commit the new
+        state. The row comes first: if the ledger refuses it, nothing has changed here, so the
+        record can be delivered again and compared with the same predecessor."""
         provider, session_id, usage = rec.provider, rec.session_id, rec.usage
         prompt_tokens, cached = normalize_usage(provider, usage)
         native_reason, response_id, fps = rec.native_reason, rec.response_id, list(rec.blocks)
@@ -270,12 +284,11 @@ class Collector:
             gap_seconds = max(0.0, started - prev_done)
             concurrent = started < prev_done - CLOCK_SKEW  # sent while the compared turn was still in flight
         else:
-            concurrent = False
             # First turn on this model: FIRST_WRITE for a new session, else
             # MODEL_SWITCH (the classifier compares models first).
             prev = self.last_snapshot.get(session_id)
             gap_seconds = max(0.0, started - self.last_seen[session_id]) if session_id in self.last_seen else None
-        self.last_seen[session_id] = now
+            concurrent = False
         unknown_parent = False
         if stitched:
             stitched_fps, prior = self._stitch(str(rec.previous_response_id), fps)
@@ -311,7 +324,6 @@ class Collector:
         elif concurrent and not stitched and curr.cached_tokens < prompt_tokens * 0.5:
             # It could not have read what the compared turn wrote (that was still being written), and
             # the record of an earlier turn may be the one that arrived late: no cause is claimed.
-            self.stats["concurrent"] += 1
             result = Classification(MissCause.UNKNOWN, None,
                                     f"sent {prev_done - started:.1f} s before the previous turn of this conversation "
                                     "had finished: a parallel request, or its record arrived late; it could not have "
@@ -335,22 +347,6 @@ class Collector:
                                     result.secondary + [result.cause], native_reason)
         elif why:
             result.evidence = f"{result.evidence}; {why}"
-        self.session_facts[session_id] = facts
-        if result.score and write:  # a verdict overriding the compared pair is not an (dis)agreement
-            self.scorer.record(result.cause, native_reason, provider)
-        self.last_snapshot[session_id] = curr
-        if state is None:
-            state = _Lane()
-        state.threads[identity[0]] = (curr, now, facts, response_id)
-        state.threads.move_to_end(identity[0])
-        while len(state.threads) > LANE_THREADS:
-            state.threads.popitem(last=False)
-        state.latest = identity[0]
-        self.lane_threads[lane] = state  # (re)assigning refreshes the lane in the LRU
-        if response_id:
-            self.last_response_id[session_id] = response_id
-            if rec.api == "responses":
-                self.snapshot_by_response[response_id] = curr
 
         div = first_divergence(prev.blocks, curr.blocks) if prev is not None else None
         priced_model = str(rec.response_model or rec.model)
@@ -394,9 +390,31 @@ class Collector:
                 entry.unread_write_cost = self.prices.write_surcharge(priced_model, prev.prompt_tokens, w5, w1, cw)
         if entry.cost is not None:
             entry.price_as_of = self.prices.as_of
-        if write:  # a replay after a restart rebuilds the state above; the row already exists
+
+        if write:  # the row first: a refused row leaves the state untouched for a redelivery
             self.ledger.record(entry)
             self.metrics.observe(entry)
+            self.stats["records"] += 1
+            if concurrent and result.cause is MissCause.UNKNOWN and not unknown_parent:
+                self.stats["concurrent"] += 1
+            if result.score:  # a verdict overriding the compared pair is not an (dis)agreement
+                self.scorer.record(result.cause, native_reason, provider)
+        # Then the conversation state this turn leaves behind.
+        self.last_seen[session_id] = now
+        self.session_facts[session_id] = facts
+        self.last_snapshot[session_id] = curr
+        if state is None:
+            state = _Lane()
+        state.threads[identity[0]] = (curr, now, facts, response_id)
+        state.threads.move_to_end(identity[0])
+        while len(state.threads) > LANE_THREADS:
+            state.threads.popitem(last=False)
+        state.latest = identity[0]
+        self.lane_threads[lane] = state  # (re)assigning refreshes the lane in the LRU
+        if response_id:
+            self.last_response_id[session_id] = response_id
+            if rec.api == "responses":
+                self.snapshot_by_response[response_id] = curr
         return {"request_id": rec.request_id, "status": rec.status, "cause": result.cause.value,
                 "legit": result.legit, "native_reason": native_reason, "usage": usage,
                 "prompt_tokens": prompt_tokens, "cached_tokens": cached,
