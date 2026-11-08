@@ -36,10 +36,15 @@ Configuration, when vLLM instantiates the class with `app` only, comes from the 
   so once at startup when it sees that flag without a collector.
 - `PREFIXWISE_FULL_ATTENTION=1` (SGLang): the model has no sliding-window or Mamba layers.
 
-Limits: inside vLLM the middleware runs outside vLLM's own API-key check, so a request the key
-rejects is recorded as a failed request (a row without a verdict), as the proxy records a 401.
-The ledger, `/api/v1` and `prefixwise report` are not served by the engine's port: read the
-ledger file with the CLI, or run a collector and point `PREFIXWISE_COLLECTOR` at it.
+Limits: inside vLLM the middleware runs outside vLLM's own API-key check (it is the outermost
+middleware), so an unauthenticated request is still buffered and fingerprinted before the key
+rejects it, and the 401 is recorded as a failed request (a row without a verdict), as the proxy
+records one; bodies over `PREFIXWISE_MAX_BODY_BYTES` (32 MiB) pass through unexamined. The ledger,
+`/api/v1` and `prefixwise report` are not served by the engine's port: read the ledger file with
+the CLI, or run a collector and point `PREFIXWISE_COLLECTOR` at it. SGLang has no middleware flag,
+and its KV join needs `/server_info`, which an in-process edge cannot reach: for SGLang, run the
+proxy (docs/SGLANG.md); here `PREFIXWISE_ENGINE=sglang` names the engine (evictions inferred) and
+any `PREFIXWISE_KV_EVENTS` is declined with a note.
 """
 
 from __future__ import annotations
@@ -51,11 +56,12 @@ import os
 import sys
 import threading
 import time
-from urllib.parse import urlsplit
+from concurrent.futures import ThreadPoolExecutor
 
-from .proxy import CLASSIFIED_PATHS, PrefixwiseProxy, StreamAccumulator, _reachable, route
+from .proxy import CLASSIFIED_PATHS, MAX_BODY_BYTES, PrefixwiseProxy, StreamAccumulator, _reachable, route
 
 _MISSING = object()
+WORKERS = int(os.environ.get("PREFIXWISE_ASGI_WORKERS", "32"))  # threads for prepare / classify / write
 
 
 def _env(name: str, *alts: str, default: str | None = None) -> str | None:
@@ -133,13 +139,18 @@ class PrefixwiseMiddleware:
         ledger = ledger or get("PREFIXWISE_LEDGER", "PREFIXWISE_LEDGER_PATH", default="prefixwise.db")
         self.engine = engine or get("PREFIXWISE_ENGINE") or _default_engine()
         if fixes is None:
-            fixes = [f for f in (get("PREFIXWISE_FIX", default="") or "").split(",") if f.strip()] or None
+            fixes = [f for f in (get("PREFIXWISE_FIX", "PREFIXWISE_FIXES", default="") or "").split(",") if f.strip()] or None
         if full_attention is None and get("PREFIXWISE_FULL_ATTENTION"):
             full_attention = get("PREFIXWISE_FULL_ATTENTION").lower() not in ("0", "false", "no", "off")
         collector_url = collector_url if collector_url is not None else get("PREFIXWISE_COLLECTOR", "PREFIXWISE_LOG")
         kv = kv_events if kv_events is not None else get("PREFIXWISE_KV_EVENTS")
         if kv is None and self.engine == "vllm":
             kv = "auto"  # from the engine itself, on the first request
+        self.notes: list[str] = []
+        if kv and self.engine == "sglang":  # the join reads /server_info, which this process cannot serve itself
+            self._note("SGLang's KV join needs its /server_info, which an in-process edge cannot read: run the proxy "
+                       "(prefixwise serve --engine sglang --kv-events ...) for confirmed evictions; here they are inferred")
+            kv = None
         # `auto` is resolved lazily from the running engine: never passed to the proxy, which would
         # ask an upstream URL that does not exist here.
         self._lazy_kv = kv == "auto" and self.engine is not None
@@ -151,9 +162,11 @@ class PrefixwiseMiddleware:
                                      kv_events=None if self._lazy_kv else self._pending_kv,
                                      full_attention=full_attention, collector_url=collector_url or None)
         self.proxy.versioned = set()  # paths are the engine's own: no /v1 juggling
+        self._pool = ThreadPoolExecutor(max_workers=WORKERS, thread_name_prefix="prefixwise")
         self._kv_lock = threading.Lock()
         self._kv_done = not self._lazy_kv
-        self.notes: list[str] = []
+        for note in self.proxy.engine_notes:
+            self._note(note)
         self._warn_workers(argv, collector_url)
 
     # -- startup notes ------------------------------------------------------------------
@@ -213,12 +226,14 @@ class PrefixwiseMiddleware:
                 return []  # an async client: nothing to await from here; the argv fallback follows
         except Exception:  # noqa: BLE001
             return []
+        def field(cfg, name):  # vLLM hands back KVEventsConfig dataclasses; a stub or a JSON copy, dicts
+            return cfg.get(name) if isinstance(cfg, dict) else getattr(cfg, name, None)
         sources = []
         for rank, cfg in sorted((info or {}).items(), key=lambda kv: int(kv[0]) if str(kv[0]).isdigit() else 0):
-            cfg = cfg or {}
-            if isinstance(cfg, dict) and cfg.get("enable_kv_cache_events") and cfg.get("publisher") == "zmq" \
-                    and cfg.get("endpoint"):
-                sources.append((f"rank {rank}", _reachable(str(cfg["endpoint"]), "127.0.0.1")))
+            if cfg is None:
+                continue
+            if field(cfg, "enable_kv_cache_events") and field(cfg, "publisher") == "zmq" and field(cfg, "endpoint"):
+                sources.append((f"rank {rank}", _reachable(str(field(cfg, "endpoint")), "127.0.0.1")))
         return sources
 
     # -- ASGI -----------------------------------------------------------------------------
@@ -230,19 +245,22 @@ class PrefixwiseMiddleware:
         if path not in CLASSIFIED_PATHS:
             return await self.app(scope, receive, send)
         body = await _read_body(receive)
-        try:
-            data = json.loads(body)
-        except ValueError:
-            data = None
-        if not isinstance(data, dict):  # let the engine answer the malformed request itself
+        data = None
+        if len(body) <= MAX_BODY_BYTES:
+            try:
+                data = json.loads(body)
+            except ValueError:
+                data = None
+        if not isinstance(data, dict):  # malformed, or too large to examine: the engine answers it itself
             return await self.app(scope, _replay(body, receive), send)
         provider = "anthropic" if path == "/v1/messages" else "openai"
         api = "responses" if path == "/v1/responses" else "chat"
         headers = {k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope.get("headers") or []}
         self._ensure_kv(scope)
         loop = asyncio.get_running_loop()
+        run = lambda fn: loop.run_in_executor(self._pool, fn)  # noqa: E731
         try:
-            ctx = await loop.run_in_executor(None, lambda: self.proxy.prepare(provider, data, headers, api))
+            ctx = await run(lambda: self.proxy.prepare(provider, data, headers, api))
         except Exception as exc:  # noqa: BLE001 - a Prefixwise error never fails the request
             print(f"prefixwise: request passed through unrecorded: {type(exc).__name__}: {exc}",
                   file=sys.stderr, flush=True)
@@ -261,10 +279,11 @@ class PrefixwiseMiddleware:
             acc = StreamAccumulator(provider, suppress_usage_chunk=injected, api=api)
         new_body = json.dumps(fwd).encode()
         new_scope = dict(scope)
-        new_scope["headers"] = [(k, v) for k, v in (scope.get("headers") or []) if k.lower() != b"content-length"]
+        new_scope["headers"] = [(k, v) for k, v in (scope.get("headers") or [])
+                                if k.lower() not in (b"content-length", b"transfer-encoding")]
         new_scope["headers"].append((b"content-length", str(len(new_body)).encode()))
         sent_at = time.perf_counter()
-        relay = _Relay(self, ctx, acc, send, loop, sent_at)
+        relay = _Relay(self, ctx, acc, send, run, sent_at)
         try:
             await self.app(new_scope, _replay(new_body, receive), relay.send)
         except Exception:
@@ -303,8 +322,8 @@ class _Relay:
     """Wraps `send`: buffers a JSON response to add the verdict headers; relays a stream as it
     passes, reading usage from it; records the row when the response is complete."""
 
-    def __init__(self, mw: PrefixwiseMiddleware, ctx: dict, acc: StreamAccumulator | None, send, loop, sent_at: float):
-        self.mw, self.ctx, self.acc, self._send, self.loop, self.sent_at = mw, ctx, acc, send, loop, sent_at
+    def __init__(self, mw: PrefixwiseMiddleware, ctx: dict, acc: StreamAccumulator | None, send, run, sent_at: float):
+        self.mw, self.ctx, self.acc, self._send, self.run, self.sent_at = mw, ctx, acc, send, run, sent_at
         self.status = 200
         self.headers: list = []
         self.started = False  # http.response.start passed to the client
@@ -325,7 +344,9 @@ class _Relay:
             if self.streaming:  # headers go out before usage is known: the verdict rides no header here
                 await self._start([(b"x-prefixwise-request-id", self.ctx["request_id"].encode())])
             return  # a JSON response: start is sent with the verdict headers, once the body is known
-        if kind != "http.response.body":
+        if kind != "http.response.body":  # pathsend, trailers, debug: start must go first for a deferred JSON response
+            if not self.started and not self.streaming:
+                await self._start([(b"x-prefixwise-request-id", self.ctx["request_id"].encode())])
             return await self._send(message)
         chunk = message.get("body") or b""
         more = bool(message.get("more_body"))
@@ -377,10 +398,9 @@ class _Relay:
         extra = [(b"x-prefixwise-request-id", self.ctx["request_id"].encode())]
         if self.status >= 400 or not isinstance(payload, dict):
             err = payload if isinstance(payload, dict) else None
-            await self.loop.run_in_executor(None, lambda: self.mw.proxy.record_failure(self.ctx, self.status, err))
+            await self.run(lambda: self.mw.proxy.record_failure(self.ctx, self.status, err))
         else:
-            result, _ = await self.loop.run_in_executor(
-                None, lambda: self.mw.proxy.finalize_safely(self.ctx, self.status, payload))
+            result, _ = await self.run(lambda: self.mw.proxy.finalize_safely(self.ctx, self.status, payload))
             if result.get("recorded") is False:
                 extra.append((b"x-prefixwise-error", b"not recorded (see server log)"))
             if "queued" in result:
@@ -403,8 +423,7 @@ class _Relay:
             self.recording = self.mw.proxy.begin_recording(self.ctx)
         rec = self.recording
         try:
-            await self.loop.run_in_executor(
-                None, lambda: self.mw.proxy.finalize_safely(self.ctx, self.status, self.acc.payload))
+            await self.run(lambda: self.mw.proxy.finalize_safely(self.ctx, self.status, self.acc.payload))
         finally:
             self.mw.proxy.end_recording(self.ctx, rec)
 
@@ -418,16 +437,20 @@ class _Relay:
             self.mw.proxy.engine_events.discard(self.ctx.get("engine_token"))
         code = status if status is not None else (self.status if self.status >= 400 else 500)
         try:
-            await self.loop.run_in_executor(None, lambda: self.mw.proxy.record_failure(self.ctx, code, error=error))
+            await self.run(lambda: self.mw.proxy.record_failure(self.ctx, code, error=error))
         finally:
             self.mw.proxy.end_recording(self.ctx, self.recording)
 
     async def finish(self) -> None:
-        """The app returned. A stream request answered with an error body, or an app that never
-        sent a body, is completed here."""
+        """The app returned. A stream that never reached its last chunk is a client that went away
+        (Starlette's StreamingResponse returns without the final message when its disconnect listener
+        fires); a stream request answered with an error body, or an app that sent nothing, is
+        completed here."""
         if self.done:
             return
-        if self.acc is not None and not self.streaming:  # a stream request answered with JSON (an error)
+        if self.streaming:
+            await self.failed("client_disconnected", 499)
+        elif self.acc is not None:  # a stream request answered with JSON (an error)
             await self._complete_json()
         elif not self.started:
             await self.failed("no_response")

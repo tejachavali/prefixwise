@@ -75,8 +75,7 @@ class FakeEngine:
 def call(app, method, path, body=None, headers=None, chunks=2):
     """Drive an ASGI app; returns (status, headers dict, body bytes, list of body messages)."""
     raw = json.dumps(body).encode() if isinstance(body, dict) else (body or b"")
-    parts = [raw[i::chunks] for i in range(chunks)] if raw and chunks > 1 else [raw]
-    # interleave properly: split raw into consecutive slices instead
+    parts = [raw]
     if raw and chunks > 1:
         n = max(1, len(raw) // chunks)
         parts = [raw[i:i + n] for i in range(0, len(raw), n)]
@@ -224,9 +223,10 @@ def test_kv_events_come_from_the_engine_client_once_and_argv_is_the_last_resort(
         mw.proxy.engine_events = types.SimpleNamespace(discard=lambda t: None, request_sent=lambda s: 1,
                                                         request_done=lambda *a: (None, None))
     eng = FakeEngine([("json", openai_payload(0)), ("json", openai_payload(0))])
+    # vLLM hands back KVEventsConfig dataclasses keyed by int rank, not dicts
     eng.state.engine_client = types.SimpleNamespace(get_kv_event_sources=lambda: {
-        "0": {"enable_kv_cache_events": True, "publisher": "zmq", "endpoint": "tcp://*:5557"},
-        "1": {"enable_kv_cache_events": True, "publisher": "zmq", "endpoint": "tcp://*:5558"}})
+        0: types.SimpleNamespace(enable_kv_cache_events=True, publisher="zmq", endpoint="tcp://*:5557", topic=""),
+        1: types.SimpleNamespace(enable_kv_cache_events=True, publisher="zmq", endpoint="tcp://*:5558", topic="")})
     mw = middleware(eng, engine_name="vllm", kv="auto")
     mw.proxy._start_events = fake_start
     msgs = [{"role": "system", "content": SYSTEM}, {"role": "user", "content": "hi"}]
@@ -251,6 +251,54 @@ def test_kv_events_come_from_the_engine_client_once_and_argv_is_the_last_resort(
     call(mw3, "POST", "/v1/chat/completions", {"model": "m", "messages": msgs})
     call(mw3, "POST", "/v1/chat/completions", {"model": "m", "messages": msgs})
     assert sum("publishes no KV events" in n for n in mw3.notes) == 1 and mw3.proxy.engine_events is None
+
+
+def test_a_client_that_leaves_mid_stream_a_raising_app_and_a_silent_app_are_failed_rows_that_release_the_turn():
+    class Leaves(FakeEngine):  # Starlette's StreamingResponse returns without the last message on disconnect
+        async def __call__(self, scope, receive, send):
+            await send({"type": "http.response.start", "status": 200, "headers": [(b"content-type", b"text/event-stream")]})
+            await send({"type": "http.response.body", "body": b"data: {\"id\": \"chatcmpl-1\", \"choices\": []}\n\n", "more_body": True})
+
+    class Raises(FakeEngine):
+        async def __call__(self, scope, receive, send):
+            raise RuntimeError("engine died")
+
+    class Silent(FakeEngine):
+        async def __call__(self, scope, receive, send):
+            return
+    msgs = [{"role": "system", "content": SYSTEM}, {"role": "user", "content": "hi"}]
+    body = {"model": "m", "messages": msgs, "stream": True}
+    mw = middleware(Leaves([]))
+    st, h, _, _ = call(mw, "POST", "/v1/chat/completions", body, {"x-prefixwise-session-id": "s"})
+    row = mw.proxy.ledger.recent(1)[0]
+    assert st == 200 and row["status"] == 499 and row["error"] == "client_disconnected" and row["cause"] is None
+    assert mw.proxy._recording == {}  # the next turn of this conversation does not wait
+    mw = middleware(Raises([]))
+    with pytest.raises(RuntimeError):
+        call(mw, "POST", "/v1/chat/completions", {"model": "m", "messages": msgs}, {"x-prefixwise-session-id": "s"})
+    row = mw.proxy.ledger.recent(1)[0]
+    assert row["status"] == 500 and row["error"] == "app_error" and mw.proxy._recording == {}
+    mw = middleware(Silent([]))
+    call(mw, "POST", "/v1/chat/completions", {"model": "m", "messages": msgs})
+    assert mw.proxy.ledger.recent(1)[0]["error"] == "no_response"
+    # a body over the cap passes through unexamined
+    import prefixwise.asgi as asgi_mod
+    eng = FakeEngine([("json", openai_payload(0))])
+    mw = middleware(eng)
+    old = asgi_mod.MAX_BODY_BYTES
+    asgi_mod.MAX_BODY_BYTES = 10
+    try:
+        st, h, _, _ = call(mw, "POST", "/v1/chat/completions", {"model": "m", "messages": msgs})
+    finally:
+        asgi_mod.MAX_BODY_BYTES = old
+    assert st == 200 and "x-prefixwise-request-id" not in h and mw.proxy.ledger.recent(1) == []
+
+
+def test_sglang_in_process_declines_kv_events_with_a_note():
+    mw = PrefixwiseMiddleware(FakeEngine([]), ledger=":memory:", engine="sglang", kv_events="tcp://127.0.0.1:5557",
+                              argv=[], env={})
+    assert mw.proxy.engine == "sglang" and mw.proxy.engine_events is None
+    assert any("run the proxy" in n for n in mw.notes)
 
 
 def test_argv_helpers():

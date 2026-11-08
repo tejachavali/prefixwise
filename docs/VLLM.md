@@ -81,8 +81,12 @@ its own middleware; without one collector seeing every turn, a session's turns s
 processes and read as misses. The middleware says so once at startup when it sees that flag
 without a collector. The same class works in your own FastAPI or Starlette app
 (`app.add_middleware(PrefixwiseMiddleware, ledger="prefixwise.db")`); SGLang has no middleware
-flag, so SGLang users run the proxy ([SGLANG.md](SGLANG.md)). Tested against a stand-in ASGI
-engine (`tests/test_asgi.py`); not yet run inside a live `vllm serve`.
+flag and its KV join needs `/server_info`, so SGLang users run the proxy ([SGLANG.md](SGLANG.md)).
+The middleware sits outside vLLM's API-key check, so an unauthenticated request is fingerprinted
+before it is rejected and its 401 is a row without a verdict; bodies over 32 MiB
+(`PREFIXWISE_MAX_BODY_BYTES`) pass through unexamined. Tested against a stand-in ASGI engine
+(`tests/test_asgi.py`, including a client that leaves mid-stream); not yet run inside a live
+`vllm serve`.
 
 ## What the verdicts mean
 
