@@ -34,7 +34,9 @@ Each release:
 1. Set `version` in `pyproject.toml` and `__version__` in `src/prefixwise/__init__.py`.
 2. Move the CHANGELOG's "unreleased" heading to the version and date, and merge to `main`.
 3. Tag the merge: `git tag v0.3.0 && git push origin v0.3.0`.
-4. `.github/workflows/release.yml` checks that the tag matches the version, runs the tests, builds, and publishes.
+4. `.github/workflows/release.yml` checks that the tag matches the version, runs the tests, builds, publishes to PyPI,
+   then creates the GitHub Release from that version's CHANGELOG section with the same files (so the Releases page
+   never lags PyPI). `tests/test_release.py` fails early if the CHANGELOG has no section for the current version.
 
 ## Security
 

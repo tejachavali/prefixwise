@@ -1,6 +1,7 @@
 name: Release
 
-# Publishes to PyPI when a version tag is pushed (git tag v0.3.0 && git push origin v0.3.0).
+# Publishes to PyPI, then creates the GitHub Release, when a version tag is pushed
+# (git tag v0.3.0 && git push origin v0.3.0).
 # Uses PyPI trusted publishing (OIDC): no API token is stored anywhere. One-time setup
 # on pypi.org is described in CONTRIBUTING.md ("Releasing").
 
@@ -46,3 +47,28 @@ jobs:
           name: dist
           path: dist/
       - uses: pypa/gh-action-pypi-publish@release/v1
+
+  # The GitHub Release, from the CHANGELOG section of this version, with the same files PyPI got,
+  # so the repository's Releases page never lags PyPI. Runs only after PyPI accepted them.
+  github-release:
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # create the release; nothing else
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - name: Release notes from the CHANGELOG
+        run: |
+          awk -v v="${GITHUB_REF_NAME#v}" -f .github/release-notes.awk CHANGELOG.md > notes.md
+          test -s notes.md || { echo "CHANGELOG.md has no section for ${GITHUB_REF_NAME#v}"; exit 1; }
+      - name: Create the release (once)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 && { echo "release exists"; exit 0; }
+          gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --title "${GITHUB_REF_NAME#v}" \
+            --notes-file notes.md
