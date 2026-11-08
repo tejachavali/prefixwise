@@ -172,6 +172,8 @@ def usage_facts(f: Facts, usage: dict, cache_write: int) -> Facts:
     f.write_5m = int(created.get("ephemeral_5m_input_tokens") or 0)
     f.write_1h = int(created.get("ephemeral_1h_input_tokens") or 0)
     f.cache_write = int(cache_write or 0)
+    if f.provider == "anthropic" and not created and f.cache_write:
+        f.write_5m = f.cache_write  # no split reported: a 5-minute write (as pricing.breakdown reads it)
     return f
 
 

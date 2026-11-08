@@ -1002,6 +1002,7 @@ class PrefixwiseProxy:
         state = self.lane_threads.get(lane)
         identity = _identity(fps)
         new_thread, interleaved, parent_facts = False, False, None
+        prior_latest = state.latest if state is not None else None
         if state is not None:
             # Compare with the previous turn of this request's own conversation: the lane's latest
             # turn, unless another conversation interleaved (parallel subagents on one model).
@@ -1044,6 +1045,8 @@ class PrefixwiseProxy:
                                session_id=session_id)
         curr.engine = self.engine is not None
         curr.engine_caches = self.engine_caches
+        parts = breakdown(provider, usage)
+        curr.cache_written = parts.cache_write_5m + parts.cache_write_1h + parts.cache_write
         curr.new_thread, curr.interleaved = new_thread, interleaved
         if ctx.get("engine_verdict") is not None:
             verdict = ctx["engine_verdict"]
@@ -1060,7 +1063,6 @@ class PrefixwiseProxy:
                 result.evidence = (f"{result.evidence}; compared with this conversation's last turn "
                                    "(another conversation in this session came between)")
         # The why behind the cause, where the evidence allows (prefixwise.details).
-        parts = breakdown(provider, usage)
         facts = usage_facts(ctx.get("facts") or Facts(provider=provider), usage,
                             parts.cache_write_5m + parts.cache_write_1h + parts.cache_write)
         facts.done_at = now
@@ -1118,7 +1120,10 @@ class PrefixwiseProxy:
         priced_model = str(payload.get("model") or ctx["model"])
         entry.avoidable_cost = self.prices.avoidable_cost(priced_model, entry.avoidable_tokens, prompt_tokens,
                                                      provider, usage)
-        if prev_facts is not None and prev is not None and prompt_tokens > 0:
+        # The previous turn's cache write, left unread: only when that turn is this conversation's
+        # own (not another conversation this request fell back to, e.g. a same-model side call).
+        own = state is not None and (interleaved or identity[0] == prior_latest)
+        if own and prev_facts is not None and prev is not None and prompt_tokens > 0:
             w5, w1, cw = unread_write(result.cause.value, cached, prev_facts.write_5m, prev_facts.write_1h,
                                       prev_facts.cache_write)
             if w5 or w1 or cw:

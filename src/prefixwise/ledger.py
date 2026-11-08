@@ -81,15 +81,19 @@ class LedgerEntry:
     schema_version: int = SCHEMA_VERSION
 
 
-# Causes after which the previous turn's cache write is still of use: nothing was invalidated.
-_WRITE_KEPT = frozenset({"none", "first_write", "fork_boundary", "model_switch"})
+# Causes that replaced the cached prefix (or let it expire): the previous turn's write is of no
+# further use. A retry, a routing miss or an eviction leave the entry as it was, so they are not
+# here: a later turn may still read it.
+_WRITE_REPLACED = frozenset({"volatile_system", "system_edit", "tool_reserialize", "tool_catalog_change",
+                             "history_edit", "tool_result_mutation", "compaction_rewrite", "ttl_expired",
+                             "param_rendered"})
 
 
 def unread_write(cause: str, cached_tokens: int, prev_write_5m: int, prev_write_1h: int,
                  prev_cache_write: int) -> tuple[int, int, int]:
     """(5-minute, 1-hour, single-rate) tokens the previous turn wrote that this turn, a miss
-    reading nothing, left unread; all zero when not applicable."""
-    if cause in _WRITE_KEPT or cached_tokens > 0:
+    reading nothing that replaced the prefix, left unread; all zero when not applicable."""
+    if cause not in _WRITE_REPLACED or cached_tokens > 0:
         return 0, 0, 0
     if prev_write_5m or prev_write_1h:
         return prev_write_5m, prev_write_1h, 0

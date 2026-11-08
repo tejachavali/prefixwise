@@ -89,6 +89,10 @@ class RequestSnapshot:
     params: dict = field(default_factory=dict)
     prompt_tokens: int = 0
     cached_tokens: int = 0
+    # Tokens this request wrote to the cache (0 when the provider does not report writes).
+    # What the cache holds after a turn is what it read plus what it wrote; the next turn can
+    # read no more than that, however long the uncached tail after the last breakpoint was.
+    cache_written: int = 0
     # Seconds since the previous turn in this session; None = unknown.
     gap_seconds: float | None = None
     ttl_seconds: float | None = None
@@ -172,6 +176,16 @@ def _min_prefix(curr: RequestSnapshot) -> int | None:
     if curr.provider == "anthropic":
         return anthropic_min_prefix(curr.model)
     return {"openai": OPENAI_MIN_PREFIX, "gemini": GEMINI_MIN_PREFIX}.get(curr.provider)
+
+
+def _served_all(prev: RequestSnapshot, curr: RequestSnapshot) -> bool:
+    """The cache served everything the previous turn left in it that this turn could reuse."""
+    if not curr.usage_known or curr.prompt_tokens <= 0:
+        return False
+    reusable = min(prev.prompt_tokens, curr.prompt_tokens) if prev.prompt_tokens else curr.prompt_tokens
+    held = prev.cached_tokens + prev.cache_written
+    target = min(reusable, held) if prev.cache_written > 0 else reusable
+    return target > 0 and curr.cached_tokens >= target
 
 
 def _first_change(prev: RequestSnapshot, curr: RequestSnapshot, secondary: list,
@@ -283,7 +297,7 @@ def classify(prev: RequestSnapshot | None, curr: RequestSnapshot,
                                   f"gap {gap:.0f}s since last turn exceeds the cache TTL {ttl:.0f}s and nothing "
                                   f"was read; the {changed.cause.value} after it cost nothing more",
                                   secondary + [changed.cause], native_reason, score=False)
-        if curr.usage_known and curr.prompt_tokens > 0 and reusable > 0 and curr.cached_tokens >= reusable:
+        if _served_all(prev, curr):
             # The provider served all of the prefix the previous turn could share: the change
             # was after it (or did not reach the rendered prompt) and cost nothing.
             return Classification(MissCause.NONE, None,
@@ -296,7 +310,7 @@ def classify(prev: RequestSnapshot | None, curr: RequestSnapshot,
     # if the cache served all of the reusable prefix, a changed param did not reach the rendered
     # prompt, the markers were not needed (or were not misplaced) and the minimum did not apply.
     reusable = min(prev.prompt_tokens, curr.prompt_tokens) if prev.prompt_tokens else curr.prompt_tokens
-    if curr.usage_known and curr.prompt_tokens > 0 and reusable > 0 and curr.cached_tokens >= reusable:
+    if _served_all(prev, curr):
         if prev.params != curr.params:
             secondary.append(MissCause.PARAM_RENDERED)
         return Classification(MissCause.NONE, None,

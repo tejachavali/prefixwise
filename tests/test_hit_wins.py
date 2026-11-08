@@ -63,13 +63,15 @@ def test_write_surcharge_rates():
     assert T.write_surcharge("unknown-model", 10_000, write_5m=10) is None
 
 
-def test_unread_write_only_after_a_cold_miss():
+def test_unread_write_only_after_a_cold_miss_that_replaced_the_prefix():
     assert unread_write("volatile_system", 0, 8_000, 0, 0) == (8_000, 0, 0)
     assert unread_write("ttl_expired", 0, 0, 8_000, 0) == (0, 8_000, 0)
+    assert unread_write("history_edit", 0, 0, 0, 8_000) == (0, 0, 8_000)  # single-rate provider
     assert unread_write("volatile_system", 100, 8_000, 0, 0) == (0, 0, 0)  # something was read
-    for kept in ("none", "first_write", "fork_boundary", "model_switch"):
+    # The entry was not replaced: a later turn may still read it (review: a retry, then a hit).
+    for kept in ("none", "first_write", "fork_boundary", "model_switch", "retry_replay", "routing_miss",
+                 "evicted", "unknown", "breakpoint_misplaced"):
         assert unread_write(kept, 0, 8_000, 0, 0) == (0, 0, 0)
-    assert unread_write("routing_miss", 0, 0, 0, 8_000) == (0, 0, 8_000)  # single-rate provider
 
 
 def test_report_shows_the_price_of_unread_writes():
@@ -84,3 +86,69 @@ def test_report_shows_the_price_of_unread_writes():
     assert (u["requests"], u["tokens"], u["surcharge_usd"]) == (1, 8_000, 0.004)
     out = render(findings(led))
     assert "Cache writes never read: 8,000 tokens" in out and "$0.0040" in out and "not counted twice" in out
+
+
+# End to end through the proxy (review: both production paths were untested).
+
+import copy
+
+from test_details import MODEL, USER, a_usage, body, proxy, turn
+
+DATED = lambda d: [{"type": "text", "text": "You are a careful agent. " * 200 + f" today {d}",  # noqa: E731
+                    "cache_control": {"type": "ephemeral"}}]
+MORE = [USER, {"role": "assistant", "content": "ok"}, {"role": "user", "content": "more"}]
+
+
+def dated(messages, day):
+    b = body(messages)
+    b["system"] = DATED(day)
+    return b
+
+
+def test_proxy_prices_an_unread_write_without_the_ttl_split():
+    # Anthropic usage without cache_creation: the write was 5 minutes (pricing.breakdown reads it so).
+    def nosplit(**k):
+        u = a_usage(**k)
+        u.pop("cache_creation")
+        return u
+    p = proxy([nosplit(write5=8_000), nosplit(write5=8_100, fresh=100)])
+    turn(p, dated([USER], "2026-11-07"))
+    e = turn(p, dated(MORE, "2026-11-08"))
+    assert e.cause == "volatile_system" and e.unread_write_tokens == 8_000
+    assert e.unread_write_cost == pytest.approx(T.write_surcharge(MODEL, 8_200, write_5m=8_000))
+
+
+def test_side_call_on_the_same_model_does_not_claim_the_main_threads_write():
+    # A one-message side call falls back to the main thread's turn for comparison; the main
+    # thread's next turn then reads that write, so it was not left unread.
+    side = dated([{"role": "user", "content": "title this"}], "2026-11-08")
+    p = proxy([a_usage(write5=8_000), a_usage(write5=8_100, fresh=100), a_usage(write5=7_000, fresh=0),
+               a_usage(read=8_100, fresh=50)])
+    turn(p, dated([USER], "2026-11-07"))
+    turn(p, dated(MORE, "2026-11-08"))
+    e_side = turn(p, side)
+    e_main = turn(p, dated(MORE + [{"role": "assistant", "content": "ok"}, {"role": "user", "content": "x"}], "2026-11-08"))
+    assert e_side.unread_write_tokens is None
+    assert e_main.cause == "none" and e_main.unread_write_tokens is None
+
+
+def test_retry_does_not_claim_the_write_the_next_turn_reads():
+    b = dated([USER], "2026-11-07")
+    p = proxy([a_usage(write5=8_000), a_usage(write5=8_000, fresh=0), a_usage(read=8_000)])
+    turn(p, b)
+    e2 = turn(p, copy.deepcopy(b))
+    e3 = turn(p, copy.deepcopy(b))
+    assert e2.cause == "retry_replay" and e2.unread_write_tokens is None
+    assert e3.cause == "none"
+
+
+def test_static_breakpoint_hit_with_a_param_change_is_none():
+    # The commonest Anthropic layout: the breakpoint stays on the system block, each turn's tail
+    # is uncached. Turn 2 reads everything turn 1 left in the cache (8,000 of its 8,200), so a
+    # changed param that the provider did not render is no miss.
+    p = proxy([a_usage(write5=8_000), a_usage(read=8_000, write5=100, fresh=0)])
+    turn(p, dated([USER], "2026-11-07"))
+    b2 = dated(MORE, "2026-11-07")
+    b2["tool_choice"] = {"type": "any"}
+    e = turn(p, b2)
+    assert e.cause == "none" and "param_rendered" in (e.secondary_causes or "")

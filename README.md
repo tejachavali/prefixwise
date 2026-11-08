@@ -66,7 +66,7 @@ loses everything after them; Qwen3's template puts tools after the system prompt
 
 ## Quickstart
 
-Four ways in, each about thirty seconds; all write the same ledger and the same report.
+Ways in, each about thirty seconds; all write the same ledger and the same report.
 
 | You have | Do this | Prompts leave your machine? |
 |---|---|---|
@@ -83,7 +83,7 @@ pip install prefixwise
 prefixwise run -- claude                     # or any agent: your command after the --
 ```
 
-`prefixwise run` starts the proxy, points the agent at it (`ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`; the agent keeps its own API key), and when the agent exits prints what that run's cache did, in plain English. This is the real output of `prefixwise report` on a ledger from the mock provider (20 requests from four scripted sessions: a date in the system prompt, tools shuffled each turn, a well-behaved one, a Haiku side call before the main thread; every mock response reports 2,000 prompt tokens with half cached, so the token numbers are flat, the verdicts and fixes are the real ones):
+`prefixwise run` starts the proxy, points the agent at it (`ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`; the agent keeps its own API key), and when the agent exits prints what that run's cache did, in plain English. This is the real output of `prefixwise report` on a ledger from the mock provider (20 requests from four scripted sessions: a date in the system prompt, tools shuffled each turn, a well-behaved one, a Haiku side call before the main thread; every mock response reports 2,000 prompt tokens, half of them cached after a session's first request, so the token numbers are flat, the verdicts and fixes are the real ones):
 
 ```
 20 requests, 40,000 prompt tokens, 40% served from cache. Cost $0.0460.
@@ -110,7 +110,7 @@ first_write              4   8,000    0.0%          0           0               
 model_switch             1   2,000   50.0%          0           0               -  $0.0021      $0.0000
 ```
 
-On real traffic the same report also says, per Anthropic model, whether the 1-hour cache would have paid, and what the cache writes that were never read cost. (`prefixwise run --mock -- <agent>` tries it with synthetic responses and no API calls.)
+On real traffic the same report also says, per Anthropic model, whether the 1-hour cache would have paid, and what the cache writes that the next turn replaced before reading cost. (`prefixwise run --mock -- <agent>` tries it with synthetic responses and no API calls.)
 
 **On a Claude Pro or Max plan?** A proxy cannot sit in front of a subscription login, but Claude Code keeps a log of every session. Read those instead, no setup and nothing sent anywhere:
 
@@ -197,7 +197,7 @@ Sessions come from LiteLLM's `litellm_session_id`, else `metadata={"session_id":
   <img alt="How a request flows through Prefixwise: four ways in (the proxy, prefixwise.wrap, LiteLLM, agent logs); read, forward, fingerprint and name one cause; one SQLite ledger; five ways out (report, API, Prometheus, OpenTelemetry, export)" src="https://raw.githubusercontent.com/tejachavali/prefixwise/main/docs/figures/architecture-light.svg">
 </picture>
 
-A request comes in one of four ways (the proxy, `prefixwise.wrap`, the LiteLLM callback, or an agent's own logs). It is forwarded unchanged (the proxy) or not touched at all (the others). Its blocks are fingerprinted, compared with the previous turn of its own conversation, and joined with the provider's usage, and for self-hosted engines with their KV-cache events. One cause is named, with its evidence, and written as one row to a local SQLite ledger. Five ways out read that ledger: `prefixwise report`, the HTTP API, Prometheus, OpenTelemetry and `prefixwise export`. The whole flow, part by part: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+A request comes in one of four ways (the proxy, `prefixwise.wrap`, the LiteLLM callback, or an agent's own logs). It is forwarded as sent (the proxy; only an opted-in `--fix` or the engine join's session tag changes a body) or not touched at all (the others). Its blocks are fingerprinted, compared with the previous turn of its own conversation, and joined with the provider's usage, and for self-hosted engines with their KV-cache events. One cause is named, with its evidence, and written as one row to a local SQLite ledger. Five ways out read that ledger: `prefixwise report`, the HTTP API, Prometheus, OpenTelemetry and `prefixwise export`. The whole flow, part by part: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## What it tells you
 
@@ -242,7 +242,7 @@ Each block of the request (every tool, the system prompt, every message) gets th
 | `canonical` | the same content with sorted keys, fixed separators, NFC unicode | the same content, possibly serialized differently |
 | `masked` | the canonical form with dates, times, UUIDs, hex ids and numbers replaced by placeholders | the same words; only volatile values differ |
 
-The verdict is the first block, in the provider's prefix order (tools, then system, then messages), whose hashes disagree, and which of them disagree says why:
+The verdict is the first block, in the provider's prefix order (tools, then system, then messages for Anthropic and OpenAI; system first for a self-hosted engine, whose chat template renders it first), whose hashes disagree, and which of them disagree says why:
 
 | what differs | verdict | why it is proof |
 |---|---|---|
@@ -250,7 +250,8 @@ The verdict is the first block, in the provider's prefix order (tools, then syst
 | tools: the multiset of `canonical` hashes differs | `tool_catalog_change` | a tool was added, removed or edited |
 | system: `raw` differs, `masked` equal | `volatile_system` | every character that changed was inside a date, time, id or number |
 | system: `masked` differs | `system_edit` | the wording changed |
-| messages: the previous turn's blocks are not a prefix of this turn's | `history_edit` (or `compaction_rewrite` with a compaction event) | earlier messages were rewritten, not appended to |
+| messages: the previous turn's blocks are not a prefix of this turn's | `history_edit` (or `compaction_rewrite` with a compaction event) | earlier messages were rewritten, not appended to (a single-message previous request replaced by a new conversation is judged by what the cache read instead) |
+| tool results: an earlier one differs or is gone | `tool_result_mutation` (or `compaction_rewrite`) | a tool's output was re-rendered or removed after it was sent |
 
 Short blocks (under about 256 bytes, such as a four-word user message) would be guessable from a bare hash, so with a per-install key (`PREFIXWISE_HMAC_KEY`) they are keyed hashes (HMAC) instead. The ledger stores the verdict, the role and index of the first changed block, counts and prices; no hash leaves the process, and exports never include them.
 

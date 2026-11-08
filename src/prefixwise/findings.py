@@ -113,8 +113,8 @@ def ttl_advice(ledger, since: float | None = None, until: float | None = None,
 
 
 def unread_writes(ledger, since: float | None = None, until: float | None = None) -> list[dict]:
-    """Per model: cache writes that the next turn of the same conversation left unread (it missed
-    and read nothing). The provider charged the write rate for tokens no one read: the surcharge
+    """Per model: cache writes that the next turn of the same conversation left unread (it replaced
+    the prefix, or let it expire, and read nothing). The provider charged the write rate for tokens no one read: the surcharge
     above sending them uncached is money caching cost rather than saved. Not part of avoidable
     cost (fixing the miss saves it too); shown so the price of a freshly written, then invalidated,
     prefix is visible."""
@@ -246,8 +246,8 @@ def render(f: dict, command: str = "serve") -> str:
         tok = sum(u["tokens"] for u in unread)
         n = sum(u["requests"] for u in unread)
         priced = [u for u in unread if u["priced"] == u["requests"] and u["surcharge_usd"] is not None]
-        line = (f"Cache writes never read: {_n(tok)} tokens were written to the cache and then invalidated by the "
-                f"next turn before any turn read them ({_req(n)})")
+        line = (f"Cache writes never read: {_n(tok)} tokens were written to the cache, and the next turn of the "
+                f"same conversation replaced the prefix before reading them ({_req(n)})")
         if priced:
             line += (f"; the write surcharge on them cost {_usd(sum(u['surcharge_usd'] for u in priced))} above "
                      "sending them uncached" + ("" if len(priced) == len(unread) else ", priced models only"))
