@@ -267,5 +267,14 @@ skew, failed requests), fixed above. The rules above answer all of them.
   checks. **Live:** E-evict on SGLang 0.5.23 with KV events, Qwen3-4B on an L4: `evicted`, confirmed, 5 of
   5, with no lost messages; E1-open still 120/120 with session ids sent
   (`experiments/e_evict/runs/2026-11-07-colab-l4-sglang-events.md`).
+- `tests/test_engine_fleet.py`: several caches, each verdict and each no-claim case (a prefix
+  rendered differently, a side call served elsewhere, the next request sent before this one was
+  judged, a stream behind, two caches reporting one request, a replica that went away), over
+  real ZMQ sockets too, plus `--kv-events auto` against a stub `/kv_event_sources`.
+  **Live:** `experiments/e_route` on two vLLM 0.33.0 replicas (Qwen3-1.7B, one L4) behind a
+  router that never says which replica it used: routing misses confirmed 5/5 when it
+  alternates, 5/5 hits when it is sticky, no false claim
+  (`experiments/e_route/runs/2026-11-08-colab-l4.md`). Not yet run live: data-parallel ranks
+  inside one server (`auto`), real routers.
 - Open: a live test of token-level divergence (a template that re-renders history), to
   measure how often "not an eviction" occurs in real agent traffic.
