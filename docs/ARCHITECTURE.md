@@ -253,6 +253,9 @@ design and limits: [ENGINES.md](ENGINES.md).
 
 ## Extending it
 
+- **Any change to the flow or the rule order:** redraw the flowcharts
+  (`python docs/figures/make_architecture.py`); `tests/test_figures.py` fails until the committed
+  SVGs match the script and the decision chart names every cause.
 - **A provider or API shape:** block extraction in `fingerprint.py` (prefix order), usage
   normalization and diagnostics in `proxy.py` / `diagnostics.py`, prices in `prices.json` with
   source and date.

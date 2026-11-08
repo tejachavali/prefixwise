@@ -168,6 +168,11 @@ Sessions come from LiteLLM's `litellm_session_id`, else `metadata={"session_id":
 
 One cause per request: the first thing, in prefix order, that broke reuse. Each request is compared with the previous request **to the same model** in its session, so an agent's small-model side calls (titles, summaries) never mask what is happening on its main thread. Waste is avoidable; legitimate changes cost tokens but are not waste.
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/tejachavali/prefixwise/main/docs/figures/decision-dark.svg">
+  <img alt="How Prefixwise names a cache miss: a flowchart of the classifier's checks in order, from first turn and changed prompt parts to a hit, engine evidence, retry, expiry, routing, and unknown" src="https://raw.githubusercontent.com/tejachavali/prefixwise/main/docs/figures/decision-light.svg">
+</picture>
+
 | Cause | Meaning | Waste? | Typical fix |
 |---|---|---|---|
 | `none` | Prefix reused; only new content was uncached | no | - |
@@ -358,6 +363,8 @@ Measured by [`benchmarks/bench.py`](benchmarks/README.md) (results in [`benchmar
 ## Working on Prefixwise
 
 Agents and people working on this repo: read [`WORKLOG.md`](WORKLOG.md) first. It has the current goal, why, what to run, and what happens with each result. `build.log` records outcomes.
+
+The flowcharts are drawn by code: when the request flow or the classifier's order changes, update `docs/figures/make_architecture.py`, run it, look at the result, and commit the SVGs. CI fails if a committed figure differs from what its script draws, or if the decision flowchart leaves out a cause the classifier can return (`tests/test_figures.py`).
 
 ## Development
 
