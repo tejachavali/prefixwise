@@ -217,17 +217,66 @@ def test_diagnostics_are_chained_to_the_requests_own_conversation():
     assert sent[2] == {"previous_message_id": first["response"]["id"]}  # A's own turn, not B's
 
 
-def test_a_sessions_next_request_waits_for_its_streamed_turn_to_be_recorded():
+def test_a_conversations_next_request_waits_for_its_streamed_turn_to_be_recorded():
     import threading
     p = PrefixwiseProxy(mock=True)
-    pending = threading.Event()
-    p._recording["w"] = pending
+    h = {"x-prefixwise-session-id": "w"}
+    first = p.prepare("anthropic", body("You are careful.", "q", 1), h)
+    pending = p.begin_recording(first)  # its stream ended for the client; not recorded yet
+    other = p.prepare("anthropic", body("You are the tester.", "another task", 1), h)
+    assert other  # another conversation of the session is not held up
     done = []
-    t = threading.Thread(target=lambda: done.append(
-        p.prepare("anthropic", body("You are careful.", "q", 2), {"x-prefixwise-session-id": "w"})))
+    t = threading.Thread(target=lambda: done.append(p.prepare("anthropic", body("You are careful.", "q", 2), h)))
     t.start()
     time.sleep(0.2)
-    assert not done  # held until the previous turn is recorded
-    pending.set()
+    assert not done  # the same conversation's next turn waits for the record
+    p.end_recording(first, pending)
     t.join(2)
     assert done
+
+
+def test_the_end_of_a_stream_is_recognised_in_every_format():
+    from prefixwise.proxy import StreamAccumulator
+    for provider, api, last in (("openai", "chat", b"data: [DONE]\n"),
+                                ("anthropic", "chat", b'data: {"type": "message_stop"}\n'),
+                                ("openai", "responses", b'data: {"type": "response.completed", "response": {}}\n')):
+        acc = StreamAccumulator(provider, api=api)
+        acc.feed(b'data: {"type": "ping"}\n')
+        assert not acc.done
+        acc.feed(last)
+        assert acc.done, (provider, api)
+
+
+def responses(p, prev=None, text="hi", instructions="You are careful."):
+    b = {"model": "gpt-5.6", "instructions": instructions, "input": text}
+    if prev:
+        b["previous_response_id"] = prev
+    return p.handle("openai", b, {"x-prefixwise-session-id": "r"}, api="responses")[0]
+
+
+def test_stitched_responses_turns_stay_one_conversation_and_chain_to_the_turn_they_name():
+    p = PrefixwiseProxy(upstream_url="http://unused", api_key="k")
+    sent, ids = [], iter(range(1, 100))
+
+    def forward(provider, b, *a, **k):
+        sent.append((b.get("prompt_cache_options") or {}).get("comparison_response_id"))
+        return 200, {"id": f"resp_{next(ids)}", "usage": {"input_tokens": 2000, "output_tokens": 1,
+                                                          "input_tokens_details": {"cached_tokens": 1800}}}
+    p._forward = forward
+    prev = responses(p)["response"]["id"]
+    for i in range(10):
+        prev = responses(p, prev, text=f"more {i}")["response"]["id"]
+    assert len(p.lane_threads[("r", "gpt-5.6")].threads) == 1  # one conversation, not eleven
+    fork_a = responses(p, "resp_3", text="branch a")
+    responses(p, "resp_3", text="branch b")
+    assert sent[-2:] == ["resp_3", "resp_3"]  # each branch compared with the turn it names
+    assert fork_a["cause"] != "first_write"
+
+
+def test_developer_messages_are_the_system_prompt():
+    from prefixwise.proxy import extract_blocks
+    b = {"model": "gpt-5.6", "messages": [{"role": "developer", "content": "You are terse."},
+                                         {"role": "system", "content": "Today is Monday."},
+                                         {"role": "user", "content": "hi"}]}
+    roles = [r for r, _ in extract_blocks(b, "openai")]
+    assert roles == ["system", "system", "messages"]

@@ -167,7 +167,10 @@ cause on the main thread), and the same thread within it. A thread is known by i
 message; the proxy remembers each conversation's latest turn (up to `PREFIXWISE_LANE_THREADS`,
 default 8, per lane; one conversation costs one snapshot, as before), so parallel subagents
 interleaving in one session are each compared with their own last turn, however long the others
-ran in between, and the provider's diagnostics are chained to that same turn. The
+ran in between, and the provider's diagnostics are chained to that same turn (a Responses turn
+sent with `previous_response_id` belongs to its parent's conversation and is compared with the turn
+it names). Known limits: conversations that open with the identical message are treated as one,
+and past 8 conversations in a lane the least recently used one is forgotten. The
 first rule that fires wins; later ones are kept as secondary causes. In order:
 
 1. **No previous turn:** `first_write` (or `fork_boundary` for a forked session's first turn).

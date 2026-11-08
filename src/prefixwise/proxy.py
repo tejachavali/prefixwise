@@ -124,6 +124,9 @@ def _strip_cache_markers(value: object) -> object:
     return value
 
 
+_SYSTEM_ROLES = ("system", "developer")
+
+
 def _extract_blocks_raw(body: dict, provider: str) -> list[tuple[str, object]]:
     if provider != "anthropic" and is_responses_body(body):
         return _extract_responses_blocks(body)
@@ -139,12 +142,15 @@ def _extract_blocks_raw(body: dict, provider: str) -> list[tuple[str, object]]:
     else:
         for tool in tools:
             blocks.append(("tools", tool))
-        system = body.get("system") or next(
-            (m.get("content") for m in body.get("messages", []) if m.get("role") == "system"), None)
-        if system is not None:
-            blocks.append(("system", system))
+        if body.get("system") is not None:
+            blocks.append(("system", body["system"]))
+        # System and developer messages are the system prompt (OpenAI: tools, then developer /
+        # system, then the conversation), each its own block, in order.
+        for m in body.get("messages", []) or []:
+            if m.get("role") in _SYSTEM_ROLES:
+                blocks.append(("system", m.get("content")))
     for m in body.get("messages", []) or []:
-        if m.get("role") == "system" and provider != "anthropic":
+        if m.get("role") in _SYSTEM_ROLES and provider != "anthropic":
             continue
         blocks.append(("tool_results" if _is_tool_result(m, provider) else "messages", m))
     return blocks
@@ -371,13 +377,17 @@ class StreamAccumulator:
         self.suppress_usage_chunk = suppress_usage_chunk
         self.payload: dict = {"usage": {}}
         self.saw_usage = False
+        self.done = False  # the stream's terminal event was seen: the client has the whole answer
 
     def feed(self, line: bytes) -> bool:
         """Consume one raw line. Returns False if it must not be forwarded."""
         if not line.startswith(b"data:"):
             return True
         data = line[5:].strip()
-        if not data or data == b"[DONE]":
+        if data == b"[DONE]":
+            self.done = True
+            return True
+        if not data:
             return True
         try:
             event = json.loads(data)
@@ -407,6 +417,8 @@ class StreamAccumulator:
         """Responses API: every response.* lifecycle event carries the response
         object; response.completed (or .incomplete) carries usage and any
         prompt_cache_diagnostics. No stream_options needed."""
+        if event.get("type") in ("response.completed", "response.incomplete", "response.failed"):
+            self.done = True
         resp = event.get("response")
         if not isinstance(resp, dict):
             return
@@ -420,6 +432,8 @@ class StreamAccumulator:
 
     def _feed_anthropic(self, event: dict) -> None:
         kind = event.get("type")
+        if kind == "message_stop":
+            self.done = True
         if kind == "message_start":
             msg = event.get("message") or {}
             if msg.get("id"):
@@ -610,6 +624,41 @@ class PrefixwiseProxy:
         # session's next request waits for it, so it is compared and chained with that turn.
         self._recording: dict[str, threading.Event] = {}
 
+    def _stitched_opening(self, previous_response_id: str):
+        """The opening of the conversation a stitched Responses turn continues, if its parent is
+        known (None otherwise)."""
+        with self._lock:
+            prior = self.snapshot_by_response.get(str(previous_response_id))
+        return _identity(prior.blocks)[0] if prior is not None else None
+
+    def _await_recording(self, lane, thread_key, stitched: bool) -> None:
+        """Wait (at most 10 s) while this conversation's previous streamed turn has ended for the
+        client but is still being recorded. A stitched turn whose parent is not recorded yet
+        waits for every conversation of its lane being recorded."""
+        with self._lock:
+            if stitched and thread_key[1] is None:
+                pending = [ev for key, ev in self._recording.items() if key[0] == lane]
+            else:
+                pending = [self._recording[thread_key]] if thread_key in self._recording else []
+        for ev in pending:
+            ev.wait(10)
+
+    def begin_recording(self, ctx: dict) -> threading.Event:
+        """The client has the whole streamed answer; until it is recorded, this conversation's
+        next request waits (_await_recording)."""
+        ev = threading.Event()
+        with self._lock:
+            self._recording[ctx["thread_key"]] = ev
+        return ev
+
+    def end_recording(self, ctx: dict, ev: threading.Event | None) -> None:
+        if ev is None:
+            return
+        with self._lock:
+            if self._recording.get(ctx["thread_key"]) is ev:
+                del self._recording[ctx["thread_key"]]
+        ev.set()
+
     def _start_events(self, sources: list[tuple[str, str]], full_attention: bool = False,
                       ranks: list[int] | None = None) -> None:
         from .engines import EngineEvents, EngineFleet, SGLangEvents
@@ -758,9 +807,6 @@ class PrefixwiseProxy:
                          or (body.get("metadata") or {}).get("user_id")
                          or headers.get("thread-id") or headers.get("session-id")  # Codex
                          or self.default_session)
-        pending = self._recording.get(session_id)
-        if pending is not None:  # this session's last streamed turn is still being recorded
-            pending.wait(10)
         task_id = headers.get("x-prefixwise-task-id") or body.get("task_id")
         forward_body = {k: v for k, v in body.items() if k not in PREFIXWISE_FIELDS}
         # E1-open retry turns: a harness-only upstream session id.
@@ -810,12 +856,22 @@ class PrefixwiseProxy:
         identity = _identity(self.fingerprinter.fingerprint_blocks(
             [blk for blk in raw_blocks if blk[0] in ("system", "system_dynamic")]
             + [blk for blk in raw_blocks if blk[0] in _CONVERSATION][:1]))
+        lane = (session_id, str(body.get("model", "unknown")))
+        stitched = api == "responses" and bool(body.get("previous_response_id"))
+        # The conversation this request continues (a stitched Responses turn sends only its new
+        # input: its conversation is its parent response's), and wait for that conversation's
+        # previous turn if its stream ended but is still being recorded.
+        thread_key = (lane, self._stitched_opening(body["previous_response_id"]) if stitched else identity[0])
+        self._await_recording(lane, thread_key, stitched)
+        if stitched:
+            thread_key = (lane, self._stitched_opening(body["previous_response_id"]))
         with self._lock:
             # Chain the provider's diagnostics to the previous turn of this request's own
-            # conversation (thread), so its verdict compares the pair the classifier compares.
-            lane = (session_id, str(body.get("model", "unknown")))
+            # conversation, so its verdict compares the pair the classifier compares.
             state = self.lane_threads.get(lane)
-            if state is not None:
+            if stitched:
+                previous_id = str(body["previous_response_id"])  # the turn it names
+            elif state is not None:
                 parent, _, new_thread = _best_parent(state, identity, compaction)
                 previous_id = None if new_thread else parent[3]
             else:
@@ -872,6 +928,7 @@ class PrefixwiseProxy:
             "t0": time.perf_counter(),  # for latency and Prefixwise's own overhead
             "fixes_applied": fixes_applied,
             "fork_of": headers.get("x-prefixwise-fork-of"),
+            "thread_key": thread_key,  # (lane, opening): this conversation, for the recording wait
             "session_is_user": session_is_user,  # a user id, not a conversation id (OpenTelemetry)
             "ttl_seconds": cache_ttl_seconds(provider, body, headers),
         }
@@ -967,6 +1024,11 @@ class PrefixwiseProxy:
                 unknown_parent = True  # continues a turn this proxy never saw
             else:
                 fps, prev = stitched, prior
+                # Its conversation is its parent's: file it there, and time the gap from it.
+                identity = _identity(fps)
+                mine = state.threads.get(identity[0]) if state is not None else None
+                if mine is not None:
+                    gap_seconds, parent_facts = max(0.0, started - mine[1]), mine[2]
         curr = RequestSnapshot(model=ctx["model"], provider=provider, blocks=fps,
                                prompt_tokens=prompt_tokens, cached_tokens=cached,
                                gap_seconds=gap_seconds, compaction_event=ctx["compaction_event"],
@@ -1746,43 +1808,45 @@ def make_handler(proxy: PrefixwiseProxy):
                 self.send_header(k, v)
             self.end_headers()
             failure = None
+            recording = None  # set once the client has the whole answer, before it is recorded
             try:
-                for line in lines:
-                    if acc.feed(line):
-                        self.wfile.write(line)
-                        self.wfile.flush()
-            except (BrokenPipeError, ConnectionResetError):
-                failure = "client_disconnected"  # client went away mid-stream
-                status = 499  # client closed request (not an upstream error)
-            except (TimeoutError, OSError):
-                failure = "upstream_dropped"  # upstream stalled or dropped
-            ctx["upstream_ms"] = (time.perf_counter() - sent) * 1000
-            # A cut-off stream has partial usage at best, and a guess is worse than
-            # none: it is recorded as a failure. A stream that completed is a
-            # response like any other, usage or not (no usage: verdict unknown).
-            if failure is None:
-                # HTTP/1.0: the stream ends when the connection does. End it for the client now,
-                # so classifying, the ledger write and any KV-event wait never delay it; the
-                # session's next request waits for this record instead (prepare).
-                recording = threading.Event()
-                with proxy._lock:
-                    proxy._recording[ctx["session_id"]] = recording
                 try:
+                    for line in lines:
+                        keep = acc.feed(line)
+                        if acc.done and recording is None:
+                            # The terminal event: the client can act on it at once (the OpenAI SDK
+                            # stops at [DONE]), so this conversation's next request must wait for
+                            # this record from here on, before the line goes out.
+                            recording = proxy.begin_recording(ctx)
+                        if keep:
+                            self.wfile.write(line)
+                            self.wfile.flush()
+                except (BrokenPipeError, ConnectionResetError):
+                    failure = "client_disconnected"  # client went away mid-stream
+                    status = 499  # client closed request (not an upstream error)
+                except (TimeoutError, OSError):
+                    failure = "upstream_dropped"  # upstream stalled or dropped
+                ctx["upstream_ms"] = (time.perf_counter() - sent) * 1000
+                # A cut-off stream has partial usage at best, and a guess is worse than
+                # none: it is recorded as a failure. A stream that completed is a
+                # response like any other, usage or not (no usage: verdict unknown).
+                if failure is None:
+                    if recording is None:
+                        recording = proxy.begin_recording(ctx)
+                    # HTTP/1.0: the stream ends when the connection does. End it for the client
+                    # now, so classifying, the ledger write and any KV-event wait never delay it.
                     try:
                         self.wfile.flush()
                         self.connection.shutdown(socket.SHUT_WR)
                     except OSError:
                         pass
                     proxy.finalize_safely(ctx, status, acc.payload)
-                finally:
-                    with proxy._lock:
-                        if proxy._recording.get(ctx["session_id"]) is recording:
-                            del proxy._recording[ctx["session_id"]]
-                    recording.set()
-            else:
-                if proxy.engine_events is not None:
-                    proxy.engine_events.discard(ctx.get("engine_token"))
-                proxy.record_failure(ctx, status, error=failure)
+                else:
+                    if proxy.engine_events is not None:
+                        proxy.engine_events.discard(ctx.get("engine_token"))
+                    proxy.record_failure(ctx, status, error=failure)
+            finally:
+                proxy.end_recording(ctx, recording)
             self.close_connection = True
     return Handler
 
