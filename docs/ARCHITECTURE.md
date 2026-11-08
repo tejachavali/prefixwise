@@ -181,7 +181,7 @@ sequenceDiagram
 | `collector.py` | the control plane: per-conversation state (lanes, bounded by `PREFIXWISE_MAX_SESSIONS`, default 10,000), classification, sub-reasons, pricing, the ledger write; `ingest(record)` and `ingest_failure(record)` take records in (serialized by one lock); `chain_parent` and `stitched_opening` answer the edge's two request-time questions |
 | `fingerprint.py` | splits a request into blocks in the provider's prefix order; `raw` (exact bytes), `canonical` (sorted keys, NFC, fixed separators) and `masked` (dates, ids, numbers masked) hashes; HMAC for short, guessable blocks |
 | `classifier.py` | `RequestSnapshot` → one `MissCause`, `legit` (waste or expected), evidence text, secondary causes |
-| `details.py` | sub-reasons (`ttl_shortened`, `lookback_exceeded`, `markers_ignored`, `sent_before_cache_written`, `shared_prefix_not_reused`, `thinking_stripped`, `cache_key_changed`), each with strict preconditions |
+| `details.py` | sub-reasons (`ttl_shortened`, `lookback_exceeded`, `markers_ignored`, `sent_before_cache_written`, `shared_prefix_not_reused`, `thinking_stripped`, `cache_key_changed`, `host_restored`), each with strict preconditions |
 | `diagnostics.py` | maps Anthropic's 6 and OpenAI's 9 native miss reasons onto the taxonomy; scores agreement (provider "no verdict" answers are not scored) |
 | `engines.py` | the engine join: `EngineEvents` (one vLLM cache), `SGLangEvents` (SGLang), `EngineFleet` (several caches: vLLM ranks or replicas, SGLang ranks) |
 | `fixes.py` | opt-in, meaning-preserving rewrites (`canonical_tools`) and the fix advice per cause |

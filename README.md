@@ -268,6 +268,7 @@ Short blocks (under about 256 bytes, such as a four-word user message) would be 
 | `shared_prefix_not_reused` | first request | Anthropic: another session had just written an entry for the same model, key, tools and system prompt, within reach of a breakpoint here, yet little was read | Check cache keys, TTLs and breakpoint placement between the two |
 | `thinking_stripped` | `history_edit` | On a model that keeps earlier thinking (Opus 4.5+, Sonnet 4.6+, Haiku 5.5, Fable, Mythos), the only change is removed thinking blocks | Keep thinking blocks in history (client or gateway setting) |
 | `cache_key_changed` | routing, expiry | OpenAI `prompt_cache_key` changed between turns | Keep one key per conversation |
+| `host_restored` | `none` (a hit) | Behind one self-hosted engine with `--kv-events`: blocks of the previous request were evicted from the GPU, yet this request read them (vLLM CPU offload, LMCache, SGLang HiCache restored them without recomputing) | A hit that cost a restore: the GPU cache alone is too small for the session; size it, or keep the offload tier |
 
 Each detail is claimed only when all of its conditions hold; otherwise there is none. `prefixwise report` lists them under each cause; `/api/v1/breakdown?by=detail` and `?detail=` slice by them.
 

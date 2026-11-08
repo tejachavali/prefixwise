@@ -70,10 +70,13 @@ add little over inference.
      reuses, and older chains, get evicted routinely and cannot confirm anything.
    - Only full-attention block groups are tracked, keyed by (group, hash). On hybrid models,
      sliding-window blocks are freed routinely without breaking the prefix.
-3. **LMCache and HiCache need nothing extra.** vLLM's `cached_tokens` includes tokens loaded
-   from LMCache (`PrefillStats`: local + external), and SGLang's includes host-tier hits. A
-   prefix restored from CPU memory is a hit and is never examined for eviction. Only GPU
-   removals count.
+3. **LMCache, CPU offload and HiCache need nothing extra.** vLLM's `cached_tokens` includes
+   tokens loaded from LMCache or its CPU offload (`PrefillStats`: local + external), and
+   SGLang's includes host-tier hits. A prefix restored from host memory is a hit (`none`), never
+   an eviction; when the GPU copies of blocks the read covered had been removed (`BlockRemoved`
+   on the GPU medium), the hit carries the detail `host_restored`: served from a host or offload
+   tier without recomputing prefill. Removals on the offload tiers' own media are ignored. Only
+   with one cache: behind several, which cache served is unknown.
 
 4. **`--kv-events` on SGLang** gives the same two verdicts, built differently because SGLang's
    events differ (section "SGLang").

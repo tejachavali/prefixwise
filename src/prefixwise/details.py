@@ -18,6 +18,11 @@ extended-thinking docs (Nov 2026), Claude Code / Codex / opencode / LiteLLM issu
                      22 positions past that write (20 per the docs, plus a margin for
                      how blocks are counted). Promotes routing_miss/unknown to
                      breakpoint_misplaced: an earlier breakpoint fixes it.
+  host_restored      a hit (none) behind one self-hosted engine with KV events, where blocks of
+                     the previous request that this read covered had been removed from the
+                     GPU: the prefix came back from a host or offload tier (vLLM CPU offload,
+                     LMCache, SGLang HiCache) without recomputing prefill. A hit, but one that
+                     cost a restore; it says the GPU cache alone is too small for the session.
   thinking_stripped  history_edit on a model that keeps earlier turns' thinking (Opus
                      4.5+, Sonnet 4.6+, Haiku 5.5, Fable, Mythos), where the only
                      change to earlier messages is removed thinking blocks. On other
@@ -178,13 +183,20 @@ def usage_facts(f: Facts, usage: dict, cache_write: int) -> Facts:
     return f
 
 
-def detail_for(cause: str, prev: Facts | None, curr: Facts, *, prompt_tokens: int, cached_tokens: int
-               ) -> tuple[tuple[str, bool | None] | None, str | None, str]:
-    """((new cause, its legitimacy) or None to keep the cause, detail or None, evidence to append)."""
+def detail_for(cause: str, prev: Facts | None, curr: Facts, *, prompt_tokens: int, cached_tokens: int,
+               evicted_blocks: int | None = None) -> tuple[tuple[str, bool | None] | None, str | None, str]:
+    """((new cause, its legitimacy) or None to keep the cause, detail or None, evidence to append).
+    `evicted_blocks`: from the engine's KV events (one cache only): on a hit, blocks of the previous
+    request this read covered that had been removed from the GPU."""
     if prompt_tokens <= 0:
         return None, None, ""
     cold = cached_tokens < 0.1 * prompt_tokens
     read = f"read {cached_tokens:,} of {prompt_tokens:,} prompt tokens from the cache"
+
+    if cause == "none" and evicted_blocks and cached_tokens > 0:
+        return None, "host_restored", (
+            f"served from a host or offload tier: {evicted_blocks} of the previous request's KV blocks had been "
+            f"removed from GPU memory (KV events), yet this request {read} without recomputing them")
     gap = (curr.sent_at - prev.done_at) if prev is not None and curr.sent_at and prev.done_at else None
     anthropic = curr.provider == "anthropic"
 
