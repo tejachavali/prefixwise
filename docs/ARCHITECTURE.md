@@ -138,6 +138,7 @@ sequenceDiagram
 |---|---|
 | `proxy.py` | the edge as an HTTP proxy: request lifecycle, fingerprinting, upstream forwarding, streaming relay, the engine join's request side, routes (`/v1/*`, `/tasks`, `/requests/<id>`, `/ledger`, `/engine`, `/health`, `/metrics`, `/api/v1`); builds one `TurnRecord` per request and hands it to the collector |
 | `records.py` | `TurnRecord`: what an edge hands the collector (hashes, positions, counts, usage; never text), with its wire form and version |
+| `transport.py` | records over the wire: `Sender` (one thread per edge, bounded queue, batches to `POST /api/v1/ingest`, retries with backoff, drops counted) and `RemoteCollector` (the edge's stand-in for a collector elsewhere) |
 | `collector.py` | the control plane: per-conversation state (lanes, bounded by `PREFIXWISE_MAX_SESSIONS`, default 10,000), classification, sub-reasons, pricing, the ledger write; `ingest(record)` and `ingest_failure(record)` take records in (serialized by one lock); `chain_parent` and `stitched_opening` answer the edge's two request-time questions |
 | `fingerprint.py` | splits a request into blocks in the provider's prefix order; `raw` (exact bytes), `canonical` (sorted keys, NFC, fixed separators) and `masked` (dates, ids, numbers masked) hashes; HMAC for short, guessable blocks |
 | `classifier.py` | `RequestSnapshot` → one `MissCause`, `legit` (waste or expected), evidence text, secondary causes |

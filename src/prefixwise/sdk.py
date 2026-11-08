@@ -65,12 +65,14 @@ class Recorder:
     def record(self, provider: str, request: dict, response: dict, *, api: str = "chat",
                session_id: str | None = None, agent_id: str | None = None, task_id: str | None = None,
                latency_ms: float | None = None, session_is_user: bool = False,
-               genai_provider: str | None = None) -> LedgerEntry | None:
+               genai_provider: str | None = None, ended_at: float | None = None) -> LedgerEntry | None:
         """provider: "anthropic" or "openai" (any OpenAI-compatible server): whose caching rules
         apply; api: "chat", "responses" (OpenAI Responses) or "chat" for Anthropic Messages.
         session_is_user: session_id is an end-user id, not a conversation id (kept out of
         OpenTelemetry's gen_ai.conversation.id). genai_provider: the actual provider for
-        OpenTelemetry (e.g. "aws.bedrock"). Returns the row, or None if recording failed (it
+        OpenTelemetry (e.g. "aws.bedrock"). ended_at: unix time the response completed, when the
+        call is recorded later than that (LiteLLM runs callbacks on a pool, after the fact); the
+        send time is then ended_at - latency. Returns the row, or None if recording failed (it
         never raises)."""
         try:
             headers = {"x-prefixwise-agent-id": agent_id or self.agent_id}
@@ -85,8 +87,10 @@ class Recorder:
             ctx["session_is_user"] = bool(session_is_user)
             if genai_provider:
                 ctx["genai_provider"] = genai_provider
-            if latency_ms is not None:  # the call is already over: it was sent latency_ms ago
-                ctx["span_start"] = time.time() - latency_ms / 1000
+            if ended_at is not None:
+                ctx["span_end"] = ended_at
+            if latency_ms is not None:  # the call is already over: it was sent latency_ms before it ended
+                ctx["span_start"] = (ended_at if ended_at is not None else time.time()) - latency_ms / 1000
                 if ctx.get("facts") is not None:  # sub-reasons time the gap from the send too
                     ctx["facts"].sent_at = ctx["span_start"]
             self.proxy.response_started(ctx)

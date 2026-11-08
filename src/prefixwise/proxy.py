@@ -451,10 +451,19 @@ class PrefixwiseProxy:
                  mock: bool | None = None, fixes: str | list[str] | tuple[str, ...] | None = None,
                  prices: str | None = None, engine: str | None = None, kv_events: str | None = None,
                  upstreams: dict[str, str] | None = None, full_attention: bool | None = None,
-                 otel: bool | str | None = None):
+                 otel: bool | str | None = None, collector_url: str | None = None,
+                 collector_token: str | None = None):
         # The control plane (prefixwise.collector): classification, pricing, the ledger and all
-        # conversation state. In this process the edge below calls it directly.
-        self.collector = Collector(Ledger(ledger_path), PriceTable.load(prices))
+        # conversation state. In this process the edge below calls it directly; with a collector
+        # elsewhere (PREFIXWISE_COLLECTOR), records are sent to it and this process keeps no ledger.
+        url = collector_url if collector_url is not None else os.environ.get("PREFIXWISE_COLLECTOR")
+        if url:
+            from .transport import RemoteCollector, Sender
+            token = collector_token if collector_token is not None else os.environ.get("PREFIXWISE_COLLECTOR_TOKEN")
+            self.collector = RemoteCollector(Sender(url, token or None), PriceTable.load(prices))
+        else:
+            self.collector = Collector(Ledger(ledger_path), PriceTable.load(prices))
+        self.collect_only = False  # `prefixwise collect`: a collector with no upstream (serves /api/v1/ingest)
         self.spans = _spans(otel if otel is not None else os.environ.get("PREFIXWISE_OTEL"))
         # Self-hosted engine behind the proxy (vllm, sglang), and its KV-event
         # stream for the engine join (prefixwise.engines).
@@ -517,6 +526,13 @@ class PrefixwiseProxy:
         self._lock = threading.Lock()  # edge state: requests in flight, recordings pending
         self._upstream = threading.local()  # last upstream response headers, per thread
         self._recording: dict[tuple, threading.Event] = {}  # streams ended for the client, not yet recorded
+
+    def close(self, timeout: float = 5.0) -> None:
+        """Flush records still on their way to a remote collector; stop the KV-event reader."""
+        if getattr(self.collector, "remote", False):
+            self.collector.close(timeout)
+        if self.engine_events is not None:
+            self.engine_events.stop()
 
     # The collector's state and services, as the proxy's own names (the API, the CLI, tests).
     ledger = property(lambda self: self.collector.ledger)
@@ -866,7 +882,7 @@ class PrefixwiseProxy:
         facts = ctx.get("facts") or Facts(provider=provider)
         if usage:
             facts = usage_facts(facts, usage, parts.cache_write_5m + parts.cache_write_1h + parts.cache_write)
-        facts.done_at = time.time()
+        facts.done_at = ctx.get("span_end") or time.time()  # when the response completed
         payload = payload if isinstance(payload, dict) else {}
         verdict = None  # (evicted, resident[, routed]) from the engine join, as a list on the wire
         if engine_verdict is not None:
@@ -1007,7 +1023,8 @@ class PrefixwiseProxy:
         # this model had the same tools and system prompt and its messages are a prefix of these
         # (as a provider's cache would serve them), else nothing.
         with self._lock:  # the session's latest turn on this model (each model has its own cache)
-            lane = self.lane_threads.get((session_id, model))
+            lanes = getattr(self.collector, "lane_threads", None)  # none on an edge: the mock never hits there
+            lane = lanes.get((session_id, model)) if lanes is not None else None
             prev = lane.threads[lane.latest][0] if lane is not None and lane.latest is not None else None
         cached = 0
         if prev is not None and body is not None:
@@ -1371,6 +1388,31 @@ class PrefixwiseHTTPServer(ThreadingHTTPServer):
         return self.active
 
 
+def _role(proxy) -> str:
+    if proxy.collect_only:
+        return "collector"
+    return "edge" if getattr(proxy.collector, "remote", False) else "proxy"
+
+
+def _transport_gauges(proxy) -> dict[str, tuple[str, float]]:
+    """The record transport's counters, as Prometheus gauges: an edge's sender, a collector's ingest."""
+    if getattr(proxy.collector, "remote", False):
+        s = proxy.collector.stats()
+        return {"prefixwise_records_queued_total": ("Records handed to the sender.", s["queued"]),
+                "prefixwise_records_sent_total": ("Records the collector accepted.", s["sent"]),
+                "prefixwise_records_dropped_total": ("Records not delivered (queue full, or a batch failed).",
+                                                     s["dropped"]),
+                "prefixwise_records_rejected_total": ("Records the collector refused as malformed.", s["rejected"]),
+                "prefixwise_records_pending": ("Records waiting to be sent.", s["pending"])}
+    s = proxy.collector.stats
+    return {"prefixwise_ingest_records_total": ("Records classified.", s["records"]),
+            "prefixwise_ingest_failures_total": ("Failure records (no verdict).", s["failures"]),
+            "prefixwise_ingest_duplicates_total": ("Records seen twice (retried batches), skipped.", s["duplicates"]),
+            "prefixwise_ingest_rejected_total": ("Records refused as malformed.", s["rejected"]),
+            "prefixwise_ingest_concurrent_total": ("Turns sent before the compared turn ended (unknown).",
+                                                   s["concurrent"])}
+
+
 def make_handler(proxy: PrefixwiseProxy):
     class Handler(BaseHTTPRequestHandler):
         # HTTP/1.0: a streamed body ends when the connection closes, so no
@@ -1443,12 +1485,18 @@ def make_handler(proxy: PrefixwiseProxy):
         def do_GET(self):
             path, _ = route(self.path)
             if path == "/health":
-                return self._json(200, {"ok": True, "mock": proxy.mock})
+                health = {"ok": True, "mock": proxy.mock, "role": _role(proxy)}
+                if getattr(proxy.collector, "remote", False):
+                    health["collector"] = proxy.collector.stats()
+                else:
+                    health["ingest"] = dict(proxy.collector.stats)
+                return self._json(200, health)
             if path == "/metrics":
                 if not self._authorized(bearer=True):
                     return
                 ev = proxy.engine_events
-                data = proxy.metrics.render(proxy.engine, ev.snapshot() if ev else None).encode()
+                data = proxy.metrics.render(proxy.engine, ev.snapshot() if ev else None,
+                                            gauges=_transport_gauges(proxy)).encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
                 self.send_header("Content-Length", str(len(data)))
@@ -1461,6 +1509,10 @@ def make_handler(proxy: PrefixwiseProxy):
                 ev = proxy.engine_events
                 return self._json(200, {"engine": proxy.engine,
                                         "kv_events": ev.snapshot() if ev else None})
+            if path.startswith(api.PREFIX + "/") or path == api.PREFIX or path == "/ledger" \
+                    or path.startswith("/requests/"):
+                if self._no_ledger_here():
+                    return
             if path.startswith(api.PREFIX + "/") or path == api.PREFIX:
                 try:
                     return self._json(*api.get(proxy, path, route(self.path)[1]))
@@ -1474,7 +1526,18 @@ def make_handler(proxy: PrefixwiseProxy):
                 if row is None:
                     return self._json(404, _error(404, "unknown request id (or not recorded yet)"))
                 return self._json(200, row)
+            if proxy.collect_only:
+                return self._json(404, _error(404, "this is a collector (prefixwise collect): it has no upstream; "
+                                                  "point clients at an edge (prefixwise serve)"))
             return self._passthrough("GET")
+
+        def _no_ledger_here(self) -> bool:
+            """An edge with a remote collector has no ledger: say where it is (409), once per call."""
+            if getattr(proxy.collector, "remote", False):
+                self._json(409, _error(409, "this proxy is an edge: its records go to the collector at "
+                                            f"{proxy.collector.url}; query the ledger there"))
+                return True
+            return False
 
         def do_HEAD(self):
             path, _ = route(self.path)
@@ -1508,6 +1571,8 @@ def make_handler(proxy: PrefixwiseProxy):
             if path.startswith(api.PREFIX + "/"):
                 if not self._authorized():
                     return
+                if path != api.PREFIX + "/ingest" and path != api.PREFIX + "/explain" and self._no_ledger_here():
+                    return
                 try:
                     return self._json(*api.post(proxy, path, self._read_json()))
                 except ClientError as exc:
@@ -1521,10 +1586,15 @@ def make_handler(proxy: PrefixwiseProxy):
                 except Exception as exc:
                     print(f"prefixwise: internal error on {path}: {type(exc).__name__}", file=sys.stderr)
                     return self._json(500, _error(500, "internal error in the Prefixwise API"))
+            if proxy.collect_only:
+                return self._json(404, _error(404, "this is a collector (prefixwise collect): it has no upstream; "
+                                                  "point clients at an edge (prefixwise serve)"))
             if path not in CLASSIFIED_PATHS and path != "/tasks":
                 # Not analysed (count_tokens, files, batches, ...): forwarded unchanged.
                 return self._passthrough("POST")
             if not self._authorized():
+                return
+            if path == "/tasks" and self._no_ledger_here():
                 return
             try:
                 body = self._read_json()
@@ -1558,6 +1628,8 @@ def make_handler(proxy: PrefixwiseProxy):
             extra = {**result.get("upstream_headers", {}), "X-Prefixwise-Request-Id": result["request_id"]}
             if result.get("recorded") is False:
                 extra["X-Prefixwise-Error"] = "not recorded (see proxy log)"
+            if "queued" in result:  # an edge: the verdict is made at the collector
+                extra["X-Prefixwise-Queued"] = "1" if result["queued"] else "0"
             if result.get("cause"):
                 extra.update({"X-Prefixwise-Cause": result["cause"],
                               "X-Prefixwise-Legit": str(result["legit"]).lower(),
@@ -1648,20 +1720,30 @@ def serve(host: str = "127.0.0.1", port: int = 8080, *, ledger_path: str | None 
           fixes: str | list[str] | None = None, auth_token: str | None = None,
           allow_unauthenticated: bool = False, prices: str | None = None,
           engine: str | None = None, kv_events: str | None = None, full_attention: bool | None = None,
-          otel: bool | str | None = None):
-    """Run the proxy until interrupted. Settings fall back to PREFIXWISE_* env vars."""
+          otel: bool | str | None = None, collector_url: str | None = None, collect_only: bool = False,
+          ready=None):
+    """Run the proxy until interrupted. Settings fall back to PREFIXWISE_* env vars.
+    collect_only: `prefixwise collect`, a collector with no upstream. ready: called with the bound
+    port once the server listens (tests)."""
     hmac_key = os.environ.get("PREFIXWISE_HMAC_KEY")
     ledger_path = ledger_path or os.environ.get("PREFIXWISE_LEDGER_PATH", ":memory:")
-    proxy = PrefixwiseProxy(ledger_path=ledger_path, upstream_url=upstream_url, mock=mock,
+    proxy = PrefixwiseProxy(ledger_path=ledger_path, upstream_url=upstream_url, mock=mock or collect_only,
                             hmac_key=hmac_key.encode() if hmac_key else None, fixes=fixes,
                             prices=prices, engine=engine, kv_events=kv_events, full_attention=full_attention,
-                            otel=otel)
+                            otel=otel, collector_url="" if collect_only else collector_url)
+    proxy.collect_only = collect_only
     otel_where = None
     if proxy.spans is not None:  # Prefixwise is the application here: it sets up the exporter
         from .otel import install_provider
         otel_where = install_provider()
     proxy.auth_token = auth_token or os.environ.get("PREFIXWISE_AUTH_TOKEN") or None
     exposed = not _is_loopback(host)
+    if exposed and collect_only and not proxy.auth_token and not allow_unauthenticated:
+        # Anyone who can reach the port could write rows into the fleet's ledger.
+        raise SystemExit(
+            f"prefixwise: refusing to collect on {host} with no auth token: anyone who can reach the port could "
+            "write records. Set PREFIXWISE_AUTH_TOKEN (edges send it as PREFIXWISE_COLLECTOR_TOKEN), bind to "
+            "127.0.0.1, or pass --allow-unauthenticated.")
     if exposed and not proxy.auth_token and proxy.api_key and not proxy.mock and not allow_unauthenticated:
         # Anyone who can reach the port would spend this key.
         raise SystemExit(
@@ -1669,11 +1751,25 @@ def serve(host: str = "127.0.0.1", port: int = 8080, *, ledger_path: str | None 
             "anyone who can reach the port could spend your key. Set PREFIXWISE_AUTH_TOKEN (clients send it "
             "as X-Prefixwise-Token), bind to 127.0.0.1, or pass --allow-unauthenticated.")
     server = PrefixwiseHTTPServer((host, port), make_handler(proxy))
-    if not quiet:
+    if ready is not None:
+        ready(server.server_address[1])
+    if not quiet and collect_only:
+        print(f"Prefixwise collector on http://{host}:{server.server_address[1]}")
+        print(f"  ledger:   {ledger_path}")
+        print(f"  prices:   {len(proxy.prices.models)} models, table of {proxy.prices.as_of}")
+        print(f"  auth:     {'X-Prefixwise-Token required' if proxy.auth_token else 'none'}"
+              + ("  (WARNING: listening beyond localhost without a token)" if exposed and not proxy.auth_token else ""))
+        print("  edges:    PREFIXWISE_COLLECTOR=http://<this host>:<port> prefixwise serve ... "
+              "(PREFIXWISE_COLLECTOR_TOKEN for the token)")
+        print("  POST /api/v1/ingest   GET /api/v1/*  GET /metrics  GET /health", flush=True)
+    elif not quiet:
         target = "MOCK upstream (synthetic usage, no API calls)" if proxy.mock else proxy.upstream_url
         print(f"Prefixwise proxy on http://{host}:{server.server_address[1]}")
         print(f"  upstream: {target}")
-        print(f"  ledger:   {ledger_path}")
+        if getattr(proxy.collector, "remote", False):
+            print(f"  collector: {proxy.collector.url} (records are sent there; no ledger here)")
+        else:
+            print(f"  ledger:   {ledger_path}")
         print(f"  fixes:    {', '.join(proxy.fixes) or 'none (pass-through)'}")
         print(f"  prices:   {len(proxy.prices.models)} models, table of {proxy.prices.as_of}"
               f" ({' + '.join(proxy.prices.sources)})")
@@ -1724,6 +1820,7 @@ def serve(host: str = "127.0.0.1", port: int = 8080, *, ledger_path: str | None 
         if left and not quiet:
             print(f"prefixwise: stopped with {left} request(s) still in flight", file=sys.stderr)
         server.server_close()
+        proxy.close()  # records still on their way to a remote collector
 
 
 if __name__ == "__main__":

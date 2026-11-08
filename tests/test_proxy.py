@@ -362,7 +362,9 @@ def test_concurrent_requests_all_recorded_and_sessions_consistent():
         # mock decides cached tokens before the first turn is recorded), as a
         # real cache would; it is a miss (an identical turn within 60 s is
         # RETRY_REPLAY), never a second first write.
-        assert set(causes) <= {"first_write", "none", "routing_miss", "retry_replay"}
+        # A turn sent while the compared turn was still in flight is `unknown` (it could not have
+        # read that turn's write: a parallel request, or a late record).
+        assert set(causes) <= {"first_write", "none", "routing_miss", "retry_replay", "unknown"}
         assert sum(r["requests"] for r in proxy.ledger.rollup_by_cause()) == 100
     finally:
         server.shutdown()

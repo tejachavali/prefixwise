@@ -93,19 +93,31 @@ field's meaning does, and a collector refuses a version it does not read rather 
 `tests/test_records.py` pins that a record holds no prompt text, that a record that crossed JSON
 yields the identical ledger row, and that malformed records are refused.
 
-**Transport (next).** `prefixwise collect` runs a collector as a service; an edge given
-`PREFIXWISE_COLLECTOR=https://...` sends records instead of ingesting them:
-- one FIFO sender thread per edge, a bounded queue, batched POSTs to `/api/v1/ingest`, retries
-  with backoff; when the queue is full records are dropped and counted, never blocking a request;
-- a bearer token on the collector; TLS at the ingress;
-- ingest is idempotent by `request_id`;
+**Transport (built: `prefixwise.transport`, `prefixwise collect`).** `prefixwise collect` runs a
+collector as a service; an edge given `--collector URL` (or `PREFIXWISE_COLLECTOR`) sends records
+instead of ingesting them:
+- one FIFO sender thread per edge, a bounded queue (10,000 records), batches of up to 200 to
+  `POST /api/v1/ingest`, up to six attempts with backoff on 5xx/429/connection errors; when the
+  queue is full or a batch has failed its last attempt, records are dropped and counted, never
+  blocking a request; a 401/400 is not retried (the first is printed once);
+- a bearer token on the collector (`PREFIXWISE_AUTH_TOKEN`; the edge sends
+  `PREFIXWISE_COLLECTOR_TOKEN`); a collector listening beyond localhost refuses to start without
+  one unless told otherwise; TLS at the ingress;
+- ingest is idempotent by `request_id` (the last 200,000 are remembered), malformed records are
+  reported back by index and skipped, and a record the collector itself fails on becomes a
+  `not_recorded` failure row, never a lost request;
 - ordering: a conversation's turns are sequential, and an edge emits turn N's record at N's
   response end, before turn N+1 is even sent, so with a FIFO sender N arrives before N+1 unless
-  the sender is backed up by more than one turn gap. The collector detects the exception (a record
-  whose `sent_at` precedes its lane's latest `done_at`), records it as `unknown` with the reason,
-  and counts it, so the failure mode is visible, not a wrong cause;
+  the sender is backed up by more than one turn gap. The collector keeps each turn's own
+  `sent_at`/`done_at` (not its arrival time), and a turn sent before the compared turn's response
+  ended is `unknown` with the reason ("sent N s before the previous turn had finished"), counted
+  as `prefixwise_ingest_concurrent_total`: the failure mode is visible, not a wrong cause. The same
+  rule names parallel sampling of one conversation, which could not have read the other sample's
+  write either;
 - the collector serves the existing `/api/v1`, `/metrics` and `prefixwise report` over the fleet's
-  one ledger.
+  one ledger; an edge answers `/api/v1`, `/ledger` and `/tasks` with 409 and the collector's URL;
+- the engine join (vLLM/SGLang KV events) stays with the edge that fronts the engine; its verdict
+  travels in the record.
 
 **Several collectors (later).** Partition records by session id on a log (Kafka, Redis Streams,
 NATS): each consumer owns its sessions, so ordering per conversation is guaranteed without the
