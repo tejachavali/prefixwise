@@ -68,8 +68,8 @@ def cmd_serve(args) -> int:
               upstream_url=args.upstream, mock=True if args.mock else None,
               fixes=args.fix or None, allow_unauthenticated=args.allow_unauthenticated,
               prices=args.prices, engine=args.engine, kv_events=args.kv_events,
-              full_attention=args.full_attention, otel=args.otel, collector_url=args.collector)
-    except ValueError as exc:  # unknown --fix, --engine or --otel value
+              full_attention=args.full_attention, otel=args.otel, collector_url=args.collector, sinks=args.sink)
+    except (ValueError, OSError) as exc:  # unknown --fix, --engine, --otel or --sink value
         sys.exit(f"prefixwise: {exc}")
     return 0
 
@@ -78,8 +78,16 @@ def cmd_collect(args) -> int:
     from .proxy import serve
 
     ledger = args.ledger or os.environ.get("PREFIXWISE_LEDGER_PATH") or DEFAULT_LEDGER
-    serve(host=args.host, port=args.port, ledger_path=ledger, prices=args.prices,
-          allow_unauthenticated=args.allow_unauthenticated, otel=args.otel, collect_only=True)
+    try:
+        serve(host=args.host, port=args.port, ledger_path=ledger, prices=args.prices,
+              allow_unauthenticated=args.allow_unauthenticated, otel=args.otel, collect_only=True,
+              log_url=args.log, log_partitions=args.partitions, sinks=args.sink)
+    except (ValueError, ImportError, OSError) as exc:  # bad --partitions or --sink, or redis-py missing
+        sys.exit(f"prefixwise: {exc}")
+    except Exception as exc:  # noqa: BLE001 - an unreachable or refusing Redis
+        if type(exc).__module__.startswith("redis"):
+            sys.exit(f"prefixwise: the record log is not reachable ({type(exc).__name__}: {exc})")
+        raise
     return 0
 
 
@@ -542,6 +550,15 @@ def build_parser() -> argparse.ArgumentParser:
                         "can write records)")
     p.add_argument("--otel", action="store_const", const="genai", default=None,
                    help="OpenTelemetry export, as serve --otel")
+    p.add_argument("--log", metavar="URL",
+                   help="also read the record log (redis://host:6379/0; default $PREFIXWISE_LOG): edges started "
+                        "with PREFIXWISE_COLLECTOR=<that URL> write to it; needs pip install 'prefixwise[log]'")
+    p.add_argument("--partitions", metavar="SPEC",
+                   help="the log partitions this collector owns, e.g. 0-7 or 0,3,5 (default: all "
+                        "$PREFIXWISE_LOG_PARTITIONS, 16); every partition must have exactly one collector")
+    p.add_argument("--sink", action="append", metavar="URL",
+                   help="also send every row to a sink (repeatable): file:///path.jsonl, or "
+                        "clickhouse://user:pass@host:8123/db.table (default: $PREFIXWISE_SINKS, comma-separated)")
     ledger_opt(p)
     p.set_defaults(func=cmd_collect)
 
@@ -562,8 +579,12 @@ def build_parser() -> argparse.ArgumentParser:
                    help="apply a fix to every request before forwarding (repeatable). "
                         "Available: canonical_tools. Default: $PREFIXWISE_FIXES or none")
     p.add_argument("--collector", metavar="URL",
-                   help="send turn records to a `prefixwise collect` server instead of keeping a ledger here "
-                        "(default: $PREFIXWISE_COLLECTOR; token: $PREFIXWISE_COLLECTOR_TOKEN)")
+                   help="send turn records to a `prefixwise collect` server (http://...) or to the record log it "
+                        "reads (redis://...) instead of keeping a ledger here (default: $PREFIXWISE_COLLECTOR; "
+                        "token: $PREFIXWISE_COLLECTOR_TOKEN)")
+    p.add_argument("--sink", action="append", metavar="URL",
+                   help="also send every row to a sink (repeatable): file:///path.jsonl, or "
+                        "clickhouse://user:pass@host:8123/db.table (default: $PREFIXWISE_SINKS)")
     ledger_opt(p)
     p.add_argument("--engine", choices=["vllm", "sglang"],
                    help="one self-hosted engine behind --upstream: no routing, so an unchanged prefix "

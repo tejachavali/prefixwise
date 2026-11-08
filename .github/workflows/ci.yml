@@ -8,6 +8,12 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    services:
+      redis:  # the record log (tests/test_log.py); the tests skip without it
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+    env:
+      PREFIXWISE_TEST_REDIS: redis://127.0.0.1:6379/0
     strategy:
       fail-fast: false
       matrix:
