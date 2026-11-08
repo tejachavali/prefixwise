@@ -99,9 +99,13 @@ class Metrics:
             if e.overhead_ms is not None:
                 self._overhead.observe((), e.overhead_ms / 1000)
 
-    def render(self, engine: str | None = None, kv_events: dict | None = None) -> str:
-        """The text exposition format (version 0.0.4)."""
+    def render(self, engine: str | None = None, kv_events: dict | None = None,
+               gauges: dict[str, tuple[str, float]] | None = None) -> str:
+        """The text exposition format (version 0.0.4). `gauges`: extra name -> (help, value),
+        e.g. the record transport's counters on an edge or a collector."""
         out: list[str] = []
+        for name, (help_, value) in sorted((gauges or {}).items()):
+            out += [f"# HELP {name} {help_}", f"# TYPE {name} gauge", f"{name} {_num(value)}"]
         with self._lock:
             out += ["# HELP prefixwise_info Prefixwise build and setup.", "# TYPE prefixwise_info gauge",
                     f"prefixwise_info{_labels(('version', 'engine'), (__version__, engine or 'none'))} 1"]

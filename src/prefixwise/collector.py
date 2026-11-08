@@ -14,6 +14,7 @@ sees prompt text: a record is hashes, positions and counts.
 from __future__ import annotations
 
 import os
+import sys
 import threading
 import time
 from collections import OrderedDict
@@ -24,7 +25,13 @@ from .diagnostics import AgreementScorer
 from .ledger import Ledger, LedgerEntry, avoidable_for_turn, unread_write
 from .pricing import PriceTable, breakdown, completion_tokens_of, normalize_usage
 from .prom import Metrics
-from .records import TurnRecord
+from .records import RecordError, TurnRecord
+
+SEEN_REQUESTS = 200_000  # request ids remembered for idempotent ingest (a retried batch adds no rows)
+# Seconds a turn may appear to have been sent before the compared turn ended and still count as
+# sequential: the two timestamps may come from different edges' clocks.
+CLOCK_SKEW = float(os.environ.get("PREFIXWISE_CLOCK_SKEW", "1.0"))
+MAX_BATCH = 1000
 
 # Sessions remembered at once (snapshot, facts); the least recently seen are forgotten. A
 # proxy serving many short sessions stays bounded in memory.
@@ -105,7 +112,8 @@ class Collector:
         self.last_response_id: dict[str, str] = _SessionMap(MAX_SESSIONS)
         self.snapshot_by_response: dict[str, RequestSnapshot] = _SessionMap(MAX_SESSIONS)
         self.session_facts: dict[str, Facts] = _SessionMap(MAX_SESSIONS)
-        self.stats = {"records": 0, "failures": 0}
+        self._seen: OrderedDict = OrderedDict()  # request ids ingested, for idempotent batches
+        self.stats = {"records": 0, "failures": 0, "duplicates": 0, "rejected": 0, "errors": 0, "concurrent": 0}
 
     # -- what the edge asks before a request goes out -----------------------------------------
 
@@ -139,6 +147,53 @@ class Collector:
         with self._lock:
             self.stats["records"] += 1
             return self._ingest_locked(rec)
+
+    def ingest_many(self, items: list) -> dict:
+        """A batch from an edge over the wire (POST /api/v1/ingest). Each item is a record's
+        dict form; malformed ones are reported back by index and skipped, a request id already
+        ingested is a duplicate (a retried batch) and skipped, and a record the collector itself
+        fails on becomes a failure row (`not_recorded`) rather than a lost request. Never raises
+        on bad input; raises on a broken ledger."""
+        if not isinstance(items, list):
+            raise RecordError("records must be a list")
+        if len(items) > MAX_BATCH:
+            raise RecordError(f"at most {MAX_BATCH} records per batch")
+        accepted, duplicates, rejected = 0, 0, []
+        for i, item in enumerate(items):
+            try:
+                rec = TurnRecord.from_dict(item)
+            except RecordError as exc:
+                rejected.append({"index": i, "error": str(exc)})
+                continue
+            with self._lock:
+                if rec.request_id in self._seen:
+                    duplicates += 1
+                    continue
+                self._seen[rec.request_id] = None
+                while len(self._seen) > SEEN_REQUESTS:
+                    self._seen.popitem(last=False)
+            try:
+                if rec.failed:
+                    self.ingest_failure(rec)
+                else:
+                    self.ingest(rec)
+            except Exception as exc:  # noqa: BLE001 - one record must not sink the batch
+                with self._lock:
+                    self.stats["errors"] += 1
+                print(f"prefixwise: record {rec.request_id} not classified ({type(exc).__name__}: {exc})",
+                      file=sys.stderr, flush=True)
+                rec.error = "not_recorded"
+                try:
+                    self.ingest_failure(rec)
+                except Exception:
+                    with self._lock:  # nothing written: a retry of this record must not read as a duplicate
+                        self._seen.pop(rec.request_id, None)
+                    raise
+            accepted += 1
+        with self._lock:
+            self.stats["duplicates"] += duplicates
+            self.stats["rejected"] += len(rejected)
+        return {"accepted": accepted, "duplicates": duplicates, "rejected": rejected}
 
     def ingest_failure(self, rec: TurnRecord) -> LedgerEntry:
         """A request that produced no verdict (upstream error, cut-off stream, a recording
@@ -174,7 +229,7 @@ class Collector:
         provider, session_id, usage = rec.provider, rec.session_id, rec.usage
         prompt_tokens, cached = normalize_usage(provider, usage)
         native_reason, response_id, fps = rec.native_reason, rec.response_id, list(rec.blocks)
-        now = time.time()
+        now = rec.done_at or time.time()  # when the response completed (a record may arrive later)
         # The gap a cache entry had to survive: from the previous response to this request's send
         # (not to its response: this request's own generation time is not idle time).
         started = rec.sent_at or now
@@ -194,7 +249,9 @@ class Collector:
                 parent, interleaved, new_thread = _best_parent(state, identity, rec.compaction_event)
             prev, prev_done, parent_facts, _ = parent
             gap_seconds = max(0.0, started - prev_done)
+            concurrent = started < prev_done - CLOCK_SKEW  # sent while the compared turn was still in flight
         else:
+            concurrent = False
             # First turn on this model: FIRST_WRITE for a new session, else
             # MODEL_SWITCH (the classifier compares models first).
             prev = self.last_snapshot.get(session_id)
@@ -232,6 +289,14 @@ class Collector:
                                     "previous_response_id points to a response this proxy never saw;"
                                     " the cached prefix cannot be reconstructed",
                                     native_reason=native_reason)
+        elif concurrent and not stitched and curr.cached_tokens < prompt_tokens * 0.5:
+            # It could not have read what the compared turn wrote (that was still being written), and
+            # the record of an earlier turn may be the one that arrived late: no cause is claimed.
+            self.stats["concurrent"] += 1
+            result = Classification(MissCause.UNKNOWN, None,
+                                    f"sent {prev_done - started:.1f} s before the previous turn of this conversation "
+                                    "had finished: a parallel request, or its record arrived late; it could not have "
+                                    "read that turn's cache write", native_reason=native_reason)
         else:
             result = classify(prev, curr, native_reason=native_reason)
             if interleaved:

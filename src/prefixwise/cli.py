@@ -68,9 +68,18 @@ def cmd_serve(args) -> int:
               upstream_url=args.upstream, mock=True if args.mock else None,
               fixes=args.fix or None, allow_unauthenticated=args.allow_unauthenticated,
               prices=args.prices, engine=args.engine, kv_events=args.kv_events,
-              full_attention=args.full_attention, otel=args.otel)
+              full_attention=args.full_attention, otel=args.otel, collector_url=args.collector)
     except ValueError as exc:  # unknown --fix, --engine or --otel value
         sys.exit(f"prefixwise: {exc}")
+    return 0
+
+
+def cmd_collect(args) -> int:
+    from .proxy import serve
+
+    ledger = args.ledger or os.environ.get("PREFIXWISE_LEDGER_PATH") or DEFAULT_LEDGER
+    serve(host=args.host, port=args.port, ledger_path=ledger, prices=args.prices,
+          allow_unauthenticated=args.allow_unauthenticated, otel=args.otel, collect_only=True)
     return 0
 
 
@@ -523,6 +532,19 @@ def build_parser() -> argparse.ArgumentParser:
     def ledger_opt(p):
         p.add_argument("--ledger", help=f"SQLite ledger file (default: $PREFIXWISE_LEDGER_PATH or ./{DEFAULT_LEDGER})")
 
+    p = sub.add_parser("collect", help="run a collector: one ledger for several edges (prefixwise serve "
+                                        "--collector URL, or PREFIXWISE_COLLECTOR for wrap and LiteLLM)")
+    p.add_argument("--host", default=os.environ.get("PREFIXWISE_HOST", "127.0.0.1"))
+    p.add_argument("--port", type=int, default=int(os.environ.get("PORT", "8081")))
+    p.add_argument("--prices", metavar="FILE", help="extra or overriding rates (default: $PREFIXWISE_PRICES)")
+    p.add_argument("--allow-unauthenticated", action="store_true",
+                   help="listen beyond localhost without PREFIXWISE_AUTH_TOKEN (anyone who reaches the port "
+                        "can write records)")
+    p.add_argument("--otel", action="store_const", const="genai", default=None,
+                   help="OpenTelemetry export, as serve --otel")
+    ledger_opt(p)
+    p.set_defaults(func=cmd_collect)
+
     p = sub.add_parser("serve", help="run the proxy")
     p.add_argument("--host", default=os.environ.get("PREFIXWISE_HOST", "127.0.0.1"))
     p.add_argument("--port", type=int, default=int(os.environ.get("PORT", "8080")))
@@ -539,6 +561,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--fix", action="append", metavar="NAME",
                    help="apply a fix to every request before forwarding (repeatable). "
                         "Available: canonical_tools. Default: $PREFIXWISE_FIXES or none")
+    p.add_argument("--collector", metavar="URL",
+                   help="send turn records to a `prefixwise collect` server instead of keeping a ledger here "
+                        "(default: $PREFIXWISE_COLLECTOR; token: $PREFIXWISE_COLLECTOR_TOKEN)")
     ledger_opt(p)
     p.add_argument("--engine", choices=["vllm", "sglang"],
                    help="one self-hosted engine behind --upstream: no routing, so an unchanged prefix "

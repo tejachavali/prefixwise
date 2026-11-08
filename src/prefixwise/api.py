@@ -14,6 +14,7 @@ the proxy. Responses are JSON; errors are {"error": {"message": ...}} with a 4xx
     GET  /api/v1/findings                      the plain-English report, as data
     GET  /api/v1/prices                        the price table behind the dollars
     POST /api/v1/tasks                         {"task_id", "success"}: record an outcome
+    POST /api/v1/ingest                        {"records": [...]}: turn records from an edge (prefixwise.transport)
     POST /api/v1/explain                       {"previous", "current"}: why would it miss?
 
 Common query parameters: `metrics=a,b` (default: a standard set), `since`/`until`
@@ -150,6 +151,17 @@ def post(proxy, path: str, body) -> tuple[int, dict]:
             return 400, _err('expected {"task_id": "<id>", "success": true|false}')
         proxy.ledger.set_task_outcome(task_id, success)
         return 200, {"ok": True, "task_id": task_id, "success": success}
+    if sub == "/ingest":
+        from .records import RecordError
+
+        collector = getattr(proxy, "collector", None)
+        if collector is None or getattr(collector, "remote", False):
+            return 404, _err("this is an edge, not a collector: its records go to "
+                             f"{getattr(collector, 'url', 'the collector')}; POST there")
+        try:
+            return 200, collector.ingest_many(body.get("records"))
+        except RecordError as exc:
+            return 400, _err(str(exc))
     if sub == "/explain":
         from .explain import Turn, explain_pair
 

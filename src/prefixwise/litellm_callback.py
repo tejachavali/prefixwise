@@ -257,15 +257,16 @@ class PrefixwiseCallback(_Base):
             sent = dict(sent) if isinstance(sent, dict) else None
             messages = list(kwargs.get("messages") or [])
             tools = kwargs.get("tools") or (kwargs.get("optional_params") or {}).get("tools")
-            latency = None
+            latency = ended = None
             try:
                 latency = (end_time - start_time).total_seconds() * 1000
+                ended = end_time.timestamp()  # the response ended then, not when this callback runs
             except Exception:  # noqa: BLE001 - timing is optional
                 pass
             session = params.get("litellm_session_id") or meta.get("session_id")  # (_session_of adds user)
             common = dict(session_id=session or kwargs.get("user"), session_is_user=not session,
                           task_id=meta.get("task_id"), agent_id=meta.get("agent_id"), latency_ms=latency,
-                          genai_provider=provider_name(provider) if provider else None)
+                          ended_at=ended, genai_provider=provider_name(provider) if provider else None)
             returned = str(response.get("model") or model)
             prompt, completion = _int(usage.get("prompt_tokens")), _int(usage.get("completion_tokens"))
             details = usage.get("prompt_tokens_details") or {}
