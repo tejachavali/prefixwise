@@ -118,21 +118,27 @@ def run(args) -> dict:
                 continue
             if label != "t1":
                 turns.append(f"Question {r}.{len(turns) + 1}: and now?")
-            res, _ = proxy.handle("vllm", {**body(args.model, system, turns), "session_id": sid})
+            res, entry = proxy.handle("vllm", {**body(args.model, system, turns), "session_id": sid})
             if res["status"] >= 400:
                 raise SystemExit(f"rep {r} {label}: upstream {res['status']}: {json.dumps(res['response'])[:300]}")
             row[label] = {"cause": res["cause"], "evidence": res.get("evidence"),
+                          "detail": getattr(entry, "detail", None),  # host_restored on an offload hit with KV events
                           "prompt": res["prompt_tokens"], "cached": res["cached_tokens"],
                           "share": round(res["cached_tokens"] / res["prompt_tokens"], 3) if res["prompt_tokens"] else 0}
         reps.append(row)
+        detail = f" [{row['t3']['detail']}]" if row["t3"].get("detail") else ""
         print(f"rep {r}: T2 {row['t2']['share']:.0%} cached ({row['t2']['cause']}); flood {row['flood_requests']} "
               f"requests in {row['flood_seconds']} s; T3 {row['t3']['cached']}/{row['t3']['prompt']} cached "
-              f"-> Prefixwise: {row['t3']['cause']} ({(row['t3']['evidence'] or '').split(':')[0]})", flush=True)
+              f"-> Prefixwise: {row['t3']['cause']}{detail} ({(row['t3']['evidence'] or '').split(':')[0]})", flush=True)
 
     offload = args.engine in OFFLOAD
     control_ok = all(x["t2"]["share"] >= 0.5 for x in reps)
     t3_hits = sum(x["t3"]["share"] >= 0.5 for x in reps)
     correct = "none" if offload else "evicted"
+    details: dict = {}
+    for x in reps:
+        if x["t3"].get("detail"):
+            details[x["t3"]["detail"]] = details.get(x["t3"]["detail"], 0) + 1
     verdicts: dict[str, int] = {}
     for x in reps:
         verdicts[x["t3"]["cause"]] = verdicts.get(x["t3"]["cause"], 0) + 1
@@ -147,7 +153,9 @@ def run(args) -> dict:
             "t3_hits": t3_hits, "engine_behaved_as_expected": control_ok and (
                 t3_hits == len(reps) if offload else t3_hits == 0),
             "correct_cause": correct, "prefixwise_t3": verdicts,
-            "prefixwise_correct": verdicts.get(correct, 0), "engine_check": engine, "reps": reps}
+            "prefixwise_correct": verdicts.get(correct, 0),
+            "prefixwise_t3_detail": details, "expect_host_restored": offload and bool(args.kv_events),
+            "engine_check": engine, "reps": reps}
 
 
 def write(res: dict, out: Path) -> Path:
@@ -163,11 +171,15 @@ def write(res: dict, out: Path) -> Path:
              f"- Engine behaved as expected: **{'yes' if res['engine_behaved_as_expected'] else 'NO'}**",
              f"- Correct cause on T3: `{res['correct_cause']}`; Prefixwise said: "
              + ", ".join(f"`{k}` x{v}" for k, v in res["prefixwise_t3"].items())
-             + f" ({res['prefixwise_correct']}/{res['repeats']} correct)", "",
+             + f" ({res['prefixwise_correct']}/{res['repeats']} correct)",
+             f"- Detail on T3: " + (", ".join(f"`{k}` x{v}" for k, v in res["prefixwise_t3_detail"].items()) or "none")
+             + (" (expected `host_restored` on every hit: an offload tier with KV events)"
+                if res["expect_host_restored"] else ""), "",
              "| rep | T2 cached | flood | T3 cached | Prefixwise on T3 |", "|---:|---:|---|---:|---|"]
     for x in res["reps"]:
+        tag = f" [{x['t3']['detail']}]" if x["t3"].get("detail") else ""
         lines.append(f"| {x['rep']} | {x['t2']['share']:.0%} | {x['flood_requests']} req, {x['flood_seconds']} s | "
-                     f"{x['t3']['cached']}/{x['t3']['prompt']} | `{x['t3']['cause']}`: {x['t3'].get('evidence') or ''} |")
+                     f"{x['t3']['cached']}/{x['t3']['prompt']} | `{x['t3']['cause']}`{tag}: {x['t3'].get('evidence') or ''} |")
     eng = res.get("engine_check") or {}
     if eng.get("events") is not None or eng.get("notes"):
         lines += ["", f"Engine check notes: {'; '.join(eng.get('notes') or []) or 'none'}",

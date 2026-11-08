@@ -10,7 +10,7 @@ unrelated prompts totalling 3x its GPU KV capacity, then return to the session (
 | engine | T3 should be | correct Prefixwise cause |
 |---|---|---|
 | `vllm`, `sglang` (GPU cache only) | a miss | `evicted` |
-| `vllm-lmcache`, `sglang-hicache` | a hit, restored from CPU memory | `none` |
+| `vllm-lmcache`, `sglang-hicache` | a hit, restored from CPU memory | `none`; with `--kv-events`, detail `host_restored` |
 
 **What we already know (mock, and from the engines' source).** With an offload tier the
 hit is visible to Prefixwise: vLLM's `cached_tokens` counts tokens loaded from LMCache, and
@@ -58,6 +58,10 @@ python experiments/e_evict/e_evict.py --engine sglang-hicache --url http://127.0
 
 **With KV events:** repeat run 1 with `--kv-events tcp://127.0.0.1:5557` added to
 `e_evict.py` (`pip install -e ".[engines]"` first; `vllm_server.sh` already publishes events).
+For the offload runs, start the server with `KV_EVENTS=1` (`vllm_lmcache_server.sh`,
+`sglang_server.sh`) and add `--kv-events tcp://127.0.0.1:5557` (SGLang: also `--full-attention`):
+each restored hit should then carry the detail `host_restored`, printed in brackets after the
+cause, and the engine-check line should show `offload_tier_seen: true`.
 Expected: T3 is `evicted` with evidence starting "confirmed", instead of "inferred".
 
 For SGLang (0.5.20 or later), repeat run 3 with the server publishing events:
