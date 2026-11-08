@@ -1,5 +1,6 @@
 import json
 import threading
+import time
 import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -215,6 +216,17 @@ def get(port, path):
         return e.code, json.loads(e.read())
 
 
+def recorded(port, request_id, timeout=5.0):
+    """A streamed request's row. The proxy ends the stream for the client first and records it
+    right after (so the client never waits on classification): poll until it is there."""
+    deadline = time.monotonic() + timeout
+    while True:
+        status, row = get(port, f"/requests/{request_id}")
+        if status != 404 or time.monotonic() > deadline:
+            return status, row
+        time.sleep(0.02)
+
+
 def sse(*events):
     out = []
     for name, obj in events:
@@ -246,7 +258,7 @@ def test_openai_stream_relayed_usage_injected_and_hidden():
         assert "task_id" not in up.requests[0]["body"]
         assert b'"hel"' in raw and b'"lo"' in raw and b"data: [DONE]" in raw
         assert b"prompt_tokens" not in raw
-        status, row = get(port, f"/requests/{headers['X-Prefixwise-Request-Id']}")
+        status, row = recorded(port, headers['X-Prefixwise-Request-Id'])
         assert status == 200
         assert (row["cause"], row["prompt_tokens"], row["cached_tokens"], row["completion_tokens"],
                 row["task_id"]) == ("first_write", 2000, 1800, 2, "task-1")
@@ -321,7 +333,7 @@ def test_mock_stream_then_task_outcome_metric():
                                                     "messages": [{"role": "user", "content": "hi"}]}, hdr)
         assert b"[prefixwise mock]" in raw1 and b"[DONE]" in raw1 and b"usage" not in raw1
         assert b"event: message_stop" in raw2
-        assert get(port, f"/requests/{h1['X-Prefixwise-Request-Id']}")[1]["cause"] == "first_write"
+        assert recorded(port, h1['X-Prefixwise-Request-Id'])[1]["cause"] == "first_write"
         assert post(port, "/tasks", {"task_id": "fix-bug-1"})[0] == 400  # success required
         assert post(port, "/tasks", {"task_id": "fix-bug-1", "success": True})[0] == 200
         _, ledger = get(port, "/ledger")
