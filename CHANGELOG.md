@@ -1,6 +1,23 @@
 # Changelog
 
-## Unreleased
+## 0.7.0: 2026-11-08
+
+Sharper verdicts where agents actually run: parallel subagents in one session are each compared
+with their own conversation, SGLang servers with several data-parallel ranks get confirmed routing
+misses (as vLLM did in 0.6), and the proxy no longer holds a stream open while it classifies it. Every
+change was reviewed independently, twice for the classifier changes; each confirmed finding is a test.
+
+**Upgrading:** nothing to change; no ledger migration. Verdicts change in these cases, so a report
+that spans the upgrade can shift:
+- interleaved conversations in one session: fewer `system_edit` / `history_edit`, more `none`, and
+  `first_write` for a subagent's first turn;
+- a prompt change the cache absorbed anyway is `none`; one after the entry had expired is
+  `ttl_expired` (the change stays as a secondary cause);
+- near the TTL, fewer `ttl_expired`: the gap no longer counts the request's own generation time;
+- OpenAI `developer` messages are part of the system prompt: changes to them are `volatile_system` /
+  `system_edit`, no longer `history_edit`; when tools and the system prompt both change, the tools
+  change is named (the providers' prefix order).
+New setting: `PREFIXWISE_LANE_THREADS` (conversations remembered per session and model, default 8).
 
 - **Interleaved conversations in one session** (parallel subagents on one model): each request is compared with its own conversation's latest turn (known by its opening message; up to `PREFIXWISE_LANE_THREADS`, default 8, per session and model), however long the others ran, and the provider's diagnostics are chained to that same turn. A conversation none of them shares, whose system prompt differs beyond dates and ids, is a new one (`first_write`, or `none` if the cache served most of it). Before, the subagents' turns were compared with each other and named `system_edit` or `history_edit`. One conversation still costs one snapshot. A Responses turn sent with `previous_response_id` stays in its parent's conversation and is compared with the turn it names. When a stream ends, the next request of that conversation waits (up to 10 s, normally milliseconds) until the streamed turn is recorded, so it is compared and chained with it; other conversations never wait. System and developer messages are all part of the system prompt. Limits: conversations opening with the identical message count as one; past 8 per lane the least recently used is forgotten.
 - **Fixed:** the gap behind `ttl_expired` and `routing_miss` included the request's own generation time; it now runs from the previous response to this request's send.
@@ -10,6 +27,7 @@
 - Flowcharts: neutral decisions, one verdict column (a hit in green, `unknown` with the rest), the new rule order, and agent logs drawn through their own rules (the logs hold no prompt to fingerprint).
 - Specs (not built yet): `prefixwise check`, a CI gate for cache regressions, and `prefixwise serve --optimize` ([docs/specs](docs/specs/check-and-optimize.md)).
 - **SGLang with several data-parallel ranks.** `prefixwise serve --engine sglang --kv-events auto` follows every rank's KV-event stream (from `/server_info`: `endpoint_port_base + rank`, batches checked against their rank stamp) and, with `--full-attention`, confirms a `routing_miss` when a turn lands on another rank while the rank that served the previous turn still holds the very block it needed. SGLang reports only new blocks, so the serving rank is the one that stored the session's blocks from exactly where the read stopped (if the previous turn's late finish store starts there too, nothing is claimed), and SGLang's block hashes are the same on every rank, so the match is exact. With several ranks known, an eviction is never just inferred; a changed `extra_key` (left out of SGLang's hashes) is a parameter change. The wait for a store published after the response happens only when a claim is possible. Refused, with the reason: prefill/decode disaggregation, ranks across several nodes, session radix cache. Previously several ranks turned the join off. Tested over real sockets; not yet run live.
+- **GitHub Releases are created automatically:** after PyPI accepts a release, the workflow creates the GitHub Release from that version's CHANGELOG section with the same files, so the repository's Releases page no longer lags PyPI.
 - `docs/ARCHITECTURE.md`: how Prefixwise is built today, with two flowcharts (how a request flows, how a cause is decided) in it and in the README. CI keeps them true: a figure that differs from its script, or a decision chart missing a cause, fails the tests.
 - Docs: which routers pass Prefixwise's `session_id` and `vllm_xargs` through to vLLM, checked against each router's source (Nov 2026): llm-d, production-stack, AIBrix and the current SGLang model gateway do; Dynamo and the older SGLang gateway copy in the sglang repo do not, so behind them no routing claim is made.
 
