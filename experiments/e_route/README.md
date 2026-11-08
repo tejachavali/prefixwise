@@ -16,7 +16,9 @@ script); Prefixwise in front of the router, subscribed to both streams
 Turn 3 is recorded, not scored (in `alternate` it returns to the first replica, which still
 holds the session's first turn).
 
-**Already checked (no GPU):** `python experiments/e_route/e_route.py --mock` runs two simulated
+**Live result (2026-11-08, Colab L4, vLLM 0.33.0):** PASS, routing misses confirmed 5/5, control hits 5/5 ([record](runs/2026-11-08-colab-l4.md)).
+
+**Also checked (no GPU):** `python experiments/e_route/e_route.py --mock` runs two simulated
 replicas that follow vLLM's report format (every block a request uses, with its session) and
 passes; it is also a test (`tests/test_engines.py`).
 
