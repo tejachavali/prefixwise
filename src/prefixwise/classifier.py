@@ -108,6 +108,15 @@ class RequestSnapshot:
     # blocks of the previous request still resident on the first), when the first still held
     # the block where this request's cache read stopped.
     routed: tuple | None = None
+    # The proxy found no earlier turn of this session (on this model) whose conversation this
+    # one continues: its first message matches none of them. A new thread, e.g. a subagent.
+    new_thread: bool = False
+    # False when the usage is a placeholder (offline `explain` without usage): rules that read
+    # the cache's response must not fire.
+    usage_known: bool = True
+    # The compared turn is not the session's latest on this model: another conversation came
+    # between (interleaved subagents), so this request was matched to its own conversation.
+    interleaved: bool = False
     # Anthropic cache_control present anywhere in the request.
     has_breakpoint: bool = False
     breakpoint_after_volatile: bool = False
@@ -122,6 +131,9 @@ class Classification:
     secondary: list[MissCause] = field(default_factory=list)
     native_reason: str | None = None
     classifier_version: str = "2.0"
+    # False when the verdict overrides the pair the provider compared (an expired entry, a change
+    # that cost nothing): its native reason then describes another question, not a disagreement.
+    score: bool = True
 
 
 def _blocks_by_role(blocks: list[BlockFingerprint]) -> dict[str, list[BlockFingerprint]]:
@@ -162,35 +174,17 @@ def _min_prefix(curr: RequestSnapshot) -> int | None:
     return {"openai": OPENAI_MIN_PREFIX, "gemini": GEMINI_MIN_PREFIX}.get(curr.provider)
 
 
-def classify(prev: RequestSnapshot | None, curr: RequestSnapshot,
-             *, native_reason: str | None = None) -> Classification:
-    """Classify one turn against the previous turn in the same session."""
-    if prev is None:
-        if curr.fork_parent_session_id:
-            return Classification(MissCause.FORK_BOUNDARY, True,
-                                  f"first turn of a session forked from {curr.fork_parent_session_id}",
-                                  native_reason=native_reason)
-        return Classification(MissCause.FIRST_WRITE, True, "no prior request in session",
-                              native_reason=native_reason)
-    if prev.model != curr.model:
-        return Classification(MissCause.MODEL_SWITCH, True,
-                              f"model {prev.model} -> {curr.model}", native_reason=native_reason)
-
-    # The previous request was too short for the provider to cache at all, so
-    # nothing could have been reused, whatever changed since: not waste.
-    floor = _min_prefix(curr)
-    if floor is not None and 0 < prev.prompt_tokens < floor and curr.cached_tokens == 0:
-        return Classification(MissCause.BELOW_MIN_PREFIX, None,
-                              f"previous request was {prev.prompt_tokens} tokens, below the provider's minimum "
-                              f"cacheable prefix ({floor}): nothing was cached to reuse",
-                              native_reason=native_reason)
-
+def _first_change(prev: RequestSnapshot, curr: RequestSnapshot, secondary: list,
+                  native_reason: str | None) -> Classification | None:
+    """The cause named by the first part of the prompt that changed, or None if none did
+    (a changed user turn only adds to `secondary`)."""
     prev_by_role = _blocks_by_role(prev.blocks)
     curr_by_role = _blocks_by_role(curr.blocks)
-    secondary: list[MissCause] = []
-
-    # First divergence in prefix order: system, tools, messages, tool_results, user.
-    for role in ("system", "system_dynamic", "tools", "messages", "tool_results", "user"):
+    # First divergence in prefix order. Anthropic and OpenAI put tools before the system
+    # prompt (module docstring); a self-hosted engine's chat template decides, so there the
+    # system prompt, which templates render first, is checked first.
+    order = ("system", "system_dynamic", "tools") if curr.engine else ("tools", "system", "system_dynamic")
+    for role in order + ("messages", "tool_results", "user"):
         p, c = prev_by_role.get(role, []), curr_by_role.get(role, [])
         if _role_unchanged(role, p, c):
             continue
@@ -233,6 +227,62 @@ def classify(prev: RequestSnapshot | None, curr: RequestSnapshot,
                                   secondary, native_reason)
         # user role divergence with no other cause: fall through to param/TTL checks.
         secondary.append(MissCause.HISTORY_EDIT)
+
+    return None
+
+
+def classify(prev: RequestSnapshot | None, curr: RequestSnapshot,
+             *, native_reason: str | None = None) -> Classification:
+    """Classify one turn against the previous turn in the same session."""
+    if prev is None:
+        if curr.fork_parent_session_id:
+            return Classification(MissCause.FORK_BOUNDARY, True,
+                                  f"first turn of a session forked from {curr.fork_parent_session_id}",
+                                  native_reason=native_reason)
+        return Classification(MissCause.FIRST_WRITE, True, "no prior request in session",
+                              native_reason=native_reason)
+    if prev.model != curr.model:
+        return Classification(MissCause.MODEL_SWITCH, True,
+                              f"model {prev.model} -> {curr.model}", native_reason=native_reason)
+    if curr.new_thread:
+        if curr.usage_known and curr.prompt_tokens > 0 and curr.cached_tokens >= curr.prompt_tokens * 0.5:
+            return Classification(MissCause.NONE, None,
+                                  "a new conversation in this session, its shared prefix served from the cache",
+                                  native_reason=native_reason)
+        return Classification(MissCause.FIRST_WRITE, True,
+                              "a new conversation in this session: its opening matches none of the session's "
+                              "conversations on this model and its system prompt differs (a subagent of "
+                              "another type)", native_reason=native_reason)
+
+    # The previous request was too short for the provider to cache at all, so
+    # nothing could have been reused, whatever changed since: not waste.
+    floor = _min_prefix(curr)
+    if floor is not None and 0 < prev.prompt_tokens < floor and curr.cached_tokens == 0:
+        return Classification(MissCause.BELOW_MIN_PREFIX, None,
+                              f"previous request was {prev.prompt_tokens} tokens, below the provider's minimum "
+                              f"cacheable prefix ({floor}): nothing was cached to reuse",
+                              native_reason=native_reason)
+
+    secondary: list[MissCause] = []
+    changed = _first_change(prev, curr, secondary, native_reason)
+    if changed is not None:
+        reusable = min(prev.prompt_tokens, curr.prompt_tokens) if prev.prompt_tokens else curr.prompt_tokens
+        gap, ttl = curr.gap_seconds, curr.ttl_seconds
+        if (curr.usage_known and ttl is not None and gap is not None and gap > ttl
+                and curr.prompt_tokens > 0 and curr.cached_tokens == 0):
+            # The entry had expired before this request: nothing was reusable, whatever changed.
+            return Classification(MissCause.TTL_EXPIRED, True,
+                                  f"gap {gap:.0f}s since last turn exceeds the cache TTL {ttl:.0f}s and nothing "
+                                  f"was read; the {changed.cause.value} after it cost nothing more",
+                                  secondary + [changed.cause], native_reason, score=False)
+        if curr.usage_known and curr.prompt_tokens > 0 and reusable > 0 and curr.cached_tokens >= reusable:
+            # The provider served all of the prefix the previous turn could share: the change
+            # was after it (or did not reach the rendered prompt) and cost nothing.
+            return Classification(MissCause.NONE, None,
+                                  f"{changed.cause.value} seen, but the cache served all of the reusable "
+                                  f"prefix ({curr.cached_tokens} of {reusable} tokens): it cost nothing",
+                                  secondary + [changed.cause], native_reason, score=False)
+        return changed
 
     # Blocks equal (or only the user turn changed): check params, prefix, TTL, eviction.
     if prev.params != curr.params:

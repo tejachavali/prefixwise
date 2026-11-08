@@ -161,23 +161,39 @@ sequenceDiagram
   <img alt="How Prefixwise names a cache miss: a flowchart of the classifier's checks in order, from first turn and changed prompt parts to a hit, engine evidence, retry, expiry, routing, and unknown" src="figures/decision-light.svg">
 </picture>
 
-The classifier (`classify(prev, curr)`) compares a request with the previous request **to the
-same model in the same session** (a lane), so a side call to a small model never masks a cause
-on the main thread. The first rule that fires wins; later ones are kept as secondary causes.
-In order:
+The classifier (`classify(prev, curr)`) compares a request with **the previous turn of its own
+conversation**: the same session and model (a lane, so a side call to a small model never masks a
+cause on the main thread), and the same thread within it. A thread is known by its opening
+message; the proxy remembers each conversation's latest turn (up to `PREFIXWISE_LANE_THREADS`,
+default 8, per lane; one conversation costs one snapshot, as before), so parallel subagents
+interleaving in one session are each compared with their own last turn, however long the others
+ran in between, and the provider's diagnostics are chained to that same turn (a Responses turn
+sent with `previous_response_id` belongs to its parent's conversation and is compared with the turn
+it names). Known limits: conversations that open with the identical message are treated as one,
+and past 8 conversations in a lane the least recently used one is forgotten. The
+first rule that fires wins; later ones are kept as secondary causes. In order:
 
-1. **No previous request:** `first_write` (or `fork_boundary` for a forked session's first
-   turn). **Another model:** `model_switch`. **The previous request was too short to cache at
-   all:** `below_min_prefix`. All expected, not waste.
-2. **The first role whose blocks changed**, checked in the order system, tools, messages, tool
-   results, user (block hashes, not text):
-   - system: `volatile_system` if only a date, time or id changed (masked hashes equal), else
-     `system_edit`;
+1. **No previous turn:** `first_write` (or `fork_boundary` for a forked session's first turn).
+   **Another model:** `model_switch`. **A new conversation in the session** (its opening message
+   matches none of the remembered conversations and its system prompt differs beyond dates and
+   ids: a subagent of another type): `first_write`, or `none` if the cache served most of it. **The previous turn was too short to cache at all:** `below_min_prefix`, whatever
+   else changed. All expected, not waste.
+2. **The first part of the prompt that changed**, in the provider's prefix order (Anthropic and
+   OpenAI: tools, system, messages, tool results; a self-hosted engine's template: system first),
+   compared by block hashes, not text:
    - tools: `tool_reserialize` if the same tools were re-serialized (canonical equal, raw
      different), else `tool_catalog_change`;
+   - system: `volatile_system` if only a date, time or id changed (masked hashes equal), else
+     `system_edit`;
    - messages: `history_edit`, or `compaction_rewrite` when the client signalled a compaction;
    - tool results: `tool_result_mutation`, or `compaction_rewrite` after a compaction.
-3. **Blocks unchanged:** `param_rendered` (a parameter that renders into the prompt changed),
+
+   Two facts from the response overrule a change: nothing was read and the gap exceeded the
+   cache's TTL (the entry had expired anyway: `ttl_expired`), or the cache still served all of the
+   prefix the previous turn could share (the change cost nothing: `none`). The change is kept as a
+   secondary cause either way. A change that broke reuse part-way is priced for the part it cost:
+   the reusable prefix minus what was read, never the whole prompt.
+3. **Prompt unchanged:** `param_rendered` (a parameter that renders into the prompt changed),
    `below_min_prefix`, `breakpoint_misplaced` (Anthropic with no breakpoint, or one after
    volatile content).
 4. **Nothing changed in the request**, judged from usage (absent usage is `unknown`, never a
@@ -187,8 +203,9 @@ In order:
    - `retry_replay`: the identical request again within a minute, nothing cached;
    - with one self-hosted engine and no event evidence: `evicted`, inferred and said so (with
      several caches known, `unknown` instead);
-   - `ttl_expired` when the gap since the previous turn exceeds the cache's TTL, `routing_miss`
-     when nothing was read within the TTL;
+   - `ttl_expired` when the gap exceeds the cache's TTL, `routing_miss` when nothing was read
+     within it. The gap runs from the previous turn's response to this request's send: this
+     request's own generation time is not idle time;
    - otherwise `unknown`, with the evidence that was missing. Prefixwise never guesses.
 
 Then `details.py` may add a sub-reason, and may refine a cause where a precondition proves it
