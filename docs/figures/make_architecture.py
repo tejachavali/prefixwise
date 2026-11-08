@@ -80,18 +80,19 @@ def arrow(t, pts, label=None, lx=None, ly=None, anchor="middle", dashed=False):
     return out
 
 
-def group(t, x, y, w, h, title):
+def group(t, x, y, w, h, title, right=False):
+    tx, anchor = (x + w - 14, "end") if right else (x + 14, "start")
     return (f'<rect x="{x}" y="{y}" width="{w}" height="{h}" rx="12" fill="none" stroke="{t["grid"]}" '
-            f'stroke-width="1.5"/>' + lines(x + 14, y + 22, [title], t["muted"], size=12, weight=600,
-                                            anchor="start"))
+            f'stroke-width="1.5"/>' + lines(tx, y + 22, [title], t["muted"], size=12, weight=600,
+                                            anchor=anchor))
 
 
 # -- figure 1: how a request flows -----------------------------------------------------------
 
 def architecture(t: dict) -> str:
-    W, H = 940, 760
+    W, H = 940, 800
     b = [lines(W / 2, 34, ["How a request flows through Prefixwise"], t["ink"], size=17, weight=600),
-         lines(W / 2, 56, ["Four ways in, one classifier, one ledger; every number you see is read from the ledger"],
+         lines(W / 2, 56, ["Four ways in, one classifier, one row per request; the prompt itself is never stored"],
                t["muted"], size=12.5)]
     # ways in
     b.append(group(t, 20, 74, W - 40, 112, "WAYS IN"))
@@ -99,50 +100,66 @@ def architecture(t: dict) -> str:
            ("Your own code", "prefixwise.wrap(client)", "Anthropic / OpenAI SDKs"),
            ("LiteLLM", "PrefixwiseCallback", "SDK or proxy server"),
            ("Agent logs", "prefixwise import", "Claude Code, Codex")]
-    xs = [40, 262, 484, 706]
-    for x, rows in zip(xs, ins):
+    for x, rows in zip([40, 262, 484, 706], ins):
         b.append(box(t, x, 104, 194, 66, list(rows)))
-    # core
-    b.append(group(t, 20, 204, W - 40, 356, "PREFIXWISE"))
-    cx, cw = 250, 440  # pipeline column
-    steps = [(234, ["1  Read the request", "session, agent, task; add diagnostic fields"]),
-             (318, ["2  Forward, relay the response", "unchanged, plus X-Prefixwise-* verdict headers"]),
+    # the pipeline
+    b.append(group(t, 20, 204, W - 40, 356, "PREFIXWISE", right=True))
+    cx, cw = 250, 440
+    steps = [(234, ["1  Read the request", "session, agent, task; diagnostic fields added"]),
+             (318, ["2  Forward it (proxy only)", "the client's request and auth, as sent"]),
              (402, ["3  Fingerprint the prompt", "blocks in cache order, hashed: never the text"]),
-             (486, ["4  Name one cause", "compare with the previous turn; sub-reason; price"])]
+             (486, ["4  Name one cause", "against the previous turn; sub-reason; price"])]
     for y, rows in steps:
         b.append(box(t, cx, y, cw, 58, rows, accent=t["s1"] if y == 486 else None))
     for (y1, _), (y2, _) in zip(steps, steps[1:]):
         b.append(arrow(t, [(cx + cw / 2, y1 + 58), (cx + cw / 2, y2 - 2)]))
-    # inputs into the pipeline
-    b.append(arrow(t, [(137, 170), (137, 263), (cx - 2, 263)]))
-    b.append(arrow(t, [(359, 170), (359, 196), (220, 196), (220, 431), (cx - 2, 431)],
-                   "the call already happened", 214, 452, anchor="end"))
-    b.append(arrow(t, [(581, 170), (581, 196), (220, 196)]))
-    # side boxes
+    # into step 1: the proxy, and the SDK wrappers (their call already happened: not forwarded)
+    b.append(arrow(t, [(150, 170), (150, 252), (cx - 2, 252)]))
+    b.append(arrow(t, [(359, 170), (359, 194), (222, 194), (222, 276), (cx - 2, 276)]))
+    b.append(arrow(t, [(581, 170), (581, 194), (222, 194)]))
+    b.append(lines(214, 300, ["wrap / LiteLLM:", "already sent, so", "recorded, not forwarded"],
+                   t["muted"], size=11.5, anchor="end", gap=15))
+    # back to the agent: after step 4, so the verdict can ride in the headers
+    b.append(arrow(t, [(cx - 2, 528), (60, 528), (60, 172)], dashed=True))
+    b.append(lines(70, 470, ["response, unchanged,", "with the verdict in", "X-Prefixwise-* headers"],
+                   t["muted"], size=11.5, anchor="start", gap=15))
+    # the provider or engine
     b.append(box(t, 724, 315, 180, 64, ["Provider or engine", "Anthropic, OpenAI,", "vLLM, SGLang"]))
     b.append(arrow(t, [(cx + cw, 334), (722, 334)], "request", 707, 328))
     b.append(arrow(t, [(722, 362), (cx + cw + 2, 362)], "response", 707, 378))
     b.append(box(t, 724, 486, 180, 58, ["KV-cache events", "vLLM / SGLang (optional)"], dashed=True))
-    b.append(arrow(t, [(722, 515), (cx + cw + 2, 515)], "evicted? which replica?", 812, 562))
-    b.append(box(t, 40, 486, 170, 58, ["Provider's own reason", "Anthropic / OpenAI"], dashed=True))
-    b.append(arrow(t, [(212, 515), (cx - 2, 515)]))
+    b.append(arrow(t, [(722, 503), (cx + cw + 2, 503)], "evicted? which replica?", 812, 562))
     # ledger
     b.append(cylinder(t, 380, 584, 180, 64, ["Ledger", "SQLite, one row per request"]))
     b.append(arrow(t, [(cx + cw / 2, 544), (cx + cw / 2, 582)]))
-    b.append(arrow(t, [(803, 170), (803, 196), (912, 196), (912, 616), (562, 616)],
+    b.append(arrow(t, [(803, 170), (803, 194), (912, 194), (912, 616), (562, 616)],
                    "usage from the logs", 906, 604, anchor="end"))
-    # ways out
-    outs = ["prefixwise report", "HTTP API /api/v1", "Prometheus /metrics", "OpenTelemetry spans",
+    # ways out: live per request, and read from the ledger
+    ow, gapx, oy = 168, 10, 718
+    x0 = (W - (5 * ow + 4 * gapx)) / 2
+    xs = [x0 + i * (ow + gapx) for i in range(5)]
+    outs = ["Prometheus /metrics", "OpenTelemetry spans", "prefixwise report", "HTTP API /api/v1",
             "prefixwise export"]
-    ow, gapx = 168, 10
-    x0 = (W - (len(outs) * ow + (len(outs) - 1) * gapx)) / 2
-    b.append(group(t, 20, 668, W - 40, 76, "WAYS OUT"))
-    for i, name in enumerate(outs):
-        x = x0 + i * (ow + gapx)
-        b.append(box(t, x, 692, ow, 40, [name], size=12.5))
-    b.append(arrow(t, [(W / 2, 648), (W / 2, 690)]))
-    return svg(W, H, t, b, "How a request flows through Prefixwise: four ways in, read, forward, "
-               "fingerprint and classify, one ledger, and five ways out")
+    b.append(group(t, 20, 690, W - 40, 92, "WAYS OUT"))
+    for x, name in zip(xs, outs):
+        b.append(box(t, x, oy, ow, 44, [name], size=12.5))
+    mids = [x + ow / 2 for x in xs]
+    bar = 672
+    # live: each row as it is recorded (from step 4)
+    b.append(f'<path d="M300,546 V{bar} M{mids[0]},{bar} H{mids[1]}" fill="none" stroke="{t["ink2"]}" '
+             f'stroke-width="1.4" stroke-dasharray="5 4"/>')
+    for m in mids[:2]:
+        b.append(arrow(t, [(m, bar), (m, oy - 2)], dashed=True))
+    b.append(lines(292, 600, ["live, as each", "row is recorded"], t["muted"], size=11.5, anchor="end", gap=15))
+    # read from the ledger
+    b.append(f'<path d="M{W / 2},650 V{bar} M{mids[2]},{bar} H{mids[4]}" fill="none" stroke="{t["ink2"]}" '
+             f'stroke-width="1.4"/>')
+    for m in mids[2:]:
+        b.append(arrow(t, [(m, bar), (m, oy - 2)]))
+    b.append(lines(mids[3] + 10, bar - 8, ["read from the ledger"], t["muted"], size=11.5, anchor="start"))
+    return svg(W, H, t, b, "How a request flows through Prefixwise: four ways in; read, forward (proxy only), "
+               "fingerprint and name one cause; the response back with the verdict in headers; one ledger row; "
+               "Prometheus and OpenTelemetry live, report, API and export from the ledger")
 
 
 # -- figure 2: how the cause is decided ------------------------------------------------------
@@ -158,23 +175,24 @@ def decision(t: dict) -> str:
     b.append(box(t, cx - 165, y, 330, 46, ["A request and its response", "plus the previous turn"]))
     rows = [
         (["First turn? Another model?", "Previous turn too short to cache?"],
-         ["first_write · model_switch · below_min_prefix", "nothing could be reused yet"], False),
+         ["first_write · fork_boundary · model_switch", "below_min_prefix: nothing could be reused yet"]),
         (["Did a part of the prompt change?", "(system, tools, messages, tool results)"],
          ["The first changed part names it", "volatile_system · system_edit · tool_reserialize",
-          "tool_catalog_change · history_edit · tool_result_mutation", "compaction_rewrite"], True),
+          "tool_catalog_change · history_edit · tool_result_mutation", "compaction_rewrite"]),
         (["A setting, the size or", "a cache breakpoint?"],
-         ["param_rendered · below_min_prefix · breakpoint_misplaced"], True),
-        (["Was the prefix read", "from the cache?"], ["none: a hit"], False),
-        (["Do the engine's KV events", "decide it?"],
-         ["evicted · routing_miss", "confirmed from vLLM / SGLang KV events",
-          "(one engine without events: evicted, inferred)"], True),
-        (["The same request again", "within a minute?"], ["retry_replay"], True),
-        (["Longer gap than the", "cache keeps entries?"], ["ttl_expired", "the entry expired"], False),
-        (["Nothing read, and", "within that time?"], ["routing_miss"], True),
+         ["param_rendered · below_min_prefix · breakpoint_misplaced"]),
+        (["Was the prefix read", "from the cache?"], ["none: a hit"]),
+        (["Do KV events show an eviction", "or a request sent to another cache?"],
+         ["evicted · routing_miss", "confirmed (vLLM / SGLang with --kv-events)"]),
+        (["The same request again", "within a minute?"], ["retry_replay"]),
+        (["Behind a self-hosted engine", "(--engine vllm / sglang)?"],
+         ["evicted, inferred (one cache, no event evidence)", "otherwise unknown, saying why"]),
+        (["Longer gap than the", "cache keeps entries?"], ["ttl_expired", "the entry expired"]),
+        (["Nothing read, and", "within that time?"], ["routing_miss"]),
     ]
     y = 128 + 22
     prev_bottom = 128
-    for q, outcome, waste in rows:
+    for q, outcome in rows:
         cy = y + dh / 2
         b.append(arrow(t, [(cx, prev_bottom), (cx, cy - dh / 2 - 2)],
                        "no" if prev_bottom != 128 else None, cx + 8, prev_bottom + 15, anchor="start"))
