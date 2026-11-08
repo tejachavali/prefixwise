@@ -83,18 +83,18 @@ pip install prefixwise
 prefixwise run -- claude                     # or any agent: your command after the --
 ```
 
-`prefixwise run` starts the proxy, points the agent at it (`ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`; the agent keeps its own API key), and when the agent exits prints what that run's cache did, in plain English. This is the real output of `prefixwise report` on a ledger from the mock provider (20 requests from four scripted sessions: a date in the system prompt on every turn, tools shuffled on every turn, a well-behaved one, and a Haiku side call before a main thread; the mock answers every request with 2,000 prompt tokens and, like a provider's cache, reads 1,000 of them when the request continues the previous one with the same tools and system prompt and carries a cache breakpoint, so the token counts are flat and the verdicts, prices and fixes are the real ones):
+`prefixwise run` starts the proxy, points the agent at it (`ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`; the agent keeps its own API key), and when the agent exits prints what that run's cache did, in plain English. This is the real output of `prefixwise report` on a ledger from the mock provider (20 requests from four scripted sessions: a date in the system prompt on every turn, tools shuffled on every turn, a well-behaved one, and a Haiku side call before a main thread; the mock answers every request with 2,000 prompt tokens and, like a provider's cache with a breakpoint on the last message, reads all of them when the request continues the previous one with the same tools, system prompt and parameters (on Anthropic, with a cache breakpoint), and on Anthropic writes all of them when it does not, so the token counts are flat and the verdicts, prices and fixes are the real ones):
 
 ```
-20 requests, 40,000 prompt tokens, 15% served from cache. Cost $0.0715.
-Avoidable: 9,000 tokens ($0.0193), 22.5% of prompt tokens. Fix these, biggest first:
-  1. The system prompt changed only in a date, time or id (5 requests, 5,000 tokens, $0.0107).
+20 requests, 40,000 prompt tokens, 30% served from cache. Cost $0.0666.
+Avoidable: 18,000 tokens ($0.0432), 45.0% of prompt tokens. Fix these, biggest first:
+  1. The system prompt changed only in a date, time or id (5 requests, 10,000 tokens, $0.0240).
      Fix: Move dates, times and ids out of the system prompt, to the end of the prompt or the latest user message.
-  2. The same tools were sent in a different order or format (4 requests, 4,000 tokens, $0.0086).
+  2. The same tools were sent in a different order or format (4 requests, 8,000 tokens, $0.0192).
      Fix: Send tools in a fixed order with deterministic serialization (or let the proxy do it: prefixwise serve --fix canonical_tools).
      Prefixwise can do it for you: prefixwise serve --fix canonical_tools (proven)
 Expected misses (not waste): 4 x first request of a session: nothing to reuse yet; 1 x switched model: each model has its own cache.
-Cache writes never read: 9,000 tokens were written to the cache, and the next turn of the same conversation replaced the prefix before reading them (9 requests); the write surcharge on them cost $0.0045 above sending them uncached. Fixing the misses above saves this too; it is not counted twice.
+Cache writes never read: 18,000 tokens were written to the cache, and the next turn of the same conversation replaced the prefix before reading them (9 requests); the write surcharge on them cost $0.0090 above sending them uncached. Fixing the misses above saves this too; it is not counted twice.
 
 Details: prefixwise report --detail   Fixes: prefixwise fixes   Data: prefixwise export
 ```
@@ -104,11 +104,11 @@ Details: prefixwise report --detail   Fixes: prefixwise fixes   Data: prefixwise
 ```
 cause             requests  prompt  cached  avoidable  waste reqs  tokens/success     cost  avoidable $
 ----------------  --------  ------  ------  ---------  ----------  --------------  -------  -----------
-volatile_system          5  10,000    0.0%      5,000           5               -  $0.0226      $0.0107
-tool_reserialize         4   8,000    0.0%      4,000           4               -  $0.0180      $0.0086
-none                     6  12,000   50.0%          0           0               -  $0.0127      $0.0000
-first_write              4   8,000    0.0%          0           0               -  $0.0138      $0.0000
-model_switch             1   2,000    0.0%          0           0               -  $0.0045      $0.0000
+volatile_system          5  10,000    0.0%     10,000           5               -  $0.0250      $0.0240
+tool_reserialize         4   8,000    0.0%      8,000           4               -  $0.0200      $0.0192
+none                     6  12,000  100.0%          0           0               -  $0.0013      $0.0000
+first_write              4   8,000    0.0%          0           0               -  $0.0153      $0.0000
+model_switch             1   2,000    0.0%          0           0               -  $0.0050      $0.0000
 ```
 
 On real traffic the same report also says, per Anthropic model, whether the 1-hour cache would have paid. (`prefixwise run --mock -- <agent>` tries it with synthetic responses and no API calls.)
@@ -223,7 +223,7 @@ One cause per request: the first thing, in prefix order, that broke reuse. Each 
 | `param_rendered` | Blocks equal, but tool_choice / thinking / reasoning / format changed | depends | Keep those params stable within a session |
 | `model_switch` | First call to a different model in the session | no | - |
 | `retry_replay` | Identical request within 60 s with nothing cached | **yes** | Check retry logic |
-| `breakpoint_misplaced` | Anthropic: no `cache_control` breakpoint | **yes** | Add `cache_control` after the stable prefix |
+| `breakpoint_misplaced` | Anthropic: no `cache_control` breakpoint, or one that stays early while the stable prompt grows past it (the tail after it is paid uncached every turn) | **yes** | Add `cache_control` after the stable prefix |
 | `below_min_prefix` | Prompt below the provider's minimum cacheable length | depends | - |
 | `ttl_expired` | Gap since the last turn exceeded the cache TTL | no | Longer TTL (e.g. Anthropic `ttl: "1h"`) if gaps are common |
 | `routing_miss` | Prompt and timing fine, still nothing cached | no | Set a stable `prompt_cache_key` / session affinity |

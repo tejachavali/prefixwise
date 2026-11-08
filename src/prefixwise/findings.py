@@ -30,7 +30,7 @@ CAUSE_PLAIN = {
     "fork_boundary": "a forked session started from its parent's history",
     "param_rendered": "a request parameter that is part of the cached prefix changed",
     "below_min_prefix": "the prompt was too short for the provider to cache",
-    "breakpoint_misplaced": "the cache breakpoint was placed where nothing can be reused",
+    "breakpoint_misplaced": "the cache breakpoint is missing, after volatile content, or left early while the stable prompt grew past it",
     "ttl_expired": "too long since the previous turn: the cache entry expired",
     "evicted": "the engine evicted the cached prefix (memory full)",
     "routing_miss": "nothing changed, but the request reached a machine without the cache",

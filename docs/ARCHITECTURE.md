@@ -236,8 +236,9 @@ first rule that fires wins; later ones are kept as secondary causes. In order:
    secondary cause either way. A change that broke reuse part-way is priced for the part it cost:
    the reusable prefix minus what was read, never the whole prompt.
 3. **Prompt unchanged:** `param_rendered` (a parameter that renders into the prompt changed),
-   `below_min_prefix`, `breakpoint_misplaced` (Anthropic with no breakpoint, or one after
-   volatile content).
+   `below_min_prefix`, `breakpoint_misplaced` (Anthropic with no breakpoint, one after
+   volatile content, or one left early while the stable prompt grew past it: the cache serves
+   all it holds and the stable tail is paid uncached every turn).
 4. **Nothing changed in the request**, judged from usage (absent usage is `unknown`, never a
    zero read as evidence):
    - a **hit**, `none`: at least half of the reusable prefix was read from cache;

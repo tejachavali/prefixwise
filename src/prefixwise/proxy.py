@@ -1029,10 +1029,11 @@ class PrefixwiseProxy:
 
     def _mock_payload(self, provider: str, model: str, request_id: str, session_id: str,
                       api: str = "chat", markers: bool = True, body: dict | None = None) -> dict:
-        # Synthetic usage, shaped like a real cache: 2,000 prompt tokens (so the OpenAI 1,024
-        # minimum does not fire), of which 1,000 are read when the session's previous request on
-        # this model had the same tools and system prompt and its messages are a prefix of these
-        # (as a provider's cache would serve them), else nothing.
+        # Synthetic usage, shaped like a real cache with a breakpoint on the last block: 2,000
+        # prompt tokens (so the OpenAI 1,024 minimum does not fire), all read when the session's
+        # previous request on this model had the same tools and system prompt and its messages are
+        # a prefix of these (a provider's cache serves everything the previous turn left in it),
+        # else nothing read and, on Anthropic with cache_control, the whole prompt written.
         with self._lock:  # the session's latest turn on this model (each model has its own cache)
             lanes = getattr(self.collector, "lane_threads", None)  # none on an edge: the mock never hits there
             lane = lanes.get((session_id, model)) if lanes is not None else None
@@ -1041,15 +1042,16 @@ class PrefixwiseProxy:
         if prev is not None and body is not None:
             fps = self.fingerprinter.fingerprint_blocks(extract_blocks(body, provider))
             before, now = _blocks_by_role(prev.blocks), _blocks_by_role(fps)
-            if all(_role_unchanged(r, before.get(r, []), now.get(r, []))
-                   for r in ("tools", "system", "system_dynamic", "messages", "tool_results")):
-                cached = 1000
+            params = {k: param_fingerprint(body.get(k)) for k in PARAM_KEYS if body.get(k) is not None}
+            if params == prev.params and all(_role_unchanged(r, before.get(r, []), now.get(r, []))
+                                             for r in ("tools", "system", "system_dynamic", "messages", "tool_results")):
+                cached = 2000  # a changed prompt-affecting parameter (a cache salt, tool_choice) renders anew
         write = 0
         if provider == "anthropic":  # as Anthropic bills: nothing without cache_control; a first write
             if not markers:
                 cached = 0
             elif not cached:
-                write = 1000
+                write = 2000
         # Ids shaped like the real APIs' (msg_, resp_, chatcmpl-): diagnostics chaining checks them.
         rid = {"anthropic": "msg_", "responses": "resp_"}.get(
             provider if provider == "anthropic" else api, "chatcmpl-") + request_id[:8]
