@@ -54,6 +54,7 @@ import threading
 from collections import OrderedDict
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -429,6 +430,21 @@ class StreamAccumulator:
             self.saw_usage = True
 
 
+def _endpoint_label(endpoint: str) -> str:
+    """tcp://10.0.0.5:5557 -> 10.0.0.5:5557: how a cache is named in verdicts."""
+    return endpoint.split("://", 1)[-1]
+
+
+def _reachable(endpoint: str, host: str) -> str:
+    """An endpoint an engine bound on all interfaces (tcp://*:5557), as reached from here."""
+    scheme, _, rest = endpoint.partition("://")
+    if scheme == "tcp":
+        h, _, port = rest.rpartition(":")
+        if h in ("*", "0.0.0.0", "::", "[::]", ""):
+            return f"tcp://{host}:{port}"
+    return endpoint
+
+
 def _spans(setting):
     """OpenTelemetry export (prefixwise.otel), or None when off or unavailable."""
     from .otel import mode_from
@@ -474,13 +490,15 @@ class PrefixwiseProxy:
         # SGLang (>= 0.5.20) reads a body session_id as the attribution label on its KV
         # events. Sent only once /server_info shows that is all it does (_check_sglang).
         self.sglang_join = False
-        if kv_events:
-            from .engines import EngineEvents, SGLangEvents
-            if self.engine == "sglang":
-                self.engine_events = SGLangEvents(kv_events, full_attention=full_attention)
-            else:
-                self.engine_events = EngineEvents(kv_events)
-            self.engine_events.start()
+        self.engine_caches = 1  # KV caches behind the upstream, as far as known (data-parallel ranks, replicas)
+        self._kv_auto = kv_events == "auto"
+        endpoints = [e.strip() for e in kv_events.split(",") if e.strip()] if kv_events and not self._kv_auto else []
+        if len(endpoints) > 1 and self.engine == "sglang":
+            raise ValueError("several --kv-events endpoints: vLLM only for now (SGLang: one data-parallel rank)")
+        if self._kv_auto and self.engine == "sglang":
+            raise ValueError("--kv-events auto: vLLM only for now; give SGLang's endpoint")
+        if endpoints:
+            self._start_events([(_endpoint_label(e), e) for e in endpoints], full_attention)
         # Opt-in request rewrites (see fixes.py). Off unless named here or
         # in PREFIXWISE_FIXES; turning them off restores pass-through.
         self.fixes = parse_fixes(fixes if fixes is not None else os.environ.get("PREFIXWISE_FIXES"))
@@ -513,6 +531,8 @@ class PrefixwiseProxy:
         self.session_facts: dict[str, Facts] = _SessionMap(MAX_SESSIONS)
         self.prefix_inflight: dict[str, dict[str, float]] = _SessionMap(MAX_SESSIONS)
         self.prefix_done: dict[str, tuple[float, str]] = _SessionMap(MAX_SESSIONS)
+        if self._kv_auto and not self.mock:
+            self._discover_vllm()
         if self.engine == "sglang" and self.engine_events is not None and not self.mock:
             self._check_sglang()
         # Per-session state, shared across the threaded server's handlers.
@@ -536,6 +556,47 @@ class PrefixwiseProxy:
         self.lane_snapshot: dict[tuple, RequestSnapshot] = _SessionMap(MAX_SESSIONS)
         self.lane_seen: dict[tuple, float] = _SessionMap(MAX_SESSIONS)
         self.lane_response_id: dict[tuple, str] = _SessionMap(MAX_SESSIONS)
+
+    def _start_events(self, sources: list[tuple[str, str]], full_attention: bool = False) -> None:
+        from .engines import EngineEvents, EngineFleet, SGLangEvents
+        if self.engine == "sglang":
+            self.engine_events = SGLangEvents(sources[0][1], full_attention=full_attention)
+        elif len(sources) == 1:
+            self.engine_events = EngineEvents(sources[0][1])
+        else:
+            self.engine_events = EngineFleet(sources)
+        self.engine_caches = len(sources)
+        self.engine_events.start()
+
+    def _discover_vllm(self) -> None:
+        """--kv-events auto: every data-parallel rank's KV-event endpoint, from vLLM's
+        GET /kv_event_sources ({rank: KVEventsConfig}, endpoints resolved per rank)."""
+        base = (self.upstreams.get("openai") or self.upstream_url).removesuffix("/v1")
+        headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
+        try:
+            req = urllib.request.Request(base + "/kv_event_sources", headers=headers)
+            with urllib.request.urlopen(req, timeout=5) as r:
+                info = json.loads(r.read())
+        except (OSError, ValueError) as exc:
+            self.engine_notes.append(f"could not read vLLM's /kv_event_sources ({type(exc).__name__}; it needs "
+                                     "a recent vLLM): give the endpoints with --kv-events; evictions stay inferred")
+            return
+        host = urllib.parse.urlsplit(base).hostname or "127.0.0.1"
+        sources = []
+        for rank, cfg in sorted((info or {}).items(), key=lambda kv: int(kv[0]) if str(kv[0]).isdigit() else 0):
+            cfg = cfg or {}
+            if not cfg.get("enable_kv_cache_events") or cfg.get("publisher") != "zmq" or not cfg.get("endpoint"):
+                continue
+            sources.append((f"rank {rank}", _reachable(str(cfg["endpoint"]), host)))
+        if not sources:
+            self.engine_notes.append("vLLM publishes no KV events: start it with --kv-events-config "
+                                     "'{\"enable_kv_cache_events\": true, \"publisher\": \"zmq\"}'; "
+                                     "evictions stay inferred")
+            return
+        self._start_events(sources)
+        if len(sources) > 1:
+            self.engine_notes.append(f"{len(sources)} data-parallel ranks: the KV events show which one served "
+                                     "each request, so a request sent away from its cached prefix is a routing miss")
 
     def _check_sglang(self) -> None:
         """Read SGLang's /server_info once. Event verdicts stay off (session id not sent)
@@ -804,8 +865,11 @@ class PrefixwiseProxy:
                                fork_parent_session_id=ctx.get("fork_of"),
                                session_id=session_id)
         curr.engine = self.engine is not None
+        curr.engine_caches = self.engine_caches
         if ctx.get("engine_verdict") is not None:
-            curr.evicted_blocks, curr.resident_blocks = ctx["engine_verdict"]
+            verdict = ctx["engine_verdict"]
+            curr.evicted_blocks, curr.resident_blocks = verdict[0], verdict[1]
+            curr.routed = verdict[2] if len(verdict) > 2 else None
         if unknown_parent:
             result = Classification(MissCause.UNKNOWN, None,
                                     "previous_response_id points to a response this proxy never saw;"
@@ -1615,8 +1679,15 @@ def serve(host: str = "127.0.0.1", port: int = 8080, *, ledger_path: str | None 
         print(f"  prices:   {len(proxy.prices.models)} models, table of {proxy.prices.as_of}"
               f" ({' + '.join(proxy.prices.sources)})")
         if proxy.engine:
-            ev = proxy.engine_events.endpoint if proxy.engine_events else "none (evictions are inferred)"
-            print(f"  engine:   {proxy.engine} (one self-hosted engine); KV events: {ev}")
+            if proxy.engine_events is None:
+                ev = "none (evictions are inferred)"
+            elif proxy.engine_caches > 1:
+                ev = ", ".join(f"{label} {s.endpoint}" for label, s in
+                               zip(proxy.engine_events.labels, proxy.engine_events.sources))
+            else:
+                ev = proxy.engine_events.endpoint
+            caches = (f"{proxy.engine_caches} KV caches" if proxy.engine_caches > 1 else "one self-hosted engine")
+            print(f"  engine:   {proxy.engine} ({caches}); KV events: {ev}")
             if proxy.engine == "sglang" and proxy.engine_events is not None and proxy.engine_events.hybrid:
                 print("  note:     evictions can be confirmed but not ruled out; pass --full-attention "
                       "if the model has no sliding-window or Mamba layers")

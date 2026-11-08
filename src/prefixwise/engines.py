@@ -48,12 +48,13 @@ NOTHING = (None, None)
 class _Window:
     """Blocks one session's requests reported since its last send, by position."""
 
-    __slots__ = ("at", "block_size", "mixed")
+    __slots__ = ("at", "block_size", "mixed", "seen")
 
     def __init__(self, mixed: bool = False):
         self.at: dict = {}  # position -> (group, hash); a later report of a position wins
         self.block_size: int | None = None
         self.mixed = mixed  # concurrent requests reported into it
+        self.seen = 0  # blocks reported for this session since the send: this engine served it
 
 
 class EngineEvents:
@@ -127,6 +128,7 @@ class EngineEvents:
         w = self._window(session) if session else None
         if w is not None:
             w.block_size = w.block_size or ev.get("block_size")
+            w.seen += len(hashes)
         for h in hashes:
             key = (group, h)
             self._alive[key] = pos
@@ -219,6 +221,38 @@ class EngineEvents:
             with self._lock:
                 self._checks.pop(token, None)
 
+    # -- several caches (EngineFleet) -----------------------------------------------
+
+    def _served_previous(self, token: int) -> bool:
+        """This engine reported blocks for the session's previous request."""
+        with self._lock:
+            check = self._checks.get(token)
+            return bool(check and check["at"])
+
+    def _served_now(self, session_id: str) -> bool:
+        """This engine reported blocks for the session since its latest send."""
+        with self._lock:
+            w = self._windows.get(session_id)
+            return bool(w and w.seen)
+
+    def held_here(self, token: int, cached_tokens: int | None, prompt_tokens: int | None = None) -> int | None:
+        """The session's previous request was served here; this one by another engine. If this
+        engine still holds the block where the other one's cache read stopped, the prefix was
+        cached, on the wrong engine: returns how many of the previous request's blocks are
+        still resident here. None when that cannot be said for sure. Call after _settle()."""
+        with self._lock:
+            check = self._checks.pop(token, None)
+            if check is None or cached_tokens is None or not check["at"] or not check["block_size"]:
+                return None
+            if prompt_tokens and cached_tokens >= prompt_tokens * 0.5:  # a hit: never examined
+                return None
+            key = check["at"].get(max(0, cached_tokens) // check["block_size"])
+            if key is None or key in check["lost"]:
+                return None
+            if self.hybrid or check["concurrent"] or self._errors() != check["errors"]:
+                return None  # residency could be wrong, or another request of the session used it
+            return len(check["keys"] - check["lost"])
+
     def _settle(self) -> bool:
         """Wait until the stream has caught up with now: a batch stamped later
         than now was read (busy engine), or the socket was found empty (idle
@@ -284,6 +318,105 @@ class EngineEvents:
                         self.stats["decode_errors"] += 1
         finally:
             sock.close(0)
+
+
+class EngineFleet:
+    """Several vLLM KV caches behind one upstream: data-parallel ranks, or replicas behind a
+    router. One EngineEvents per cache, the same interface as one.
+
+    No router has to say which cache served a request: vLLM reports every block a request uses
+    with its session (kv_cache_report_mode "full"), so the cache whose stream reported this
+    session's blocks after the send served it, and the one that reported them for the previous
+    request served that. At the response:
+
+    - the same cache served both: that cache's own verdict (evicted, or still resident);
+    - another cache served this one, and the previous one still holds the block where this
+      one's cache read stopped: a confirmed routing miss, reported as
+      (None, None, (previous cache, serving cache, blocks still resident there));
+    - anything else (a cache that cannot be told, a stream behind, lost messages, concurrent
+      requests of the session): nothing, and the classifier makes no engine claim.
+    """
+
+    def __init__(self, sources: list[tuple[str, str]], max_sessions: int = 1000, **kw):
+        if len(sources) < 2:
+            raise ValueError("EngineFleet needs at least two KV-event sources")
+        self.labels = [label for label, _ in sources]
+        self.sources = [EngineEvents(endpoint, max_sessions=max_sessions, **kw) for _, endpoint in sources]
+        self.max_sessions = max_sessions
+        self._lock = threading.Lock()
+        self._checks: OrderedDict = OrderedDict()  # token -> (session, per-source tokens)
+        self._tokens = itertools.count(1)
+
+    @property
+    def hybrid(self) -> bool:
+        return any(s.hybrid for s in self.sources)
+
+    @hybrid.setter
+    def hybrid(self, value: bool) -> None:
+        for s in self.sources:
+            s.hybrid = value
+
+    def start(self) -> "EngineFleet":
+        for s in self.sources:
+            s.start()
+        return self
+
+    def stop(self) -> None:
+        for s in self.sources:
+            s.stop()
+
+    def request_sent(self, session_id: str) -> int:
+        tokens = [s.request_sent(session_id) for s in self.sources]
+        with self._lock:
+            token = next(self._tokens)
+            self._checks[token] = (session_id, tokens)
+            while len(self._checks) > self.max_sessions:
+                _, (_, stale) = self._checks.popitem(last=False)
+                for s, t in zip(self.sources, stale):
+                    s.discard(t)
+            return token
+
+    def discard(self, token: int | None) -> None:
+        if token is None:
+            return
+        with self._lock:
+            entry = self._checks.pop(token, None)
+        if entry is not None:
+            for s, t in zip(self.sources, entry[1]):
+                s.discard(t)
+
+    def request_done(self, token: int, cached_tokens: int | None, prompt_tokens: int | None = None) -> tuple:
+        with self._lock:
+            entry = self._checks.pop(token, None)
+        if entry is None:
+            return NOTHING
+        session, tokens = entry
+        # Every stream caught up with now, so this request's own reports have arrived.
+        settled = all([s._settle() for s in self.sources])
+        now = [i for i, s in enumerate(self.sources) if s._served_now(session)]
+        before = [i for i, (s, t) in enumerate(zip(self.sources, tokens)) if s._served_previous(t)]
+        verdict = NOTHING
+        if settled and len(now) == 1 and len(before) <= 1:
+            c = now[0]
+            if not before or before[0] == c:
+                verdict = self.sources[c].request_done(tokens[c], cached_tokens, prompt_tokens)
+            else:
+                p = before[0]
+                held = self.sources[p].held_here(tokens[p], cached_tokens, prompt_tokens)
+                if held:
+                    verdict = (None, None, (self.labels[p], self.labels[c], held))
+        for s, t in zip(self.sources, tokens):
+            s.discard(t)  # no-op for the token already judged
+        return verdict
+
+    def snapshot(self) -> dict:
+        snaps = [s.snapshot() for s in self.sources]
+        total = {k: sum(int(x.get(k) or 0) for x in snaps)
+                 for k in ("batches", "stored", "removed", "cleared", "engine_restarts", "dropped_messages",
+                           "decode_errors", "overflows", "gpu_blocks_tracked", "requests_in_flight")}
+        return {"endpoint": ", ".join(str(x["endpoint"]) for x in snaps),
+                "connected": all(x["connected"] for x in snaps), **total, "hybrid_model": self.hybrid,
+                "caches": [{"label": label, **x} for label, x in zip(self.labels, snaps)]}
 
 
 class _Seg:
