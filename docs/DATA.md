@@ -51,7 +51,7 @@ Added (observed today, previously dropped):
 | `schema_version` | rows say which schema wrote them |
 | `cache_ttl_seconds` (schema 5) | the request's own cache lifetime: what its write was granted, or asked for (Anthropic 300 or 3,600; the `X-Prefixwise-Cache-Ttl` header; empty when unknown): what the 5-minute vs 1-hour advice reads |
 | `unread_write_tokens`, `unread_write_cost` (schema 6) | a miss of the same conversation that replaced the prefix (or let it expire) and read nothing right after the previous turn wrote it: the tokens it wrote and never had read, and the surcharge paid to write them above sending them uncached (`prefixwise report`: "cache writes never read"; not part of avoidable cost) |
-| `detail` (schema 4) | the why behind the cause, where the evidence allows: `ttl_shortened`, `lookback_exceeded`, `markers_ignored`, `sent_before_cache_written`, `shared_prefix_not_reused`, `thinking_stripped`, `cache_key_changed` (`prefixwise.details`); a dimension and filter in `/api/v1` |
+| `detail` (schema 4) | the why behind the cause, where the evidence allows: `ttl_shortened`, `lookback_exceeded`, `markers_ignored`, `sent_before_cache_written`, `shared_prefix_not_reused`, `thinking_stripped`, `cache_key_changed`, `host_restored` (`prefixwise.details`); a dimension and filter in `/api/v1` |
 
 ## Metrics (v1 catalog)
 

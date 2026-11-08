@@ -24,8 +24,16 @@ separate them (docs/ENGINES.md):
    full attention only, and the session had one request in flight.
 
 Every other case returns nothing, and the classifier keeps its inference.
-Offload tiers (LMCache) are not tracked; a prefix they restore is a hit and never
-examined.
+Offload tiers (LMCache, vLLM CPU offload, SGLang HiCache) are not tracked as caches: a
+prefix they restore is a hit (`cached_tokens` counts it). On such a hit, blocks of the
+previous request that the read covered yet had been removed from the GPU are reported
+as the evicted count, and the collector names the hit's detail `host_restored`
+(prefixwise.details): served from a host or offload tier after a GPU eviction, no
+prefill recomputed. Claimed only when the stream has shown the tier's own events (a
+BlockStored on a CPU or storage medium) and, on vLLM, no other session stored a lost
+block while the request was in flight: a request sharing the prefix that recomputed
+it looks the same otherwise. One cache only; with several, which cache served is
+unknown.
 
 Wire format (vllm/distributed/kv_events.py): ZMQ PUB, multipart [topic, seq
 (8 bytes, big-endian), msgpack [ts, events, dp_rank?]], each event a map tagged
@@ -69,6 +77,7 @@ class EngineEvents:
         self._checks: OrderedDict = OrderedDict()  # token -> in-flight check
         self._tokens = itertools.count(1)
         self.hybrid = False  # the model has non-full-attention groups: no negative claims
+        self.offload_seen = False  # a BlockStored on a non-GPU medium: an offload tier (CPU, storage) exists
         self.stats = {"batches": 0, "stored": 0, "removed": 0, "cleared": 0, "engine_restarts": 0,
                       "dropped_messages": 0, "decode_errors": 0, "overflows": 0, "disconnects": 0,
                       "wrong_rank": 0}
@@ -120,6 +129,8 @@ class EngineEvents:
 
     def _event(self, ev: dict) -> None:
         kind = ev.get("type")
+        if kind == "BlockStored" and ev.get("medium") not in GPU:
+            self.offload_seen = True  # the tier's own events (CPU offload, LMCache): not tracked, but it exists
         if kind == "BlockStored" and ev.get("medium") in GPU:
             if ev.get("kv_cache_spec_kind") in FULL_KINDS:
                 self._store(ev)
@@ -149,6 +160,10 @@ class EngineEvents:
             if w is not None and pos is not None and pos < self.max_chain:
                 w.at[pos] = key
             pos = None if pos is None else pos + 1
+            for check in self._checks.values():  # in-flight requests: few
+                if key in check["lost"] and session != check["session"]:
+                    check["restored_elsewhere"] = True  # another request recomputed it: not a tier restore
+
         if len(self._alive) > self.max_alive:  # removals were missed: residency is unknown
             self._alive.clear()
             self._windows.clear()  # their blocks would all look removed: judge nothing from them
@@ -195,7 +210,7 @@ class EngineEvents:
                                    "lost": {k for k in keys if k not in self._alive},
                                    "block_size": prev.block_size if prev else None,
                                    "concurrent": concurrent or bool(prev and prev.mixed),
-                                   "errors": self._errors()}
+                                   "restored_elsewhere": False, "errors": self._errors()}
             while len(self._checks) > self.max_sessions:  # requests that never completed
                 self._checks.popitem(last=False)
             return token
@@ -213,9 +228,18 @@ class EngineEvents:
             if check is None or cached_tokens is None or not check["at"] or not check["block_size"]:
                 self._checks.pop(token, None)
                 return NOTHING
-            if prompt_tokens and cached_tokens >= prompt_tokens * 0.5:  # a hit: never examined
+            if prompt_tokens and cached_tokens >= prompt_tokens * 0.5:
+                # A hit: no eviction to judge. Blocks of the previous request that this read
+                # covered yet had been removed from the GPU came back from a host or offload
+                # tier (details: host_restored). Claimed only from a clean, uncontended stream.
+                stop = max(0, cached_tokens) // check["block_size"]
+                restored = sum(1 for pos, k in check["at"].items() if pos < stop and k in check["lost"])
+                # Only when an offload tier exists (its events were seen) and no other request
+                # stored a lost block meanwhile: otherwise a re-computation looks the same.
+                clean = (self.offload_seen and not check["concurrent"] and not check["restored_elsewhere"]
+                         and self._errors() == check["errors"])
                 self._checks.pop(token, None)
-                return NOTHING
+                return (restored, 0) if restored and clean else NOTHING
             key = check["at"].get(max(0, cached_tokens) // check["block_size"])
         if key is None:
             self._checks.pop(token, None)
@@ -559,6 +583,8 @@ class SGLangEvents(EngineEvents):
 
     def _event(self, ev: dict) -> None:
         kind = ev.get("type")
+        if kind == "BlockStored" and ev.get("medium") not in GPU:
+            self.offload_seen = True  # HiCache's host or storage tier exists
         if kind == "BlockStored" and ev.get("medium") in GPU:
             self._store(ev)
         elif kind == "BlockRemoved" and ev.get("medium") in GPU:
@@ -694,6 +720,26 @@ class SGLangEvents(EngineEvents):
         other = self._alive.get(seg.hashes[j])  # stored again before this request was sent: present
         return not (other is not None and other is not seg and other.born < check["sent"])
 
+    def _restored(self, check, cached: int) -> int:
+        """On a hit: blocks of the previous request's chain before the read's end (token position
+        `cached`) that had been removed from the GPU, so this request read them from another
+        tier (details: host_restored). 0 when nothing can be said (an unplaced or ambiguous
+        chain, a concurrent request, an overflow or a cut stream)."""
+        if (not self.offload_seen or check["tail"] is None or check["overflowed"] or check["concurrent"]
+                or self._errors() != check["errors"]):
+            return 0
+        chain = _chain(check["tail"])
+        if any(seg.start is None or seg.ambiguous for seg, _ in chain):
+            return 0
+        n = 0
+        for seg, last in chain:
+            for j in range(last + 1):
+                if seg.start + j * seg.block >= cached:
+                    return n
+                if self._removed(check, seg, j):
+                    n += 1
+        return n
+
     def _judge(self, check, cached: int):
         """(stop run, block, blocks on chain, blocks removed), or None."""
         if check["tail"] is None or check["overflowed"]:
@@ -719,10 +765,13 @@ class SGLangEvents(EngineEvents):
                      prompt_tokens: int | None = None) -> tuple[int | None, int | None]:
         with self._lock:
             check = self._checks.get(token)
-            if (check is None or cached_tokens is None
-                    or (prompt_tokens and cached_tokens >= prompt_tokens * 0.5)):  # a hit: never examined
+            if check is None or cached_tokens is None:
                 self._drop_check(token)
                 return NOTHING
+            if prompt_tokens and cached_tokens >= prompt_tokens * 0.5:  # a hit: restored blocks only
+                restored = self._restored(check, max(0, cached_tokens))
+                self._drop_check(token)
+                return (restored, 0) if restored else NOTHING
             judged = self._judge(check, max(0, cached_tokens))
             if judged is None:
                 self._drop_check(token)

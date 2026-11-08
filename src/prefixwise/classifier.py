@@ -104,7 +104,8 @@ class RequestSnapshot:
     engine: bool = False
     engine_caches: int = 1
     # From the engine's KV events (prefixwise.engines; None = nothing to judge):
-    # evicted_blocks > 0 when the block where the cache read stopped was removed;
+    # evicted_blocks > 0 when the block where the cache read stopped was removed (on a hit: blocks
+    # the read covered that had been removed, so they came back from a host tier: host_restored);
     # evicted_blocks == 0 and resident_blocks > 0 when that block is still on the GPU.
     evicted_blocks: int | None = None
     resident_blocks: int | None = None

@@ -340,7 +340,8 @@ class Collector:
         if prev is None or stitched:
             prev_facts = None  # a stitched branch: the lane's latest request may be another branch
         new_cause, detail, why = detail_for(result.cause.value, prev_facts, facts,
-                                            prompt_tokens=prompt_tokens, cached_tokens=cached)
+                                            prompt_tokens=prompt_tokens, cached_tokens=cached,
+                                            evicted_blocks=curr.evicted_blocks if rec.engine_caches == 1 else None)
         if new_cause:
             cause_name, legit = new_cause
             result = Classification(MissCause(cause_name), legit,
