@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- **A request too short to cache is not waste, even if its prompt changed:** a prompt below the provider's minimum cacheable prefix, with nothing read, is `below_min_prefix` even when its system prompt, tools or history also changed (the change stays as a secondary cause). Before, only a previous request below the minimum was caught, so a prompt that shrank below it was priced as `volatile_system` or `history_edit` waste.
+- **Avoidable cost includes the cache-write surcharge:** a miss's avoidable tokens are priced at the rate the request actually paid for its uncached prompt tokens (on Anthropic usually the cache-write rate, 1.25x input for 5 minutes or 2x for 1 hour, as they are written again) minus the cache-read rate. Before, the plain input rate was used, which understated Anthropic waste: the true figure is about 26-28% higher for 5-minute writes and 2.0-2.1x for 1-hour writes (built-in Claude rates). Without the request's usage, the input rate is still used.
+- **5-minute or 1-hour cache:** `prefixwise report`, the end of `prefixwise run` and `findings` in the API say, per Anthropic model, whether the 1-hour cache could have paid on this ledger. Kept by 1 hour: the `ttl_expired` misses on the 5-minute cache with a gap within the hour (not `ttl_shortened`); their rewrites would have been reads. Extra: every other 5-minute write at the 1-hour rate; writes on 1 hour, or of unknown lifetime, are not counted. When even the best case does not pay, the report says to keep 5 minutes. New ledger column `cache_ttl_seconds` (schema 5, added in place): each request's own cache lifetime. Rows recorded before it have none and are left out of this advice.
+- Existing rows keep the avoidable cost they were recorded with; only new rows use the write rate.
+- **Fixed, LiteLLM callback:** LiteLLM runs success callbacks on a pool of threads, so a session's calls could be recorded out of order, and a turn compared with the one after it read as `history_edit`. Calls are now recorded in the order they were sent (a turn waits at most 2 s for earlier turns of its own conversation, never for streams or other conversations; failed, cancelled or abandoned calls release the turns after them).
+
 ## 0.7.0: 2026-11-08
 
 Sharper verdicts where agents actually run: parallel subagents in one session are each compared

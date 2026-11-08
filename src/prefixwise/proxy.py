@@ -1113,10 +1113,11 @@ class PrefixwiseProxy:
             evidence=result.evidence,
             secondary_causes=",".join(c.value for c in result.secondary) or None,
             divergence_role=div["role"] if div else None, divergence_index=div["index"] if div else None,
-            detail=detail,
+            detail=detail, cache_ttl_seconds=ctx.get("ttl_seconds"),
         )
         priced_model = str(payload.get("model") or ctx["model"])
-        entry.avoidable_cost = self.prices.avoidable_cost(priced_model, entry.avoidable_tokens, prompt_tokens)
+        entry.avoidable_cost = self.prices.avoidable_cost(priced_model, entry.avoidable_tokens, prompt_tokens,
+                                                     provider, usage)
         if entry.cost is not None:
             entry.price_as_of = self.prices.as_of
         entry.overhead_ms = self._overhead_ms(ctx)

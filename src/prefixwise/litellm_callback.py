@@ -25,7 +25,13 @@ OpenAI-compatible. Like the proxy, only hashes of the prompt are stored, never i
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
+import json
 import sys
+import threading
+import time
+from collections import OrderedDict
 
 from .otel import provider_name
 from .sdk import Recorder
@@ -35,6 +41,19 @@ try:  # subclass LiteLLM's base when it is installed; plain object otherwise (te
 except Exception:  # noqa: BLE001 - litellm absent or broken: the callback is still importable
     _Base = object
 
+# LiteLLM runs sync success callbacks on a pool of threads, so a conversation's turns can reach
+# the callback out of order, and a turn compared with the turn after it reads as rewritten history.
+# Turns of one conversation are sequential (the next is sent after the previous answer), so the
+# previous turn's callback is due when the next one's arrives: each turn waits at most this long
+# for earlier turns of its own conversation, never for other conversations or streams.
+ORDER_WAIT_SECONDS = 2.0
+# A call whose callback never comes (an abandoned call, a task LiteLLM dropped) is forgotten
+# 2 x ORDER_WAIT_SECONDS after the next turn of its conversation was sent (its answer had come
+# by then), or ORDER_FORGET_SECONDS after it was sent (longer than any generation), whichever
+# comes first; at most ORDER_MAX_CALLS are tracked (past that, as on a LiteLLM proxy with more
+# calls in flight, the oldest stop being ordered: recorded as they come, as before).
+ORDER_FORGET_SECONDS = 900.0
+ORDER_MAX_CALLS = 10_000
 _REDACTED = "redacted-by-litellm"  # what LiteLLM logs in place of messages with logging turned off
 
 
@@ -50,6 +69,46 @@ def _int(v) -> int:
         return int(v or 0)
     except (TypeError, ValueError):
         return 0
+
+
+def _session_of(kwargs) -> str | None:
+    params = kwargs.get("litellm_params") or {}
+    meta = params.get("metadata") or {}
+    return params.get("litellm_session_id") or meta.get("session_id") or kwargs.get("user")
+
+
+def _conversation(model, messages, kwargs) -> tuple | None:
+    """(session, model, opening message): the turns that must be recorded in order. None when
+    the call is not recorded (streams, other call types) or has no session."""
+    if kwargs.get("stream") or kwargs.get("call_type") not in (None, "completion", "acompletion"):
+        return None
+    session = _session_of(kwargs)
+    if not session:
+        return None
+    opening = next((m.get("content") for m in messages or [] if isinstance(m, dict)
+                    and m.get("role") not in ("system", "developer")), None)
+    digest = hashlib.sha256(_text(opening).encode()).hexdigest()
+    return session, str(model), digest
+
+
+def _text(content) -> str:
+    """A message's content as the same string turn after turn: a string and text blocks with the
+    same text agree, and markers (cache_control, which clients move to the last message) are
+    ignored."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for b in content:
+            if isinstance(b, dict) and isinstance(b.get("text"), str):
+                parts.append(b["text"])
+            elif isinstance(b, dict):
+                parts.append(json.dumps({k: v for k, v in b.items() if k != "cache_control"},
+                                        sort_keys=True, default=str))
+            else:
+                parts.append(str(b))
+        return "".join(parts)
+    return json.dumps(content, sort_keys=True, default=str)
 
 
 def _is_anthropic_body(body) -> bool:
@@ -92,13 +151,90 @@ class PrefixwiseCallback(_Base):
         self.recorder = recorder or Recorder(ledger_path, agent_id=agent_id)
         self._warned = False
         self._warned_redacted = False
+        # conversation -> OrderedDict(call id -> when it became due, or None), in send order
+        self._turns: dict = {}
+        self._key: OrderedDict = OrderedDict()  # call id -> (conversation, send time), oldest first
+        self._order = threading.Condition()
 
     # LiteLLM calls these with keyword arguments: the parameter names must be exactly these.
+    def log_pre_api_call(self, model, messages, kwargs):
+        key, call = _conversation(model, messages, kwargs), kwargs.get("litellm_call_id")
+        if key is None or not call:
+            return
+        now = time.monotonic()
+        with self._order:
+            turns = self._turns.setdefault(key, OrderedDict())
+            for c, due in list(turns.items()):  # this conversation's earlier turns have been answered
+                if due is None:
+                    turns[c] = now
+                elif due < now - 2 * ORDER_WAIT_SECONDS:
+                    self._drop(c)
+                    self._order.notify_all()
+            self._sweep(now)
+            self._turns.setdefault(key, OrderedDict())[call] = None
+            self._key[call] = (key, now)
+
     def log_success_event(self, kwargs, response_obj, start_time, end_time):
-        self._record(kwargs, response_obj, start_time, end_time)
+        try:
+            with self._order:
+                self._order.wait_for(lambda: self._first(kwargs), timeout=ORDER_WAIT_SECONDS)
+            self._record(kwargs, response_obj, start_time, end_time)
+        finally:
+            self._done(kwargs)
 
     async def async_log_success_event(self, kwargs, response_obj, start_time, end_time):
-        self._record(kwargs, response_obj, start_time, end_time)
+        try:  # on the event loop: wait without blocking it (the earlier turn may be logged by it)
+            deadline = time.monotonic() + ORDER_WAIT_SECONDS
+            while time.monotonic() < deadline:
+                with self._order:
+                    if self._first(kwargs):
+                        break
+                await asyncio.sleep(0.01)
+            self._record(kwargs, response_obj, start_time, end_time)
+        finally:  # also when LiteLLM cancels the coroutine
+            self._done(kwargs)
+
+    def log_failure_event(self, kwargs, response_obj, start_time, end_time):
+        self._done(kwargs)
+
+    async def async_log_failure_event(self, kwargs, response_obj, start_time, end_time):
+        self._done(kwargs)
+
+    def _first(self, kwargs) -> bool:
+        """No earlier turn of this call's conversation is still to be recorded. Caller holds _order."""
+        call = kwargs.get("litellm_call_id")
+        entry = self._key.get(call)
+        turns = self._turns.get(entry[0]) if entry else None
+        return not turns or next(iter(turns)) == call
+
+    def _drop(self, call) -> None:
+        """Caller holds _order."""
+        entry = self._key.pop(call, None)
+        if entry is not None:
+            turns = self._turns.get(entry[0])
+            if turns is not None:
+                turns.pop(call, None)
+                if not turns:
+                    self._turns.pop(entry[0], None)
+
+    def _sweep(self, now: float) -> None:
+        """Forget calls sent ORDER_FORGET_SECONDS ago, and keep at most ORDER_MAX_CALLS. Caller
+        holds _order."""
+        stale = now - ORDER_FORGET_SECONDS
+        dropped = False
+        while self._key:
+            call, (_, sent) = next(iter(self._key.items()))
+            if sent >= stale and len(self._key) < ORDER_MAX_CALLS:
+                break
+            self._drop(call)
+            dropped = True
+        if dropped:
+            self._order.notify_all()
+
+    def _done(self, kwargs) -> None:
+        with self._order:
+            self._drop(kwargs.get("litellm_call_id"))
+            self._order.notify_all()
 
     def _record(self, kwargs, response_obj, start_time, end_time) -> None:
         try:
@@ -126,7 +262,7 @@ class PrefixwiseCallback(_Base):
                 latency = (end_time - start_time).total_seconds() * 1000
             except Exception:  # noqa: BLE001 - timing is optional
                 pass
-            session = params.get("litellm_session_id") or meta.get("session_id")
+            session = params.get("litellm_session_id") or meta.get("session_id")  # (_session_of adds user)
             common = dict(session_id=session or kwargs.get("user"), session_is_user=not session,
                           task_id=meta.get("task_id"), agent_id=meta.get("agent_id"), latency_ms=latency,
                           genai_provider=provider_name(provider) if provider else None)

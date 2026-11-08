@@ -144,7 +144,7 @@ sequenceDiagram
 | `engines.py` | the engine join: `EngineEvents` (one vLLM cache), `SGLangEvents` (SGLang), `EngineFleet` (several caches: vLLM ranks or replicas, SGLang ranks) |
 | `fixes.py` | opt-in, meaning-preserving rewrites (`canonical_tools`) and the fix advice per cause |
 | `pricing.py` + `prices.json` | dated price table (provider pages, with source and date); unknown rate means no dollar figure, never an invented one |
-| `ledger.py` | SQLite (schema 4): `entries` (one row per request) and `tasks` (outcomes); migrates in place |
+| `ledger.py` | SQLite (schema 5): `entries` (one row per request) and `tasks` (outcomes); migrates in place |
 | `metrics.py` | every metric defined once; the CLI, API and export all call `query` |
 | `findings.py` | the plain-English report: what the cache did, what the waste cost, the fix for each cause |
 | `api.py` | `/api/v1`: summary, breakdowns, request rows, fixes, prices, explain |

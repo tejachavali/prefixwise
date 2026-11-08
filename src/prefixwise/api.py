@@ -107,7 +107,7 @@ def get(proxy, path: str, query: str) -> tuple[int, dict]:
         if sub == "/findings":
             from .findings import findings
             return 200, {"findings": findings(led, since=_time(p.get("since"), "since"),
-                                              until=_time(p.get("until"), "until"))}
+                                              until=_time(p.get("until"), "until"), prices=proxy.prices)}
         if sub == "/prices":
             return 200, {"as_of": proxy.prices.as_of, "sources": proxy.prices.sources,
                          "models": proxy.prices.models}
