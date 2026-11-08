@@ -95,13 +95,19 @@ class RequestSnapshot:
     compaction_event: bool = False
     fork_parent_session_id: str | None = None
     session_id: str | None = None
-    # Self-hosted engine (vLLM, SGLang) behind the proxy: one cache, no routing.
+    # Self-hosted engine (vLLM, SGLang) behind the proxy, and how many KV caches it has
+    # (data-parallel ranks, or replicas behind a router), as far as Prefixwise knows.
     engine: bool = False
+    engine_caches: int = 1
     # From the engine's KV events (prefixwise.engines; None = nothing to judge):
     # evicted_blocks > 0 when the block where the cache read stopped was removed;
     # evicted_blocks == 0 and resident_blocks > 0 when that block is still on the GPU.
     evicted_blocks: int | None = None
     resident_blocks: int | None = None
+    # Several caches: (cache that served the previous request, cache that served this one,
+    # blocks of the previous request still resident on the first), when the first still held
+    # the block where this request's cache read stopped.
+    routed: tuple | None = None
     # Anthropic cache_control present anywhere in the request.
     has_breakpoint: bool = False
     breakpoint_after_volatile: bool = False
@@ -278,6 +284,14 @@ def classify(prev: RequestSnapshot | None, curr: RequestSnapshot,
                               f"({curr.evicted_blocks} of the previous request's KV blocks removed; KV events)",
                               secondary, native_reason)
 
+    if curr.routed:
+        before, now, held = curr.routed
+        return Classification(MissCause.ROUTING_MISS, None,
+                              f"confirmed: served by {now}, while {before}, which served this session's previous "
+                              f"request, still held the prefix ({held} of its blocks resident; KV events). "
+                              "Route each session to the same cache",
+                              secondary, native_reason)
+
     # Identical replay within a short window is a retry, not a cache miss.
     if prev.blocks and curr.blocks and \
        [b.raw for b in prev.blocks] == [b.raw for b in curr.blocks] and \
@@ -289,11 +303,20 @@ def classify(prev: RequestSnapshot | None, curr: RequestSnapshot,
     # not reused is usually an eviction. Events can rule that out (docs/ENGINES.md).
     if curr.engine:
         if curr.evicted_blocks == 0 and curr.resident_blocks:
+            where = ("the cache that served it" if curr.engine_caches > 1 else "the engine")
+            also = ("" if curr.engine_caches > 1 else
+                    ", or the request went to another data-parallel rank")
             return Classification(MissCause.UNKNOWN, None,
-                                  "not an eviction: the engine still holds the block where the cache read stopped "
+                                  f"not an eviction: {where} still holds the block where the cache read stopped "
                                   f"({curr.resident_blocks} of the previous request's blocks resident; KV events). "
                                   "The token prefix changed there although the request did not (chat template "
-                                  "rendering), or the request went to another data-parallel rank",
+                                  f"rendering){also}",
+                                  secondary, native_reason)
+        if curr.engine_caches > 1:
+            return Classification(MissCause.UNKNOWN, None,
+                                  f"{curr.engine_caches} KV caches behind this upstream (data-parallel ranks or "
+                                  "replicas): an eviction and a request sent to another cache look the same, and "
+                                  "the KV events could not tell them apart for this request",
                                   secondary, native_reason)
         return Classification(MissCause.EVICTED, None,
                               "inferred: one self-hosted engine, prefix unchanged but not reused. Usually the "

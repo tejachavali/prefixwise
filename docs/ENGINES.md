@@ -162,6 +162,60 @@ same block while this request ran (it is not in use, so it can be evicted), the 
 "confirmed eviction" although the eviction came after the miss. It needs a token change and an
 eviction of exactly that block within one request's lifetime.
 
+## Several KV caches (vLLM): data-parallel ranks, replicas behind a router
+
+Each data-parallel rank, and each replica behind a router, has its own KV cache. A session whose turns land on
+different caches misses although nothing about the request changed: a **routing miss**. One
+engine's inference ("prefix unchanged but not reused, so evicted") is wrong there, so with more
+than one cache known Prefixwise no longer infers an eviction; the events decide.
+
+```bash
+prefixwise serve --upstream http://vllm:8000 --engine vllm --kv-events auto       # every DP rank
+prefixwise serve --upstream http://router:8080 --engine vllm \
+    --kv-events tcp://replica-a:5557,tcp://replica-b:5557,tcp://replica-c:5557     # behind a router
+```
+
+- `auto` reads vLLM's `GET /kv_event_sources` (`{rank: KVEventsConfig}`, each rank's endpoint
+  with its port already offset; `vllm/entrypoints/serve/instrumentator/basic.py`, Nov 2026) and
+  subscribes to every rank. Those are bind addresses: one bound on all interfaces
+  (`tcp://*:5558`) is reached at the upstream's host. Ranks are read once, at startup.
+- **Which cache served a request needs no router support.** Prefixwise sends its session id,
+  and vLLM, with `kv_cache_report_mode: "full"`, reports every block a request uses (reused or
+  new) with that session, on the stream of the cache that ran it
+  (`vllm/v1/core/kv_cache_manager.py`). The cache whose stream reported the session's blocks
+  after the send served it; the one that reported them for the previous request served that.
+  None of the routers reports this in its response by default (research, Nov 2026: only Dynamo
+  with `nvext.extra_fields` and AIBrix with `target-pod` do).
+- **What a router must do:** pass the request body's `session_id` and `vllm_xargs` through to
+  vLLM, which a router that forwards OpenAI requests as they are does. **Dynamo does not**: its
+  vLLM worker takes the session from `x-dynamo-session-id` / agent headers, not the body
+  (`components/src/dynamo/vllm/handlers.py`), so behind Dynamo the events carry no session and
+  Prefixwise makes no claim. Not yet checked: llm-d, the SGLang router, production-stack, AIBrix.
+- **Prefill/decode disaggregation:** the prefill and the decode worker both report a request's
+  blocks, so with both listed no request can be attributed and nothing is claimed.
+- **Verdicts at the response:**
+  - the same cache served both turns: that cache's own verdict, as for one engine (evicted, or
+    still resident: the token prefix changed);
+  - another cache served this turn, it computed the block where its cache read stopped (it did
+    not have it), and the cache that served the previous turn still holds **that same block**
+    (same hash: vLLM's block hashes are comparable across replicas of one model by default):
+    **`routing_miss`, confirmed** ("served by rank 1,
+    while rank 0 ... still held the prefix"). The prefix was cached, on the other replica; route
+    each session to one cache (the routers' session affinity: `x-session-id` for llm-d, the SGLang
+    router and AIBrix, `x-dynamo-session-id` for Dynamo, `--session-key` for production-stack);
+  - anything else: no engine claim (`unknown`, saying that an eviction and a request sent to
+    another cache look the same). That covers a request no cache reported (shorter than a block),
+    two caches reporting it, a block that differs where the read stopped (a prefix rendered
+    differently, a side call of the same session served elsewhere), a previous cache that lost
+    the block too, a stream behind or with lost messages, a hybrid model, and concurrent requests
+    of one session. Each request is judged by its own reports, even when the next one was sent
+    before it was judged (streaming).
+- **A replica that goes away** (crashed, replaced, scaled down): the subscriber sees its
+  connection drop, forgets what that replica held, and claims nothing across the gap, so a
+  failover is never reported as a routing miss.
+- One subscriber thread per cache; `/metrics` sums their counters, and `GET /engine` lists each
+  cache. A hit adds no wait; otherwise all streams share one catch-up deadline.
+
 ## Failure modes, and what the code does about them
 
 - **Lost event messages** (ZMQ PUB drops under backpressure): a missed `BlockRemoved` would
@@ -171,9 +225,9 @@ eviction of exactly that block within one request's lifetime.
 - **Late subscription / tight loops:** if a session's previous request reported no blocks
   (Prefixwise subscribed later, or the next request followed within milliseconds), there is
   nothing to judge and the inference stands. Never a false claim.
-- **Several replicas or DP ranks:** each publishes its own stream (vLLM offsets the port per
-  DP rank). Prefixwise subscribes to one; run one Prefixwise per replica, or route each
-  session to one replica.
+- **Several replicas or DP ranks (vLLM):** each has its own cache and stream. See
+  [Several KV caches](#several-kv-caches-vllm-data-parallel-ranks-replicas-behind-a-router) below.
+  SGLang: one data-parallel rank for now.
 - **Memory:** the set of live blocks is bounded by the engine's GPU capacity (entries leave on
   `BlockRemoved`). Past a hard cap of 1,000,000 (removals must have been missed) Prefixwise
   forgets the saved chains rather than read every block as removed.
