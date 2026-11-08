@@ -19,11 +19,12 @@ It stores hashes and counts, never prompt text.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="figures/architecture-dark.svg">
-  <img alt="How a request flows through Prefixwise: four ways in (the proxy, prefixwise.wrap, LiteLLM, agent logs); read, forward, fingerprint and name one cause; one SQLite ledger; five ways out (report, API, Prometheus, OpenTelemetry, export)" src="figures/architecture-light.svg">
+  <img alt="How a request flows through Prefixwise: four ways in (the proxy, prefixwise.wrap, LiteLLM, agent logs); an edge reads, forwards and fingerprints the request where it is; a turn record of hashes and counts crosses to a collector, in one process or over HTTP or a Redis Stream partitioned by session, which names one cause and writes one SQLite ledger row; six ways out (Prometheus, OpenTelemetry, report, API, export, sinks)" src="figures/architecture-light.svg">
 </picture>
 
 The chart shows the four live ways in; a fifth, `prefixwise explain`, runs the same classifier offline on
-saved requests. The same, with every module named, as a Mermaid diagram:
+saved requests. Prefixwise is two halves with one boundary: an **edge**, where the request is, and a
+**collector**, where the ledger is. The same, with every module named, as a Mermaid diagram:
 
 ```mermaid
 flowchart LR
@@ -34,16 +35,24 @@ flowchart LR
     I["Log import<br/>Claude Code, Codex"]
     X["prefixwise explain<br/>(offline)"]
   end
-  subgraph core[Core]
-    PR["PrefixwiseProxy<br/>prepare / finalize"]
+  subgraph edge[Edge: proxy.py, sdk.py]
+    PR["prepare / finalize"]
     F["fingerprint.py<br/>block hashes"]
+    E["engines.py<br/>vLLM / SGLang KV events"]
+    REC["records.py<br/>TurnRecord: hashes, counts, usage"]
+  end
+  subgraph wire[One process, or a wire]
+    T["transport.py<br/>HTTP to prefixwise collect"]
+    LOG["log.py<br/>Redis Stream, partitioned by session"]
+  end
+  subgraph coll[Collector: collector.py]
     C["classifier.py<br/>one cause"]
     D["details.py<br/>sub-reason"]
     N["diagnostics.py<br/>provider's own reason"]
-    E["engines.py<br/>vLLM / SGLang KV events"]
     PZ["pricing.py<br/>dated prices"]
   end
   LED[("ledger.py<br/>SQLite")]
+  SK["sinks.py<br/>JSONL, ClickHouse"]
   subgraph OUT[Ways out]
     R["prefixwise report<br/>findings.py"]
     A["HTTP API /api/v1<br/>api.py"]
@@ -57,27 +66,45 @@ flowchart LR
   L -->|Recorder| PR
   I --> LED
   X --> C
-  PR --> F --> C
+  PR --> F --> REC
+  E --> REC
+  REC -->|in process| C
+  REC -.-> T -.-> C
+  REC -.-> LOG -.-> C
   N --> C
-  E --> C
   C --> D --> PZ --> LED
-  PR -. each row .-> PM
+  LED --> SK
+  C -. each row .-> PM
   PR -. each row .-> OT
   LED --> M --> R
   M --> A
   M --> EX
 ```
 
-- **The proxy** (`proxy.py`, stdlib only) is the reference path: an OpenAI- and
-  Anthropic-compatible HTTP server that forwards to the real provider (or a vLLM / SGLang
-  server) and sees the exact bytes sent and received.
-- **`prefixwise.wrap` and the LiteLLM callback** do not forward anything: the call already
-  happened. They hand the request and response to `sdk.Recorder`, which runs the proxy's own
-  `prepare` / `finalize` in mock mode with no fixes, so they classify exactly as the proxy does.
+- **The edge** is wherever the request is. **The proxy** (`proxy.py`, stdlib only) is the reference
+  edge: an OpenAI- and Anthropic-compatible HTTP server that forwards to the real provider (or a
+  vLLM / SGLang server) and sees the exact bytes sent and received. **`prefixwise.wrap` and the
+  LiteLLM callback** do not forward anything: the call already happened. They hand the request and
+  response to `sdk.Recorder`, which runs the proxy's own `prepare` / `finalize` in mock mode with no
+  fixes, so they build the same record. An edge keeps only what a request needs on its way out
+  (requests in flight by prefix, streams not yet recorded, fields an upstream rejected).
+- **The turn record** (`records.py`) is the boundary: block hashes, positions, counts, digests of the
+  prompt-affecting parameters, the provider's usage, the engine join's verdict. Never text. It is
+  versioned, and a collector refuses a version it does not read.
+- **The collector** (`collector.py`) owns the conversation state (lanes per session and model,
+  Responses snapshots, per-session facts), compares each record with its conversation's previous
+  turn, names the cause, prices it and writes the ledger; one lock serializes `ingest`, which is the
+  ordering a conversation needs. In one process the edge calls it directly. In a fleet, records
+  cross **HTTP** (`transport.py`, `prefixwise collect`: one collector, one ledger) or a **Redis
+  Stream partitioned by session** (`log.py`, `prefixwise collect --log --partitions`: several
+  collectors, each owning its partitions, replaying its state after a restart, acknowledging a
+  record only after its row is written).
 - **Log import** (`importers.py`) reads Claude Code and Codex session logs for subscribers a
   proxy cannot reach. Logs have usage but no prompts, so it names only what the log shows
   changed (model, compaction, upgrade, a changed system prompt, effort, expiry) and leaves the
   rest `unknown`. It writes the same ledger rows, to its own ledger file.
+- **Sinks** (`sinks.py`) get a copy of every committed row (JSONL, ClickHouse), never on the ledger's
+  write path.
 - **`prefixwise explain`** (`explain.py`) runs the fingerprinting and classifier on saved
   request bodies, with no proxy and no API key.
 
