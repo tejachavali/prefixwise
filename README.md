@@ -369,7 +369,12 @@ python experiments/e1_open/e1_open.py --mock           # harness smoke test
 
 ## Design notes
 
-How it is built today (parts, request flow, data, rules): [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/tejachavali/prefixwise/main/docs/figures/architecture-dark.svg">
+  <img alt="How a request flows through Prefixwise: four ways in (the proxy, prefixwise.wrap, LiteLLM, agent logs); read, forward, fingerprint and name one cause; one SQLite ledger; five ways out (report, API, Prometheus, OpenTelemetry, export)" src="https://raw.githubusercontent.com/tejachavali/prefixwise/main/docs/figures/architecture-light.svg">
+</picture>
+
+How it is built today (parts, request flow, how a cause is decided, data, rules): [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 The original research and architecture, kept as written: [docs/DESIGN.md](docs/DESIGN.md).
 Current designs: [docs/DATA.md](docs/DATA.md) (data and metrics), [docs/API.md](docs/API.md),
 [docs/ENGINES.md](docs/ENGINES.md) (vLLM and SGLang engine join).
