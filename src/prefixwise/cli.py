@@ -546,9 +546,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--kv-events", metavar="ENDPOINT",
                    help="the engine's KV-event stream, e.g. tcp://127.0.0.1:5557, to confirm evictions "
                         "or rule them out (vLLM, or SGLang >= 0.5.20; needs: pip install 'prefixwise[engines]'). "
-                        "vLLM with several KV caches: 'auto' (every data-parallel rank, from the upstream), or "
-                        "comma-separated endpoints, one per replica behind a router; then a request sent away "
-                        "from its cached prefix is a confirmed routing miss")
+                        "Several KV caches: 'auto' (every data-parallel rank, from the upstream: vLLM, or SGLang "
+                        "with --full-attention), or for vLLM comma-separated endpoints, one per replica behind a "
+                        "router; then a request sent away from its cached prefix is a confirmed routing miss")
     p.add_argument("--full-attention", action="store_true", default=None,
                    help="SGLang: the model has no sliding-window or Mamba layers, so KV events can also "
                         "rule an eviction out (vLLM detects this itself)")

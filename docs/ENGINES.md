@@ -228,13 +228,25 @@ prefixwise serve --upstream http://router:8080 --engine vllm \
 
 ## SGLang with several data-parallel ranks
 
-Each rank (`--dp-size N`, or `--enable-dp-attention`) has its own radix cache and its own
-KV-event publisher at `endpoint_port_base + rank`, every batch stamped with the rank
-(`sglang/srt/disaggregation/kv_events.py`, Nov 2026). `prefixwise serve --engine sglang
---kv-events auto` reads `/server_info` (`kv_events`: `endpoint_host`, `endpoint_port_base`,
+Each rank (`--dp-size N`, or attention data parallelism, `--attn-dp-size N`) has its own radix
+cache and its own KV-event publisher at `endpoint_port_base + rank`, every batch stamped with the
+rank (`sglang/srt/disaggregation/kv_events.py`, Nov 2026).
+
+```bash
+python -m sglang.launch_server --model-path MODEL --dp-size 2 --enable-cache-report \
+  --kv-events-config '{"publisher": "zmq", "endpoint": "tcp://*:5557"}'      # ranks on 5557, 5558
+prefixwise serve --upstream http://127.0.0.1:30000 --engine sglang --kv-events auto --full-attention
+```
+
+`--kv-events auto` reads `/server_info` (`kv_events`: `endpoint_host`, `endpoint_port_base`,
 `dp_size`) and follows every rank; a batch carrying another rank's stamp is counted
-(`wrong_rank`) and stops claims, so crossed endpoints cannot mislead it. One endpoint given for a
-server with several ranks: Prefixwise says to use `auto` and keeps the inference.
+(`wrong_rank`, also in `/metrics`) and stops claims, so crossed endpoints cannot mislead it. The
+endpoint must be bound on all interfaces (`tcp://*:PORT`): with a named host SGLang connects out
+instead of listening, and Prefixwise says so. One endpoint given for a server with several ranks:
+Prefixwise says to use `auto`. With several ranks known, an eviction is never just inferred.
+**Routing misses need `--full-attention`** (the model has no sliding-window or Mamba layers):
+SGLang frees those layers without an event, so otherwise a block that looks resident proves
+nothing, and no routing miss is claimed.
 
 What differs from vLLM, and how the join handles it:
 
@@ -242,14 +254,18 @@ What differs from vLLM, and how the join handles it:
   it computed, from exactly where its read stopped. So the rank that served a request is the
   one whose stream stored the session's blocks **starting at that position**. The previous
   turn's finish store (generated tokens, published after its response, sometimes after the next
-  turn was sent) starts where that turn ended, so it cannot pass for this one.
+  turn was sent) starts where that turn's prompt ended, usually elsewhere; when it starts at the
+  same position, two ranks match and nothing is claimed.
 - **Stores can follow the response.** A prompt's store is published after the step that
   produced the first output; the join waits for it (`barrier_seconds`, default 0.5 s) before
-  deciding, and claims nothing if it does not come.
+  deciding, and claims nothing if it does not come. It waits only when a claim is possible (one
+  rank served the previous turn), so a session's first turn costs nothing.
 - **Block identity is exact.** SGLang's block hashes are SHA-256 over the tokens, chained, with
   no per-process seed, so the same prefix has the same hash on every rank. A routing miss is
   confirmed only when the rank that served the previous turn still holds the very block (same
-  hash, same position) that the serving rank had to compute.
+  hash, same position) that the serving rank had to compute. SGLang leaves a request's
+  `extra_key` out of those hashes, so a changed `extra_key` is judged first, as a parameter
+  change (`param_rendered`).
 - **Refused:** prefill/decode disaggregation (the prefill rank is chosen per request, and
   prefill and decode keep separate caches), ranks across several nodes (`/server_info`
   advertises one event host), and `--enable-session-radix-cache` (as for one rank). Prefixes

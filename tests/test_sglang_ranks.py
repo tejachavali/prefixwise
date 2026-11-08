@@ -5,7 +5,7 @@ rank that served a request is the one that stored the session's blocks from wher
 stopped, and a routing miss is confirmed by the very block it computed still being held by the
 rank that served the previous turn."""
 
-import socket
+import threading
 import time
 
 import pytest
@@ -101,33 +101,28 @@ def test_a_crossed_stream_is_caught_by_its_rank_stamp():
 # -- over the wire: one SGLang server, two ranks, discovered from /server_info ------------------
 
 
-def free_pair():
-    for _ in range(50):
-        base = 20000 + int(time.time() * 1000) % 30000
-        socks = []
+def bind_pair():
+    """Two PUB sockets on consecutive ports, as SGLang binds its ranks (base + rank)."""
+    ctx = zmq.Context.instance()
+    for attempt in range(50):
+        base = 20000 + (int(time.time() * 1000) + attempt * 7919) % 30000
+        pubs = []
         try:
-            for port in (base, base + 1):
-                s = socket.socket()
-                s.bind(("127.0.0.1", port))
-                socks.append(s)
-            return base
-        except OSError:
-            continue
-        finally:
-            for s in socks:
-                s.close()
+            for r in range(2):
+                pub = ctx.socket(zmq.PUB)
+                pubs.append(pub)
+                pub.bind(f"tcp://127.0.0.1:{base + r}")
+            return base, pubs
+        except zmq.ZMQError:
+            for pub in pubs:
+                pub.close(0)
     pytest.skip("no two consecutive free ports")
 
 
 @pytest.fixture
 def ranks():
-    base = free_pair()
-    pubs, seqs = [], []
-    for r in range(2):
-        pub = zmq.Context.instance().socket(zmq.PUB)
-        pub.bind(f"tcp://127.0.0.1:{base + r}")
-        pubs.append(pub)
-        seqs.append(iter(range(1, 10**6)))
+    base, pubs = bind_pair()
+    seqs = [iter(range(1, 10**6)) for _ in pubs]
 
     def send(r, *events):
         pubs[r].send_multipart([b"kv", next(seqs[r]).to_bytes(8, "big"),
@@ -193,10 +188,73 @@ def test_setups_where_ranks_cannot_be_followed_are_refused(ranks, over, why):
 
 def test_several_ranks_with_one_endpoint_points_to_auto(ranks):
     srv = server_info(info_for(ranks.base))
+    p = None
     try:
         p = PrefixwiseProxy(upstream_url=f"http://127.0.0.1:{srv.server_address[1]}/v1", api_key="k",
                             engine="sglang", kv_events=f"tcp://127.0.0.1:{ranks.base}")
     finally:
         srv.shutdown()
-        p.engine_events.stop()
+        if p is not None and p.engine_events is not None:
+            p.engine_events.stop()
     assert not p.sglang_join and "--kv-events auto" in " ".join(p.engine_notes)
+    assert p.engine_caches == 2  # two caches known: an unchanged prefix that missed is not "evicted"
+
+
+def started_fleet(base):
+    f = EngineFleet([(f"rank {r}", f"tcp://127.0.0.1:{base + r}") for r in range(2)],
+                    make=lambda endpoint: SGLangEvents(endpoint, full_attention=True)).start()
+    for r, src in enumerate(f.sources):
+        src.rank = r
+    return f
+
+
+def test_a_store_published_after_the_response_is_waited_for(ranks):
+    f = started_fleet(ranks.base)
+    try:
+        for r, src in enumerate(f.sources):
+            assert wait_for(lambda: (ranks(r), src.snapshot()["batches"] > 0)[1])
+        token = f.request_sent("s")
+        ranks(0, stored(100, 10, session="s"))
+        assert wait_for(lambda: f.sources[0].snapshot()["stored"] >= 10)
+        f.request_done(token, 0)
+        token = f.request_sent("s")
+        later = threading.Timer(0.15, lambda: ranks(1, stored(100, 15, session="s")))
+        later.start()  # SGLang publishes after the step's output: here after the response
+        try:
+            assert f.request_done(token, 0) == (None, None, ("rank 0", "rank 1", 10))
+        finally:
+            later.join()
+    finally:
+        f.stop()
+
+
+def test_no_wait_when_no_claim_is_possible(ranks):
+    f = started_fleet(ranks.base)
+    try:
+        token = f.request_sent("fresh")  # a session's first turn: no rank served a previous one
+        t0 = time.time()
+        assert f.request_done(token, 0) == NOTHING
+        assert time.time() - t0 < 0.2
+    finally:
+        f.stop()
+
+
+def test_a_stop_inside_a_block_is_not_matched_to_that_block():
+    """Blocks of 4 tokens: a read that stopped at token 6 is not at a block boundary, so the
+    block that starts at token 4 on the previous rank is not the block computed from 6."""
+    f = fleet()
+    turn(f, "s", 0, 0, stored(100, 3, session="s", page=4))      # blocks at tokens 0, 4, 8
+    token = f.request_sent("s")
+    rank1_token = f._checks[token][1][1]
+    # Rank 1 computed from token 6 a block whose hash equals rank 0's block at token 4.
+    f.sources[1]._checks[rank1_token]["window"][0] = "stored"
+    f.sources[1]._checks[rank1_token]["window"][2][6] = (101, 4)
+    assert f.request_done(token, 6, 40) == NOTHING
+
+
+def test_a_changed_cache_namespace_is_a_parameter_change():
+    p = PrefixwiseProxy(mock=True)
+    body = {"model": "m", "messages": [{"role": "user", "content": "hi " * 600}]}
+    h = {"x-prefixwise-session-id": "ns"}
+    p.handle("openai", dict(body, extra_key="tenant-a"), h)
+    assert p.handle("openai", dict(body, extra_key="tenant-b"), h)[0]["cause"] == "param_rendered"

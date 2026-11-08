@@ -377,13 +377,15 @@ class EngineEvents:
 
 
 class EngineFleet:
-    """Several vLLM KV caches behind one upstream: data-parallel ranks, or replicas behind a
-    router. One EngineEvents per cache, the same interface as one.
+    """Several KV caches behind one upstream: vLLM data-parallel ranks or replicas behind a
+    router, or SGLang data-parallel ranks. One events reader per cache (`make`), the same
+    interface as one.
 
     No router has to say which cache served a request: vLLM reports every block a request uses
-    with its session (kv_cache_report_mode "full"), so the cache whose stream reported this
-    session's blocks after the send served it, and the one that reported them for the previous
-    request served that. At the response:
+    with its session (kv_cache_report_mode "full"); SGLang reports the blocks a request newly
+    stores, with its session, starting exactly where its cache read stopped (`_stored_at`). So
+    the cache whose stream reported this request's blocks served it, and the one that reported
+    them for the previous request served that. At the response:
 
     - the same cache served both: that cache's own verdict (evicted, or still resident);
     - another cache served this one, and the previous one still holds the block where this
@@ -453,16 +455,19 @@ class EngineFleet:
         # Every stream caught up with now (one deadline for all), so this request's own reports
         # have arrived. A hit, or no cached_tokens, is never examined: no wait.
         stop = max(0, cached_tokens or 0)
-        if not hit:  # SGLang publishes a request's store after its first output: wait for one
+        # Which cache served the previous turn is fixed at the send (chains are frozen then).
+        before = [i for i, (s, t) in enumerate(zip(self.sources, tokens)) if s._served_previous(t)]
+        if not hit and len(before) == 1 and all(s._thread is not None for s in self.sources):
+            # SGLang publishes a request's store after its first output: wait for one, but only
+            # when a claim is possible at all (one cache served the previous turn).
             wait = time.time() + max(getattr(s, "barrier_seconds", 0.0) for s in self.sources)
             while time.time() < wait and not any(s._stored_at(t, stop) for s, t in zip(self.sources, tokens)):
                 time.sleep(0.002)
         asked = time.time()
         end = asked + max(s.settle_seconds for s in self.sources)
-        if not hit and all(s._settle(asked, end) for s in self.sources):
+        if not hit and len(before) <= 1 and all(s._settle(asked, end) for s in self.sources):
             now = [i for i, (s, t) in enumerate(zip(self.sources, tokens)) if s._stored_at(t, stop)]
-            before = [i for i, (s, t) in enumerate(zip(self.sources, tokens)) if s._served_previous(t)]
-            if len(now) == 1 and len(before) <= 1:
+            if len(now) == 1:
                 c = now[0]
                 if not before or before[0] == c:
                     verdict = self.sources[c].request_done(tokens[c], cached_tokens, prompt_tokens)
@@ -758,15 +763,11 @@ class SGLangEvents(EngineEvents):
             check = self._checks.get(token)
             return bool(check and check["tail"] is not None)
 
-    def _served_now(self, token: int) -> bool:
-        with self._lock:
-            check = self._checks.get(token)
-            return bool(check and check["window"][0] is not None)
-
     def _stored_at(self, token: int, cached_tokens: int) -> bool:
         """This rank stored the session's blocks from exactly where the request's cache read
         stopped: it computed the rest, so it served the request. (SGLang reports only new
-        blocks; the previous request's late finish store starts elsewhere.)"""
+        blocks. The previous request's late finish store starts where that request's prompt
+        ended; if that happens to be this stop too, two ranks match and nothing is claimed.)"""
         with self._lock:
             check = self._checks.get(token)
             return bool(check and cached_tokens in check["window"][2])

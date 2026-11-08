@@ -136,7 +136,9 @@ class Metrics:
                                  ("engine_restarts", "Engine restarts seen (sequence restarted)."),
                                  ("overflows", "Times the block index overflowed (removals were missed)."),
                                  ("disconnects", "Times a KV-event stream's connection dropped (engine gone or "
-                                                 "replaced): nothing is claimed across the gap.")):
+                                                 "replaced): nothing is claimed across the gap."),
+                                 ("wrong_rank", "Event batches stamped with another data-parallel rank than the "
+                                                "stream's (crossed endpoints): claims stop.")):
                 name = f"prefixwise_kv_events_{field}_total"
                 out += [f"# HELP {name} {help_}", f"# TYPE {name} counter",
                         f"{name} {int(kv_events.get(field) or 0)}"]

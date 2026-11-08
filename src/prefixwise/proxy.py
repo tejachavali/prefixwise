@@ -610,10 +610,11 @@ class PrefixwiseProxy:
     def _check_sglang(self) -> None:
         """Read SGLang's /server_info once. Event verdicts stay off (session id not sent)
         unless it shows: version >= 0.5.20 (session on events), events published, no
-        --enable-session-radix-cache (a session_id would pin the session's cache), and
-        one data-parallel rank (each rank has its own cache and event stream). It also
-        sizes the block index from the cache capacity, and a sliding-window model
-        turns "not an eviction" off."""
+        --enable-session-radix-cache (a session_id would pin the session's cache), and,
+        with several data-parallel ranks (each with its own cache and event stream),
+        --kv-events auto, no prefill/decode disaggregation and one node. With auto it
+        subscribes to every rank. It also sizes the block index from the cache capacity,
+        and a sliding-window model turns "not an eviction" off."""
         base = (self.upstreams.get("openai") or self.upstream_url).removesuffix("/v1")
         headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
         try:
@@ -639,12 +640,20 @@ class PrefixwiseProxy:
             problems.append("SGLang is not publishing KV events: start it with --kv-events-config "
                             "'{\"publisher\": \"zmq\", \"endpoint\": \"tcp://*:5557\"}'")
         dp = max(int(info.get("dp_size") or 1), int(events.get("dp_size") or 1) if isinstance(events, dict) else 1)
+        self.engine_caches = max(self.engine_caches, dp)  # several caches: never infer an eviction
+        host = str((events or {}).get("endpoint_host") or "*") if isinstance(events, dict) else "*"
         if dp > 1 and not self._kv_auto:
             problems.append(f"SGLang runs {dp} data-parallel ranks, each with its own cache and events: "
                             "use --kv-events auto to follow every rank")
         if self._kv_auto and not (isinstance(events, dict) and events.get("endpoint_port_base")):
-            problems.append("SGLang advertises no tcp KV-event endpoint in /server_info: --kv-events auto "
-                            "needs one (or give the endpoint)")
+            problems.append("SGLang's /server_info describes no tcp KV-event endpoint (an ipc:// endpoint, or "
+                            "an SGLang without the descriptor): start it with --kv-events-config "
+                            "'{\"publisher\": \"zmq\", \"endpoint\": \"tcp://*:5557\"}'"
+                            + ("" if dp > 1 else ", or give the endpoint"))
+        elif self._kv_auto and host not in ("*", "0.0.0.0", "::", "[::]", ""):
+            problems.append(f"SGLang's KV-event endpoint names a host ({host}), so SGLang connects out to it "
+                            "instead of listening: bind it on all interfaces (tcp://*:PORT) for Prefixwise to "
+                            "subscribe")
         if dp > 1 and str(info.get("disaggregation_mode") or "null") != "null":
             problems.append("SGLang runs prefill/decode disaggregation: a request's ranks are chosen per request")
         if dp > 1 and int(info.get("nnodes") or 1) > 1:
@@ -656,7 +665,6 @@ class PrefixwiseProxy:
                 self.engine_events = None
             return
         if self._kv_auto:
-            host = str(events.get("endpoint_host") or "*")
             upstream = urllib.parse.urlsplit(base).hostname or "127.0.0.1"
             port = int(events["endpoint_port_base"])
             ranks = list(range(max(1, int(events.get("dp_size") or 1))))
@@ -890,6 +898,9 @@ class PrefixwiseProxy:
                                gap_seconds=gap_seconds, compaction_event=ctx["compaction_event"],
                                params={k: body.get(k) for k in
                                        ("tool_choice", "thinking", "reasoning", "output_format",
+                                        # SGLang leaves extra_key out of its KV-event hashes, so a change
+                                        # must be seen here (cache_salt is in them)
+                                        "extra_key",
                                         "text_format", "text", "verbosity") if body.get(k) is not None},
                                has_breakpoint=has_cache_breakpoint(body),
                                ttl_seconds=ctx.get("ttl_seconds"),
