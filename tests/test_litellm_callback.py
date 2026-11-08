@@ -315,13 +315,33 @@ def test_abandoned_calls_are_forgotten_and_tracking_is_capped(monkeypatch):
     for i in range(50):  # one-call sessions whose callback never came
         c.log_pre_api_call("gpt-5.6", msgs, {**_kw(f"lost{i}", msgs),
                                              "litellm_params": {"litellm_session_id": f"s{i}"}})
-    clock[0] += 2 * mod.ORDER_WAIT_SECONDS + 1
+    clock[0] += mod.ORDER_FORGET_SECONDS + 1
     c.log_pre_api_call("gpt-5.6", msgs, _kw("fresh", msgs))
     assert list(c._key) == ["fresh"] and len(c._turns) == 1
     monkeypatch.setattr(mod, "ORDER_MAX_CALLS", 10)
     for i in range(30):
         c.log_pre_api_call("gpt-5.6", msgs, {**_kw(f"x{i}", msgs), "litellm_params": {"litellm_session_id": f"y{i}"}})
     assert len(c._key) <= 10
+
+
+def test_a_long_generation_keeps_its_place(monkeypatch):
+    # A turn that generates for a minute is still waited for: it becomes due only when the next
+    # turn of its conversation is sent, and is forgotten only if its callback is late after that.
+    import prefixwise.litellm_callback as mod
+
+    c = PrefixwiseCallback(recorder=Recorder(":memory:"))
+    msgs = [{"role": "user", "content": "hi"}]
+    clock = [1000.0]
+    monkeypatch.setattr(mod.time, "monotonic", lambda: clock[0])
+    c.log_pre_api_call("gpt-5.6", msgs, _kw("long", msgs))
+    clock[0] += 60
+    c.log_pre_api_call("gpt-5.6", msgs, {**_kw("noise", msgs), "litellm_params": {"litellm_session_id": "other"}})
+    c.log_pre_api_call("gpt-5.6", msgs, _kw("next", msgs))
+    with c._order:
+        assert not c._first(_kw("next", msgs))  # still behind the long turn
+    clock[0] += 2 * mod.ORDER_WAIT_SECONDS + 1
+    c.log_pre_api_call("gpt-5.6", msgs, _kw("third", msgs))  # the long turn's callback never came
+    assert "long" not in c._key
 
 
 def test_a_cancelled_async_callback_releases_its_turn():

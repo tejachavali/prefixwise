@@ -47,7 +47,12 @@ except Exception:  # noqa: BLE001 - litellm absent or broken: the callback is st
 # previous turn's callback is due when the next one's arrives: each turn waits at most this long
 # for earlier turns of its own conversation, never for other conversations or streams.
 ORDER_WAIT_SECONDS = 2.0
-ORDER_MAX_CALLS = 10_000  # calls tracked at once; past this the oldest are dropped
+# A call whose callback never comes (an abandoned call, a task LiteLLM dropped) is forgotten
+# 2 x ORDER_WAIT_SECONDS after the next turn of its conversation was sent (its answer had come
+# by then), or ORDER_FORGET_SECONDS after it was sent (longer than any generation), whichever
+# comes first; at most ORDER_MAX_CALLS are tracked.
+ORDER_FORGET_SECONDS = 900.0
+ORDER_MAX_CALLS = 10_000
 _REDACTED = "redacted-by-litellm"  # what LiteLLM logs in place of messages with logging turned off
 
 
@@ -125,7 +130,8 @@ class PrefixwiseCallback(_Base):
         self.recorder = recorder or Recorder(ledger_path, agent_id=agent_id)
         self._warned = False
         self._warned_redacted = False
-        self._turns: dict = {}  # conversation -> OrderedDict(call id -> send time), in send order
+        # conversation -> OrderedDict(call id -> when it became due, or None), in send order
+        self._turns: dict = {}
         self._key: OrderedDict = OrderedDict()  # call id -> (conversation, send time), oldest first
         self._order = threading.Condition()
 
@@ -136,8 +142,14 @@ class PrefixwiseCallback(_Base):
             return
         now = time.monotonic()
         with self._order:
+            turns = self._turns.setdefault(key, OrderedDict())
+            for c, due in list(turns.items()):  # this conversation's earlier turns have been answered
+                if due is None:
+                    turns[c] = now
+                elif due < now - 2 * ORDER_WAIT_SECONDS:
+                    self._drop(c)
             self._sweep(now)
-            self._turns.setdefault(key, OrderedDict())[call] = now
+            self._turns.setdefault(key, OrderedDict())[call] = None
             self._key[call] = (key, now)
 
     def log_success_event(self, kwargs, response_obj, start_time, end_time):
@@ -184,9 +196,9 @@ class PrefixwiseCallback(_Base):
                     self._turns.pop(entry[0], None)
 
     def _sweep(self, now: float) -> None:
-        """Forget calls whose callback never came (an abandoned call, a task LiteLLM dropped), and
-        keep at most ORDER_MAX_CALLS. Caller holds _order."""
-        stale = now - 2 * ORDER_WAIT_SECONDS
+        """Forget calls sent ORDER_FORGET_SECONDS ago, and keep at most ORDER_MAX_CALLS. Caller
+        holds _order."""
+        stale = now - ORDER_FORGET_SECONDS
         dropped = False
         while self._key:
             call, (_, sent) = next(iter(self._key.items()))
