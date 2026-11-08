@@ -292,7 +292,16 @@ def classify(prev: RequestSnapshot | None, curr: RequestSnapshot,
                                   secondary + [changed.cause], native_reason, score=False)
         return changed
 
-    # Blocks equal (or only the user turn changed): check params, prefix, TTL, eviction.
+    # Blocks equal (or only the user turn changed). A full hit wins over every inference below:
+    # if the cache served all of the reusable prefix, a changed param did not reach the rendered
+    # prompt, the markers were not needed (or were not misplaced) and the minimum did not apply.
+    reusable = min(prev.prompt_tokens, curr.prompt_tokens) if prev.prompt_tokens else curr.prompt_tokens
+    if curr.usage_known and curr.prompt_tokens > 0 and reusable > 0 and curr.cached_tokens >= reusable:
+        if prev.params != curr.params:
+            secondary.append(MissCause.PARAM_RENDERED)
+        return Classification(MissCause.NONE, None,
+                              f"the cache served all of the reusable prefix ({curr.cached_tokens} of {reusable} tokens)",
+                              secondary, native_reason)
     if prev.params != curr.params:
         changed = sorted(set(prev.params) ^ set(curr.params) |
                          {k for k in prev.params.keys() & curr.params.keys() if prev.params[k] != curr.params[k]})
@@ -328,7 +337,6 @@ def classify(prev: RequestSnapshot | None, curr: RequestSnapshot,
     # not to this turn's prompt, which includes the newly appended tail.
     # A real hit wins over every timing rule below: if the cache served
     # the prefix, it did not expire and was not evicted.
-    reusable = min(prev.prompt_tokens, curr.prompt_tokens) if prev.prompt_tokens else curr.prompt_tokens
     if curr.prompt_tokens > 0 and curr.cached_tokens >= reusable * 0.5:
         return Classification(MissCause.NONE, None,
                               "append-only turn; cache_read at least half of the prior prefix",

@@ -112,6 +112,28 @@ def ttl_advice(ledger, since: float | None = None, until: float | None = None,
     return sorted(out, key=lambda x: -(x["saved_at_most_usd"] - x["extra_write_cost_usd"]))
 
 
+def unread_writes(ledger, since: float | None = None, until: float | None = None) -> list[dict]:
+    """Per model: cache writes that the next turn of the same conversation left unread (it missed
+    and read nothing). The provider charged the write rate for tokens no one read: the surcharge
+    above sending them uncached is money caching cost rather than saved. Not part of avoidable
+    cost (fixing the miss saves it too); shown so the price of a freshly written, then invalidated,
+    prefix is visible."""
+    clauses, args = ["unread_write_tokens > 0"], []
+    if since is not None:
+        clauses.append("recorded_at >= ?")
+        args.append(since)
+    if until is not None:
+        clauses.append("recorded_at < ?")
+        args.append(until)
+    sql = (f"""SELECT model, COUNT(*), SUM(unread_write_tokens), SUM(unread_write_cost),
+                      SUM(CASE WHEN unread_write_cost IS NOT NULL THEN 1 ELSE 0 END)
+               FROM entries WHERE {" AND ".join(clauses)} GROUP BY model ORDER BY 3 DESC""")
+    with ledger.reader() as conn:
+        rows = conn.execute(sql, args).fetchall()
+    return [{"model": m, "requests": n, "tokens": tok, "surcharge_usd": cost, "priced": priced}
+            for m, n, tok, cost, priced in rows]
+
+
 def findings(ledger, since: float | None = None, until: float | None = None,
              prices: PriceTable | None = None) -> dict:
     """The facts a person needs, for the whole ledger or a time window."""
@@ -149,7 +171,8 @@ def findings(ledger, since: float | None = None, until: float | None = None,
             "rejected_credentials": sum(x["requests_failed"] or 0 for x in statuses if x["status"] in (401, 403)),
             "failures": [{"error": e["error"], "requests": e["requests_failed"]}
                          for e in errors if e["error"] and e["requests_failed"]],
-            "ttl": ttl_advice(ledger, prices=prices, **window)}
+            "ttl": ttl_advice(ledger, prices=prices, **window),
+            "unread_writes": unread_writes(ledger, **window)}
 
 
 def _usd(x) -> str:
@@ -218,6 +241,17 @@ def render(f: dict, command: str = "serve") -> str:
         for e in f["expected"]:
             for d in e.get("details") or []:
                 lines.append(f"  {d['requests']} x {e['what'].split(':')[0]}: {d['what']}.")
+    unread = f.get("unread_writes") or []
+    if unread:
+        tok = sum(u["tokens"] for u in unread)
+        n = sum(u["requests"] for u in unread)
+        priced = [u for u in unread if u["priced"] == u["requests"] and u["surcharge_usd"] is not None]
+        line = (f"Cache writes never read: {_n(tok)} tokens were written to the cache and then invalidated by the "
+                f"next turn before any turn read them ({_req(n)})")
+        if priced:
+            line += (f"; the write surcharge on them cost {_usd(sum(u['surcharge_usd'] for u in priced))} above "
+                     "sending them uncached" + ("" if len(priced) == len(unread) else ", priced models only"))
+        lines.append(line + ". Fixing the misses above saves this too; it is not counted twice.")
     for t in f.get("ttl") or []:
         n = t["misses"]
         head = (f"{n} {t['model']} request{'s' if n != 1 else ''} missed because the 5-minute cache had expired, "

@@ -66,25 +66,51 @@ loses everything after them; Qwen3's template puts tools after the system prompt
 
 ## Quickstart
 
+Four ways in, each about thirty seconds; all write the same ledger and the same report.
+
+| You have | Do this | Prompts leave your machine? |
+|---|---|---|
+| An agent you run from a terminal (Claude Code, Codex, opencode, your own) | `prefixwise run -- <your command>` | unchanged: the agent still calls its provider |
+| A service, several agents, or a gateway | `prefixwise serve --upstream https://api.anthropic.com` and point clients at it | unchanged |
+| Your own Python code | `client = prefixwise.wrap(Anthropic())` (or OpenAI) | unchanged: calls go straight to the provider |
+| LiteLLM (SDK or proxy server) | `litellm.callbacks = [PrefixwiseCallback()]` | unchanged |
+| Claude Code or Codex on a subscription (no API key) | `prefixwise import claude-code` / `prefixwise import codex` | nothing is sent anywhere: reads the local logs |
+
+In every case Prefixwise stores hashes and counts, never the prompt.
+
 ```bash
 pip install prefixwise
 prefixwise run -- claude                     # or any agent: your command after the --
 ```
 
-`prefixwise run` starts the proxy, points the agent at it (`ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`; the agent keeps its own API key), and when the agent exits prints what that run's cache did, in plain English:
+`prefixwise run` starts the proxy, points the agent at it (`ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`; the agent keeps its own API key), and when the agent exits prints what that run's cache did, in plain English. This is the real output of `prefixwise report` on a ledger from the mock provider (20 requests from four scripted sessions: a date in the system prompt, tools shuffled each turn, a well-behaved one, a Haiku side call before the main thread; every mock response reports 2,000 prompt tokens with half cached, so the token numbers are flat, the verdicts and fixes are the real ones):
 
 ```
-42 requests, 1,812,400 prompt tokens, 91% served from cache. Cost $3.08.
-Avoidable: 96,500 tokens ($0.26), 5.3% of prompt tokens. Fix these, biggest first:
-  1. The system prompt changed only in a date, time or id (14 requests, 88,200 tokens, $0.24).
+20 requests, 40,000 prompt tokens, 40% served from cache. Cost $0.0460.
+Avoidable: 9,000 tokens ($0.0171), 22.5% of prompt tokens. Fix these, biggest first:
+  1. The system prompt changed only in a date, time or id (5 requests, 5,000 tokens, $0.0095).
      Fix: Move dates, times and ids out of the system prompt, to the end of the prompt or the latest user message.
-  2. The same tools were sent in a different order or format (3 requests, 8,300 tokens, $0.02).
-     Fix: Send tools in a fixed order with deterministic serialization (...)
+  2. The same tools were sent in a different order or format (4 requests, 4,000 tokens, $0.0076).
+     Fix: Send tools in a fixed order with deterministic serialization (or let the proxy do it: prefixwise serve --fix canonical_tools).
      Prefixwise can do it for you: prefixwise serve --fix canonical_tools (proven)
-Expected misses (not waste): 2 x first request of a session: nothing to reuse yet; 1 x switched model: each model has its own cache.
+Expected misses (not waste): 4 x first request of a session: nothing to reuse yet; 1 x switched model: each model has its own cache.
+
+Details: prefixwise report --detail   Fixes: prefixwise fixes   Data: prefixwise export
 ```
 
-(Illustrative output. `prefixwise run --mock -- <agent>` tries it with synthetic responses and no API calls.)
+`prefixwise report --detail` adds the table behind it:
+
+```
+cause             requests  prompt  cached  avoidable  waste reqs  tokens/success     cost  avoidable $
+----------------  --------  ------  ------  ---------  ----------  --------------  -------  -----------
+volatile_system          5  10,000   50.0%      5,000           5               -  $0.0106      $0.0095
+tool_reserialize         4   8,000   50.0%      4,000           4               -  $0.0084      $0.0076
+none                     6  12,000   50.0%          0           0               -  $0.0127      $0.0000
+first_write              4   8,000    0.0%          0           0               -  $0.0122      $0.0000
+model_switch             1   2,000   50.0%          0           0               -  $0.0021      $0.0000
+```
+
+On real traffic the same report also says, per Anthropic model, whether the 1-hour cache would have paid, and what the cache writes that were never read cost. (`prefixwise run --mock -- <agent>` tries it with synthetic responses and no API calls.)
 
 **On a Claude Pro or Max plan?** A proxy cannot sit in front of a subscription login, but Claude Code keeps a log of every session. Read those instead, no setup and nothing sent anywhere:
 
@@ -164,11 +190,18 @@ Sessions come from LiteLLM's `litellm_session_id`, else `metadata={"session_id":
 
 **More: [docs/USE_CASES.md](docs/USE_CASES.md)** walks through eight concrete scenarios: a bill that jumped, a CI gate on prompt changes, A/B-testing prompt versions per successful task, Anthropic TTL choice, self-hosted vLLM, and more.
 
+## How it works
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/tejachavali/prefixwise/main/docs/figures/architecture-dark.svg">
+  <img alt="How a request flows through Prefixwise: four ways in (the proxy, prefixwise.wrap, LiteLLM, agent logs); read, forward, fingerprint and name one cause; one SQLite ledger; five ways out (report, API, Prometheus, OpenTelemetry, export)" src="https://raw.githubusercontent.com/tejachavali/prefixwise/main/docs/figures/architecture-light.svg">
+</picture>
+
+A request comes in one of four ways (the proxy, `prefixwise.wrap`, the LiteLLM callback, or an agent's own logs). It is forwarded unchanged (the proxy) or not touched at all (the others). Its blocks are fingerprinted, compared with the previous turn of its own conversation, and joined with the provider's usage, and for self-hosted engines with their KV-cache events. One cause is named, with its evidence, and written as one row to a local SQLite ledger. Five ways out read that ledger: `prefixwise report`, the HTTP API, Prometheus, OpenTelemetry and `prefixwise export`. The whole flow, part by part: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
 ## What it tells you
 
 One cause per request: the first thing, in prefix order, that broke reuse. Each request is compared with the previous turn of **its own conversation, on the same model**, in its session: an agent's small-model side calls (titles, summaries) never mask its main thread, and parallel subagents in one session are each compared with their own earlier turns, not with each other. Waste is avoidable; legitimate changes cost tokens but are not waste.
-
-No prompt text is kept to tell these apart. Each block (tools, system prompt, each message) gets three hashes: of the bytes as sent, of a canonical form (sorted keys, fixed spacing) and of that form with dates, times, ids and numbers masked. Same canonical hash with different bytes is `tool_reserialize`; same masked hash with a different raw one is `volatile_system`; a different masked hash is a real edit.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/tejachavali/prefixwise/main/docs/figures/decision-dark.svg">
@@ -198,6 +231,29 @@ No prompt text is kept to tell these apart. Each block (tools, system prompt, ea
 | `unknown` | Not enough evidence; never guessed | - | Send TTL / session headers, or check engine events |
 
 Avoidable tokens for a waste turn = the part of the previous turn's prompt that could have been read from cache but was not: a partial hit counts only the part not read, and appended content is never counted. A change the cache absorbed anyway (it still served the whole reusable prefix) is `none`; one in a request too short to cache, or after the entry had expired, is `below_min_prefix` or `ttl_expired`. The change is kept as a secondary cause either way.
+
+### How it knows, without keeping a prompt
+
+Each block of the request (every tool, the system prompt, every message) gets three hashes, computed in the proxy and kept in memory for the session's next turn ([`fingerprint.py`](src/prefixwise/fingerprint.py)):
+
+| hash | over | equal between two turns means |
+|---|---|---|
+| `raw` | the bytes as sent | the block is byte-identical: the provider saw the same thing |
+| `canonical` | the same content with sorted keys, fixed separators, NFC unicode | the same content, possibly serialized differently |
+| `masked` | the canonical form with dates, times, UUIDs, hex ids and numbers replaced by placeholders | the same words; only volatile values differ |
+
+The verdict is the first block, in the provider's prefix order (tools, then system, then messages), whose hashes disagree, and which of them disagree says why:
+
+| what differs | verdict | why it is proof |
+|---|---|---|
+| tools: `raw` differs, the multiset of `canonical` hashes is equal | `tool_reserialize` | the same tools reached the provider in different bytes or order; nothing else could have produced that pattern |
+| tools: the multiset of `canonical` hashes differs | `tool_catalog_change` | a tool was added, removed or edited |
+| system: `raw` differs, `masked` equal | `volatile_system` | every character that changed was inside a date, time, id or number |
+| system: `masked` differs | `system_edit` | the wording changed |
+| messages: the previous turn's blocks are not a prefix of this turn's | `history_edit` (or `compaction_rewrite` with a compaction event) | earlier messages were rewritten, not appended to |
+
+Short blocks (under about 256 bytes, such as a four-word user message) would be guessable from a bare hash, so with a per-install key (`PREFIXWISE_HMAC_KEY`) they are keyed hashes (HMAC) instead. The ledger stores the verdict, the role and index of the first changed block, counts and prices; no hash leaves the process, and exports never include them.
+
 
 **The why behind the cause.** Where the evidence allows, a miss also gets a detail, for the ways agents break the cache in practice (from Claude Code, Codex, opencode and LiteLLM issue reports in 2026). Each is claimed only from facts in hand: the request bodies, the provider's usage, what this proxy saw in flight.
 
@@ -291,6 +347,8 @@ prefixwise serve --upstream http://127.0.0.1:8000 --engine vllm --kv-events tcp:
 
 The verdict becomes `evicted` **confirmed** ("the engine removed N of this session's blocks"), or `unknown` with "not an eviction: the engine still holds this session's blocks" when the cause lies elsewhere. `GET /engine` shows the event stream's health.
 
+How the join works ([`engines.py`](src/prefixwise/engines.py)): the events name each stored and removed KV block by the engine's own block hash, tagged with the request's session. When a session's request is forwarded, Prefixwise freezes the block chain its previous request used; at the response it finds the block where the cache read stopped (`cached_tokens / block_size` into that chain) and asks the events what happened to it. Removed before the response: a confirmed eviction. Still resident: not an eviction. Events arrive on their own socket, so before any negative claim Prefixwise waits (up to 50 ms) until the event stream has caught up with the response time, follows the publisher's sequence numbers (a gap means a removal may have been missed, so nothing is claimed; a restart means an empty cache), and judges nothing for concurrent requests of one session. With several caches, the events also say which cache served each request, which is how a routing miss is confirmed: served by B while A, which served the previous turn, still held the very block this turn needed.
+
 **Several caches (vLLM data-parallel ranks, or replicas behind a router): routing misses, confirmed.** Each rank and each replica has its own cache, so a session whose turns land on different ones misses although nothing changed. `--kv-events auto` subscribes to every data-parallel rank (from vLLM's `/kv_event_sources`); behind a router, list each replica's stream: `--kv-events tcp://replica-a:5557,tcp://replica-b:5557`. The events themselves show which cache served each request, so the router only has to pass the request body through: llm-d, production-stack, AIBrix and the current SGLang model gateway do; Dynamo and the older SGLang gateway copy do not ([details](docs/ENGINES.md#several-kv-caches-vllm-data-parallel-ranks-replicas-behind-a-router)). A turn served by another cache while the previous one still held the very block it needed is a **confirmed** `routing_miss`; with several caches known, an eviction is never just inferred. How, and when nothing is claimed: [docs/ENGINES.md](docs/ENGINES.md#several-kv-caches-vllm-data-parallel-ranks-replicas-behind-a-router). Live on two vLLM 0.33.0 replicas behind a router that never says which one it used (Colab L4): routing misses confirmed 5/5, and 5/5 hits with sticky routing, no false claim ([record](experiments/e_route/runs/2026-11-08-colab-l4.md)).
 
 **SGLang (0.5.20 or later): the same.** SGLang also writes a request's `session_id` on the blocks it stores, so Prefixwise rebuilds each session's chain from SGLang's events:
@@ -378,11 +436,6 @@ python experiments/e1_open/e1_open.py --mock           # harness smoke test
 ```
 
 ## Design notes
-
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/tejachavali/prefixwise/main/docs/figures/architecture-dark.svg">
-  <img alt="How a request flows through Prefixwise: four ways in (the proxy, prefixwise.wrap, LiteLLM, agent logs); read, forward, fingerprint and name one cause; one SQLite ledger; five ways out (report, API, Prometheus, OpenTelemetry, export)" src="https://raw.githubusercontent.com/tejachavali/prefixwise/main/docs/figures/architecture-light.svg">
-</picture>
 
 How it is built today (parts, request flow, how a cause is decided, data, rules): [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 The original research and architecture, kept as written: [docs/DESIGN.md](docs/DESIGN.md).

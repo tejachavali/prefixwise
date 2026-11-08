@@ -69,7 +69,7 @@ from .fixes import apply_fixes, parse_fixes
 from . import api
 from .pricing import PriceTable, breakdown
 from .prom import Metrics
-from .ledger import Ledger, LedgerEntry, avoidable_for_turn
+from .ledger import Ledger, LedgerEntry, avoidable_for_turn, unread_write
 
 
 def extract_blocks(body: dict, provider: str) -> list[tuple[str, object]]:
@@ -1118,6 +1118,12 @@ class PrefixwiseProxy:
         priced_model = str(payload.get("model") or ctx["model"])
         entry.avoidable_cost = self.prices.avoidable_cost(priced_model, entry.avoidable_tokens, prompt_tokens,
                                                      provider, usage)
+        if prev_facts is not None and prev is not None and prompt_tokens > 0:
+            w5, w1, cw = unread_write(result.cause.value, cached, prev_facts.write_5m, prev_facts.write_1h,
+                                      prev_facts.cache_write)
+            if w5 or w1 or cw:
+                entry.unread_write_tokens = w5 + w1 + cw
+                entry.unread_write_cost = self.prices.write_surcharge(priced_model, prev.prompt_tokens, w5, w1, cw)
         if entry.cost is not None:
             entry.price_as_of = self.prices.as_of
         entry.overhead_ms = self._overhead_ms(ctx)

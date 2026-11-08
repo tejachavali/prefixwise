@@ -28,7 +28,7 @@ import json
 import sqlite3
 from dataclasses import astuple, dataclass, fields
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 
 @dataclass
@@ -73,7 +73,27 @@ class LedgerEntry:
     # Schema 5: this request's own cache lifetime: what its write was granted or what it asked for
     # (Anthropic 300 or 3600; an X-Prefixwise-Cache-Ttl header; None when unknown, as on OpenAI).
     cache_ttl_seconds: float | None = None
+    # Schema 6: a miss that read nothing, right after the previous turn wrote the prefix to the
+    # cache: those tokens were written (at the write rate) and never read. The surcharge paid
+    # for writing them above sending them uncached; None when unpriced or not applicable.
+    unread_write_tokens: int | None = None
+    unread_write_cost: float | None = None
     schema_version: int = SCHEMA_VERSION
+
+
+# Causes after which the previous turn's cache write is still of use: nothing was invalidated.
+_WRITE_KEPT = frozenset({"none", "first_write", "fork_boundary", "model_switch"})
+
+
+def unread_write(cause: str, cached_tokens: int, prev_write_5m: int, prev_write_1h: int,
+                 prev_cache_write: int) -> tuple[int, int, int]:
+    """(5-minute, 1-hour, single-rate) tokens the previous turn wrote that this turn, a miss
+    reading nothing, left unread; all zero when not applicable."""
+    if cause in _WRITE_KEPT or cached_tokens > 0:
+        return 0, 0, 0
+    if prev_write_5m or prev_write_1h:
+        return prev_write_5m, prev_write_1h, 0
+    return 0, 0, prev_cache_write
 
 
 def avoidable_tokens(prompt_tokens: int, cached_tokens: int, *,
@@ -122,7 +142,8 @@ _MIGRATIONS = {"task_id": "TEXT", "request_id": "TEXT", "completion_tokens": "IN
                "evidence": "TEXT", "secondary_causes": "TEXT", "divergence_role": "TEXT",
                "divergence_index": "INTEGER", "schema_version": "INTEGER",
                "detail": "TEXT",  # schema 4
-               "cache_ttl_seconds": "REAL"}  # schema 5
+               "cache_ttl_seconds": "REAL",  # schema 5
+               "unread_write_tokens": "INTEGER", "unread_write_cost": "REAL"}  # schema 6
 
 _COLUMNS = [f.name for f in fields(LedgerEntry)]
 
