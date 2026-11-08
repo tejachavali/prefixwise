@@ -17,7 +17,13 @@ It stores hashes and counts, never prompt text.
 
 ## The shape of it
 
-Five ways in, one classifier, one ledger, several ways out.
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="figures/architecture-dark.svg">
+  <img alt="How a request flows through Prefixwise: four ways in (the proxy, prefixwise.wrap, LiteLLM, agent logs); read, forward, fingerprint and name one cause; one SQLite ledger; five ways out (report, API, Prometheus, OpenTelemetry, export)" src="figures/architecture-light.svg">
+</picture>
+
+The chart shows the four live ways in; a fifth, `prefixwise explain`, runs the same classifier offline on
+saved requests. The same, with every module named, as a Mermaid diagram:
 
 ```mermaid
 flowchart LR
@@ -149,6 +155,11 @@ sequenceDiagram
 | `cli.py` | `serve`, `run`, `report`, `import`, `explain`, `export`, `task`, `fixes`, `prices`, `prune`, `request` |
 
 ## How a cause is decided
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="figures/decision-dark.svg">
+  <img alt="How Prefixwise names a cache miss: a flowchart of the classifier's checks in order, from first turn and changed prompt parts to a hit, engine evidence, retry, expiry, routing, and unknown" src="figures/decision-light.svg">
+</picture>
 
 The classifier (`classify(prev, curr)`) compares a request with the previous request **to the
 same model in the same session** (a lane), so a side call to a small model never masks a cause
