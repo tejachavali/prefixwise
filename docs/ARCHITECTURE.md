@@ -1,6 +1,6 @@
 # Prefixwise architecture
 
-How Prefixwise is built today (0.6, November 2026): the parts, how a request flows through
+How Prefixwise is built today (0.8, unreleased, November 2026): the parts, how a request flows through
 them, where data lives, and the rules every part keeps. For why it was designed this way, the
 original research is in [DESIGN.md](DESIGN.md) (kept as written); the detailed designs are
 [DATA.md](DATA.md) (data and metrics), [API.md](API.md), [ENGINES.md](ENGINES.md) (vLLM and
@@ -11,15 +11,17 @@ SGLang), [opentelemetry.md](opentelemetry.md) and [prometheus.md](prometheus.md)
 Every LLM request an agent sends either reuses the provider's prompt cache or pays to recompute
 its prefix. Prefixwise looks at each request and its response, names the **one** reason the
 cache missed (19 causes, plus a sub-reason where the evidence allows), says whether that miss
-was waste or expected, prices it, and records it in a local SQLite ledger. Everything people
-see (`prefixwise report`, the HTTP API, Prometheus, OpenTelemetry) is computed from that ledger.
-It stores hashes and counts, never prompt text.
+was waste or expected, prices it, and records it in a local SQLite ledger. `prefixwise report`,
+the HTTP API and `prefixwise export` read that ledger; Prometheus counters and OpenTelemetry
+spans are emitted live, as each request is recorded. It stores hashes and counts, never prompt
+text. It is an edge (where the request is) and a collector (where the ledger is), one process
+or many.
 
 ## The shape of it
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="figures/architecture-dark.svg">
-  <img alt="How a request flows through Prefixwise: four ways in (the proxy, prefixwise.wrap, LiteLLM, agent logs); an edge reads, forwards and fingerprints the request where it is; a turn record of hashes and counts crosses to a collector, in one process or over HTTP or a Redis Stream partitioned by session, which names one cause and writes one SQLite ledger row; six ways out (Prometheus, OpenTelemetry, report, API, export, sinks)" src="figures/architecture-light.svg">
+  <img alt="How a request flows through Prefixwise: four ways in (the proxy, prefixwise.wrap, LiteLLM, agent logs); an edge reads, forwards and fingerprints the request where it is and joins the engine's KV-cache events; a turn record of hashes and counts crosses to a collector, in one process or over HTTP or a Redis Stream partitioned by session, which names one cause and writes one SQLite ledger row; six ways out (Prometheus from the collector, OpenTelemetry from the edge, report, API, export, sinks)" src="figures/architecture-light.svg">
 </picture>
 
 The chart shows the four live ways in; a fifth, `prefixwise explain`, runs the same classifier offline on
@@ -39,7 +41,8 @@ flowchart LR
     PR["prepare / finalize"]
     F["fingerprint.py<br/>block hashes"]
     E["engines.py<br/>vLLM / SGLang KV events"]
-    REC["records.py<br/>TurnRecord: hashes, counts, usage"]
+    N["diagnostics.py<br/>ask the provider for its reason"]
+    REC["records.py<br/>TurnRecord: hashes, counts, usage, verdicts"]
   end
   subgraph wire[One process, or a wire]
     T["transport.py<br/>HTTP to prefixwise collect"]
@@ -48,7 +51,7 @@ flowchart LR
   subgraph coll[Collector: collector.py]
     C["classifier.py<br/>one cause"]
     D["details.py<br/>sub-reason"]
-    N["diagnostics.py<br/>provider's own reason"]
+    SC["diagnostics.py<br/>agreement with the provider"]
     PZ["pricing.py<br/>dated prices"]
   end
   LED[("ledger.py<br/>SQLite")]
@@ -68,10 +71,11 @@ flowchart LR
   X --> C
   PR --> F --> REC
   E --> REC
+  N --> REC
   REC -->|in process| C
   REC -.-> T -.-> C
   REC -.-> LOG -.-> C
-  N --> C
+  C --> SC
   C --> D --> PZ --> LED
   LED --> SK
   C -. each row .-> PM
@@ -86,15 +90,21 @@ flowchart LR
   vLLM / SGLang server) and sees the exact bytes sent and received. **`prefixwise.wrap` and the
   LiteLLM callback** do not forward anything: the call already happened. They hand the request and
   response to `sdk.Recorder`, which runs the proxy's own `prepare` / `finalize` in mock mode with no
-  fixes, so they build the same record. An edge keeps only what a request needs on its way out
-  (requests in flight by prefix, streams not yet recorded, fields an upstream rejected).
+  fixes, so they build the same record. An edge asks the provider for its own miss reason
+  (`diagnostics.py`, chained to the conversation's previous response id) and, for a self-hosted
+  engine, joins the request with its KV-cache events (`engines.py`); both verdicts ride in the
+  record. It keeps what a request needs on its way out (requests in flight by prefix, streams not
+  yet recorded, fields an upstream rejected) and, with a remote collector, each conversation's
+  last response id for that chain. OpenTelemetry spans are exported here, where the request's
+  trace is; with a remote collector they carry no verdict.
 - **The turn record** (`records.py`) is the boundary: block hashes, positions, counts, digests of the
   prompt-affecting parameters, the provider's usage, the engine join's verdict. Never text. It is
   versioned, and a collector refuses a version it does not read.
 - **The collector** (`collector.py`) owns the conversation state (lanes per session and model,
   Responses snapshots, per-session facts), compares each record with its conversation's previous
-  turn, names the cause, prices it and writes the ledger; one lock serializes `ingest`, which is the
-  ordering a conversation needs. In one process the edge calls it directly. In a fleet, records
+  turn, names the cause, scores it against the provider's reason, prices it and writes the ledger;
+  one lock serializes `ingest`, which is the ordering a conversation needs. Prometheus counters are
+  fed by its rows. In one process the edge calls it directly. In a fleet, records
   cross **HTTP** (`transport.py`, `prefixwise collect`: one collector, one ledger) or a **Redis
   Stream partitioned by session** (`log.py`, `prefixwise collect --log --partitions`: several
   collectors, each owning its partitions, replaying its state after a restart, acknowledging a
