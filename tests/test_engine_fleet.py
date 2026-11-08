@@ -188,11 +188,11 @@ def test_auto_without_the_endpoint_says_so_and_stays_inferred():
     assert p.engine_events is None and any("/kv_event_sources" in n for n in p.engine_notes)
 
 
-def test_several_endpoints_are_vllm_only_for_now():
-    with pytest.raises(ValueError):
+def test_several_sglang_endpoints_are_refused_but_auto_is_not():
+    with pytest.raises(ValueError, match="--kv-events auto"):
         PrefixwiseProxy(upstream_url="http://unused", engine="sglang", kv_events="tcp://a:1,tcp://b:2")
-    with pytest.raises(ValueError):
-        PrefixwiseProxy(upstream_url="http://unused", engine="sglang", kv_events="auto")
+    p = PrefixwiseProxy(upstream_url="http://127.0.0.1:9", engine="sglang", kv_events="auto")
+    assert p.engine_events is None and any("server_info" in n for n in p.engine_notes)
 
 
 # -- review findings: each must make no claim (or the right one) --------------------------------

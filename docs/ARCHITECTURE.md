@@ -135,7 +135,7 @@ sequenceDiagram
 | `classifier.py` | `RequestSnapshot` → one `MissCause`, `legit` (waste or expected), evidence text, secondary causes |
 | `details.py` | sub-reasons (`ttl_shortened`, `lookback_exceeded`, `markers_ignored`, `sent_before_cache_written`, `shared_prefix_not_reused`, `thinking_stripped`, `cache_key_changed`), each with strict preconditions |
 | `diagnostics.py` | maps Anthropic's 6 and OpenAI's 9 native miss reasons onto the taxonomy; scores agreement (provider "no verdict" answers are not scored) |
-| `engines.py` | the engine join: `EngineEvents` (one vLLM cache), `SGLangEvents` (SGLang), `EngineFleet` (several vLLM caches) |
+| `engines.py` | the engine join: `EngineEvents` (one vLLM cache), `SGLangEvents` (SGLang), `EngineFleet` (several caches: vLLM ranks or replicas, SGLang ranks) |
 | `fixes.py` | opt-in, meaning-preserving rewrites (`canonical_tools`) and the fix advice per cause |
 | `pricing.py` + `prices.json` | dated price table (provider pages, with source and date); unknown rate means no dollar figure, never an invented one |
 | `ledger.py` | SQLite (schema 4): `entries` (one row per request) and `tasks` (outcomes); migrates in place |
@@ -200,7 +200,8 @@ design and limits: [ENGINES.md](ENGINES.md).
   means the token prefix changed although the request did not. "Not an eviction" is claimed
   only when nothing can make it wrong (stream caught up, no lost messages, full attention only,
   one request of the session in flight).
-- **Several caches** (`EngineFleet`, vLLM data-parallel ranks or replicas behind a router): the
+- **Several caches** (`EngineFleet`: vLLM data-parallel ranks or replicas behind a router, SGLang
+  data-parallel ranks): the
   cache that served a request is the one whose stream reported the session's blocks after the
   send, so the router need not say. A turn served by another cache, while the previous one
   still holds the very block this turn needed, is a **confirmed routing miss**. A replica that

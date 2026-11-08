@@ -70,7 +70,9 @@ class EngineEvents:
         self._tokens = itertools.count(1)
         self.hybrid = False  # the model has non-full-attention groups: no negative claims
         self.stats = {"batches": 0, "stored": 0, "removed": 0, "cleared": 0, "engine_restarts": 0,
-                      "dropped_messages": 0, "decode_errors": 0, "overflows": 0, "disconnects": 0}
+                      "dropped_messages": 0, "decode_errors": 0, "overflows": 0, "disconnects": 0,
+                      "wrong_rank": 0}
+        self.rank: int | None = None  # the data-parallel rank this stream must carry (batch[2]), if known
         self._connected = False  # the subscriber's TCP connection to the publisher is up
         self._last_seq: int | None = None
         self._latest_ts = 0.0  # engine timestamp of the last batch read
@@ -81,7 +83,7 @@ class EngineEvents:
 
     def _errors(self) -> int:
         s = self.stats
-        return s["dropped_messages"] + s["decode_errors"] + s["overflows"] + s["disconnects"]
+        return s["dropped_messages"] + s["decode_errors"] + s["overflows"] + s["disconnects"] + s["wrong_rank"]
 
     def _forget(self) -> None:
         """The stream was cut (the engine died, was replaced, or the network dropped): removals
@@ -95,6 +97,10 @@ class EngineEvents:
     def handle(self, batch, seq: int | None = None) -> None:
         """One decoded payload: [ts, events, dp_rank?]."""
         with self._lock:
+            if (self.rank is not None and len(batch) > 2 and batch[2] is not None
+                    and batch[2] != self.rank):  # another rank's stream: a misconfiguration
+                self.stats["wrong_rank"] += 1
+                return
             if seq is not None and self._last_seq is not None:
                 if seq > self._last_seq + 1:  # lost messages: a removal may be among them
                     self.stats["dropped_messages"] += seq - self._last_seq - 1
@@ -243,6 +249,11 @@ class EngineEvents:
             check = self._checks.get(token)
             return bool(check and check["window"].seen)
 
+    def _stored_at(self, token: int, cached_tokens: int) -> bool:
+        """This engine served the request this token was sent for (vLLM reports every block
+        a request uses, so any report of the session since the send says so)."""
+        return self._served_now(token)
+
     def _reported(self, token: int, cached_tokens: int) -> tuple:
         """(key, block size) this engine reported for the request at the block where its cache
         read stopped: the first block it did not have, which it then computed."""
@@ -366,13 +377,15 @@ class EngineEvents:
 
 
 class EngineFleet:
-    """Several vLLM KV caches behind one upstream: data-parallel ranks, or replicas behind a
-    router. One EngineEvents per cache, the same interface as one.
+    """Several KV caches behind one upstream: vLLM data-parallel ranks or replicas behind a
+    router, or SGLang data-parallel ranks. One events reader per cache (`make`), the same
+    interface as one.
 
     No router has to say which cache served a request: vLLM reports every block a request uses
-    with its session (kv_cache_report_mode "full"), so the cache whose stream reported this
-    session's blocks after the send served it, and the one that reported them for the previous
-    request served that. At the response:
+    with its session (kv_cache_report_mode "full"); SGLang reports the blocks a request newly
+    stores, with its session, starting exactly where its cache read stopped (`_stored_at`). So
+    the cache whose stream reported this request's blocks served it, and the one that reported
+    them for the previous request served that. At the response:
 
     - the same cache served both: that cache's own verdict (evicted, or still resident);
     - another cache served this one, and the previous one still holds the block where this
@@ -382,11 +395,12 @@ class EngineFleet:
       requests of the session): nothing, and the classifier makes no engine claim.
     """
 
-    def __init__(self, sources: list[tuple[str, str]], max_sessions: int = 1000, **kw):
+    def __init__(self, sources: list[tuple[str, str]], max_sessions: int = 1000, make=None, **kw):
         if len(sources) < 2:
             raise ValueError("EngineFleet needs at least two KV-event sources")
         self.labels = [label for label, _ in sources]
-        self.sources = [EngineEvents(endpoint, max_sessions=max_sessions, **kw) for _, endpoint in sources]
+        make = make or (lambda endpoint: EngineEvents(endpoint, max_sessions=max_sessions, **kw))
+        self.sources = [make(endpoint) for _, endpoint in sources]
         self.max_sessions = max_sessions
         self._lock = threading.Lock()
         self._checks: OrderedDict = OrderedDict()  # token -> (session, per-source tokens)
@@ -440,12 +454,20 @@ class EngineFleet:
         hit = cached_tokens is None or bool(prompt_tokens and cached_tokens >= prompt_tokens * 0.5)
         # Every stream caught up with now (one deadline for all), so this request's own reports
         # have arrived. A hit, or no cached_tokens, is never examined: no wait.
+        stop = max(0, cached_tokens or 0)
+        # Which cache served the previous turn is fixed at the send (chains are frozen then).
+        before = [i for i, (s, t) in enumerate(zip(self.sources, tokens)) if s._served_previous(t)]
+        if not hit and len(before) == 1 and all(s._thread is not None for s in self.sources):
+            # SGLang publishes a request's store after its first output: wait for one, but only
+            # when a claim is possible at all (one cache served the previous turn).
+            wait = time.time() + max(getattr(s, "barrier_seconds", 0.0) for s in self.sources)
+            while time.time() < wait and not any(s._stored_at(t, stop) for s, t in zip(self.sources, tokens)):
+                time.sleep(0.002)
         asked = time.time()
         end = asked + max(s.settle_seconds for s in self.sources)
-        if not hit and all(s._settle(asked, end) for s in self.sources):
-            now = [i for i, (s, t) in enumerate(zip(self.sources, tokens)) if s._served_now(t)]
-            before = [i for i, (s, t) in enumerate(zip(self.sources, tokens)) if s._served_previous(t)]
-            if len(now) == 1 and len(before) <= 1:
+        if not hit and len(before) <= 1 and all(s._settle(asked, end) for s in self.sources):
+            now = [i for i, (s, t) in enumerate(zip(self.sources, tokens)) if s._stored_at(t, stop)]
+            if len(now) == 1:
                 c = now[0]
                 if not before or before[0] == c:
                     verdict = self.sources[c].request_done(tokens[c], cached_tokens, prompt_tokens)
@@ -463,7 +485,7 @@ class EngineFleet:
         snaps = [s.snapshot() for s in self.sources]
         total = {k: sum(int(x.get(k) or 0) for x in snaps)
                  for k in ("batches", "stored", "removed", "cleared", "engine_restarts", "dropped_messages",
-                           "decode_errors", "overflows", "disconnects", "gpu_blocks_tracked",
+                           "decode_errors", "overflows", "disconnects", "wrong_rank", "gpu_blocks_tracked",
                            "requests_in_flight")}
         return {"endpoint": ", ".join(str(x["endpoint"]) for x in snaps),
                 "connected": all(x["connected"] for x in snaps), **total, "hybrid_model": self.hybrid,
@@ -584,10 +606,10 @@ class SGLangEvents(EngineEvents):
         if session:
             tail = self._tails.get(session)
             if tail is None:  # no window opened by request_sent (dropped, or another client): mixed
-                tail = self._tails[session] = [None, True, set()]
+                tail = self._tails[session] = [None, True, {}]
             self._tails.move_to_end(session)
             if seg.start is not None:
-                tail[2].add(seg.start)
+                tail[2].setdefault(seg.start, (packed[0], block))  # where a store began: its first block
             self._hold(tail[0], -1)
             tail[0] = (seg, len(packed) - 1)  # stores come in chain order: the latest is the deepest
             self._hold(tail[0], 1)
@@ -647,7 +669,7 @@ class SGLangEvents(EngineEvents):
                 if check["session"] == session_id:
                     check["concurrent"] = concurrent = True
             prev = self._tails.pop(session_id, None)  # its held tokens move to the check
-            window = self._tails[session_id] = [None, concurrent, set()]
+            window = self._tails[session_id] = [None, concurrent, {}]
             token = next(self._tokens)
             self._checks[token] = {"session": session_id, "tail": prev[0] if prev else None,
                                    "window": window, "sent": next(self._born) if prev else 0,
@@ -733,6 +755,51 @@ class SGLangEvents(EngineEvents):
                     or self._errors() != check["errors"]):
                 return NOTHING
             return 0, total
+
+    # -- several ranks (EngineFleet) -------------------------------------------------
+
+    def _served_previous(self, token: int) -> bool:
+        with self._lock:
+            check = self._checks.get(token)
+            return bool(check and check["tail"] is not None)
+
+    def _stored_at(self, token: int, cached_tokens: int) -> bool:
+        """This rank stored the session's blocks from exactly where the request's cache read
+        stopped: it computed the rest, so it served the request. (SGLang reports only new
+        blocks. The previous request's late finish store starts where that request's prompt
+        ended; if that happens to be this stop too, two ranks match and nothing is claimed.)"""
+        with self._lock:
+            check = self._checks.get(token)
+            return bool(check and cached_tokens in check["window"][2])
+
+    def _reported(self, token: int, cached_tokens: int) -> tuple:
+        with self._lock:
+            check = self._checks.get(token)
+            return check["window"][2].get(cached_tokens, (None, None)) if check else (None, None)
+
+    def held_here(self, token: int, cached_tokens: int | None, prompt_tokens: int | None = None,
+                  needed: tuple = (None, None)) -> int | None:
+        """The session's previous request was served by this rank, this one by another, which
+        computed `needed` = (hash, block size) where its read stopped. SGLang's block hashes
+        are the same on every rank (SHA-256 over the tokens, chained, no per-process seed), so
+        if this rank still holds that very block the prefix was cached here: returns the
+        previous request's blocks on this rank, else None."""
+        with self._lock:
+            check = self._checks.get(token)
+            if (check is None or cached_tokens is None or needed[0] is None
+                    or (prompt_tokens and cached_tokens >= prompt_tokens * 0.5)):
+                self._drop_check(token)
+                return None
+            judged = self._judge(check, max(0, cached_tokens))
+            if judged is None:
+                self._drop_check(token)
+                return None
+            seg, j, total, gone = judged
+            same = (seg.hashes[j], seg.block) == tuple(needed) and seg.start + j * seg.block == cached_tokens
+            ok = (same and not self._removed(check, seg, j) and not self.hybrid and not check["concurrent"]
+                  and not check["overflowed"] and self._errors() == check["errors"])
+            self._drop_check(token)
+            return total - gone if ok else None
 
     def snapshot(self) -> dict:
         snap = super().snapshot()

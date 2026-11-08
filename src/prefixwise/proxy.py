@@ -430,6 +430,11 @@ class StreamAccumulator:
             self.saw_usage = True
 
 
+def _sources_of(events) -> list:
+    """The per-cache event readers: a fleet's sources, or the one reader."""
+    return list(getattr(events, "sources", None) or [events])
+
+
 def _endpoint_label(endpoint: str) -> str:
     """tcp://10.0.0.5:5557 -> 10.0.0.5:5557: how a cache is named in verdicts."""
     return endpoint.split("://", 1)[-1]
@@ -494,9 +499,9 @@ class PrefixwiseProxy:
         self._kv_auto = kv_events == "auto"
         endpoints = [e.strip() for e in kv_events.split(",") if e.strip()] if kv_events and not self._kv_auto else []
         if len(endpoints) > 1 and self.engine == "sglang":
-            raise ValueError("several --kv-events endpoints: vLLM only for now (SGLang: one data-parallel rank)")
-        if self._kv_auto and self.engine == "sglang":
-            raise ValueError("--kv-events auto: vLLM only for now; give SGLang's endpoint")
+            raise ValueError("several SGLang --kv-events endpoints: for one server's data-parallel ranks use "
+                             "--kv-events auto; SGLang replicas behind a router are not supported yet")
+        self._full_attention = full_attention
         if endpoints:
             self._start_events([(_endpoint_label(e), e) for e in endpoints], full_attention)
         # Opt-in request rewrites (see fixes.py). Off unless named here or
@@ -531,9 +536,9 @@ class PrefixwiseProxy:
         self.session_facts: dict[str, Facts] = _SessionMap(MAX_SESSIONS)
         self.prefix_inflight: dict[str, dict[str, float]] = _SessionMap(MAX_SESSIONS)
         self.prefix_done: dict[str, tuple[float, str]] = _SessionMap(MAX_SESSIONS)
-        if self._kv_auto and not self.mock:
+        if self._kv_auto and self.engine == "vllm" and not self.mock:
             self._discover_vllm()
-        if self.engine == "sglang" and self.engine_events is not None and not self.mock:
+        if self.engine == "sglang" and (self.engine_events is not None or self._kv_auto) and not self.mock:
             self._check_sglang()
         # Per-session state, shared across the threaded server's handlers.
         # Every read and write holds self._lock: the classifier must compare
@@ -557,16 +562,19 @@ class PrefixwiseProxy:
         self.lane_seen: dict[tuple, float] = _SessionMap(MAX_SESSIONS)
         self.lane_response_id: dict[tuple, str] = _SessionMap(MAX_SESSIONS)
 
-    def _start_events(self, sources: list[tuple[str, str]], full_attention: bool = False) -> None:
+    def _start_events(self, sources: list[tuple[str, str]], full_attention: bool = False,
+                      ranks: list[int] | None = None) -> None:
         from .engines import EngineEvents, EngineFleet, SGLangEvents
         if self.engine == "sglang":
-            self.engine_events = SGLangEvents(sources[0][1], full_attention=full_attention)
-        elif len(sources) == 1:
-            self.engine_events = EngineEvents(sources[0][1])
+            make = lambda endpoint: SGLangEvents(endpoint, full_attention=full_attention)  # noqa: E731
         else:
-            self.engine_events = EngineFleet(sources)
+            make = EngineEvents
+        events = make(sources[0][1]) if len(sources) == 1 else EngineFleet(sources, make=make)
+        for source, rank in zip(_sources_of(events), ranks or []):
+            source.rank = rank  # each batch must carry this rank: a crossed endpoint is caught
+        self.engine_events = events
         self.engine_caches = len(sources)
-        self.engine_events.start()
+        events.start()
 
     def _discover_vllm(self) -> None:
         """--kv-events auto: every data-parallel rank's KV-event endpoint, from vLLM's
@@ -593,7 +601,8 @@ class PrefixwiseProxy:
                                      "'{\"enable_kv_cache_events\": true, \"publisher\": \"zmq\"}'; "
                                      "evictions stay inferred")
             return
-        self._start_events(sources)
+        self._start_events(sources, ranks=[int(label.split()[-1]) for label, _ in sources]
+                           if all(label.split()[-1].isdigit() for label, _ in sources) else None)
         if len(sources) > 1:
             self.engine_notes.append(f"{len(sources)} data-parallel ranks: the KV events show which one served "
                                      "each request, so a request sent away from its cached prefix is a routing miss")
@@ -601,10 +610,11 @@ class PrefixwiseProxy:
     def _check_sglang(self) -> None:
         """Read SGLang's /server_info once. Event verdicts stay off (session id not sent)
         unless it shows: version >= 0.5.20 (session on events), events published, no
-        --enable-session-radix-cache (a session_id would pin the session's cache), and
-        one data-parallel rank (each rank has its own cache and event stream). It also
-        sizes the block index from the cache capacity, and a sliding-window model
-        turns "not an eviction" off."""
+        --enable-session-radix-cache (a session_id would pin the session's cache), and,
+        with several data-parallel ranks (each with its own cache and event stream),
+        --kv-events auto, no prefill/decode disaggregation and one node. With auto it
+        subscribes to every rank. It also sizes the block index from the cache capacity,
+        and a sliding-window model turns "not an eviction" off."""
         base = (self.upstreams.get("openai") or self.upstream_url).removesuffix("/v1")
         headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
         try:
@@ -630,23 +640,52 @@ class PrefixwiseProxy:
             problems.append("SGLang is not publishing KV events: start it with --kv-events-config "
                             "'{\"publisher\": \"zmq\", \"endpoint\": \"tcp://*:5557\"}'")
         dp = max(int(info.get("dp_size") or 1), int(events.get("dp_size") or 1) if isinstance(events, dict) else 1)
-        if dp > 1:
-            problems.append(f"SGLang runs {dp} data-parallel ranks, each with its own cache and events")
+        self.engine_caches = max(self.engine_caches, dp)  # several caches: never infer an eviction
+        host = str((events or {}).get("endpoint_host") or "*") if isinstance(events, dict) else "*"
+        if dp > 1 and not self._kv_auto:
+            problems.append(f"SGLang runs {dp} data-parallel ranks, each with its own cache and events: "
+                            "use --kv-events auto to follow every rank")
+        if self._kv_auto and not (isinstance(events, dict) and events.get("endpoint_port_base")):
+            problems.append("SGLang's /server_info describes no tcp KV-event endpoint (an ipc:// endpoint, or "
+                            "an SGLang without the descriptor): start it with --kv-events-config "
+                            "'{\"publisher\": \"zmq\", \"endpoint\": \"tcp://*:5557\"}'"
+                            + ("" if dp > 1 else ", or give the endpoint"))
+        elif self._kv_auto and host not in ("*", "0.0.0.0", "::", "[::]", ""):
+            problems.append(f"SGLang's KV-event endpoint names a host ({host}), so SGLang connects out to it "
+                            "instead of listening: bind it on all interfaces (tcp://*:PORT) for Prefixwise to "
+                            "subscribe")
+        if dp > 1 and str(info.get("disaggregation_mode") or "null") != "null":
+            problems.append("SGLang runs prefill/decode disaggregation: a request's ranks are chosen per request")
+        if dp > 1 and int(info.get("nnodes") or 1) > 1:
+            problems.append("SGLang's ranks span several nodes, but /server_info advertises one event host")
         if problems:
             self.engine_notes.extend(problems)
             self.engine_notes.append("evictions stay inferred")
+            if self._kv_auto:  # never subscribed: nothing to stop
+                self.engine_events = None
             return
+        if self._kv_auto:
+            upstream = urllib.parse.urlsplit(base).hostname or "127.0.0.1"
+            port = int(events["endpoint_port_base"])
+            ranks = list(range(max(1, int(events.get("dp_size") or 1))))
+            sources = [(f"rank {r}", _reachable(f"tcp://{host}:{port + r}", upstream)) for r in ranks]
+            self._start_events(sources, self._full_attention, ranks=ranks if len(ranks) > 1 else None)
+            if len(ranks) > 1:
+                self.engine_notes.append(f"{len(ranks)} data-parallel ranks: the KV events show which one "
+                                         "served each request, so a request sent away from its cached prefix "
+                                         "is a routing miss")
         states = [s or {} for s in info.get("internal_states") or []]
         usage = [s.get("memory_usage") or {} for s in states]
         if any(u.get("token_capacity_swa") for u in usage):
-            self.engine_events.hybrid = True
+            self.engine_events.hybrid = True  # the fleet sets every rank
             self.engine_notes.append("the model has sliding-window layers: evictions can be confirmed, "
                                      "never ruled out")
         capacity = max([int(u.get("token_capacity") or 0) for u in usage]
                        + [int(info.get("max_total_num_tokens") or 0)])
         blocks = capacity // max(1, int(info.get("page_size") or 1))
         if blocks:
-            self.engine_events.max_alive = max(self.engine_events.max_alive, blocks * 5 // 4 + 1024)
+            for source in _sources_of(self.engine_events):  # per rank: each has its own capacity
+                source.max_alive = max(source.max_alive, blocks * 5 // 4 + 1024)
             if blocks > 2_000_000:
                 self.engine_notes.append(f"SGLang caches up to {blocks:,} blocks: Prefixwise's index needs about "
                                          f"{blocks * 80 // 1_000_000:,} MB (--page-size 16 cuts it 16-fold)")
@@ -859,6 +898,9 @@ class PrefixwiseProxy:
                                gap_seconds=gap_seconds, compaction_event=ctx["compaction_event"],
                                params={k: body.get(k) for k in
                                        ("tool_choice", "thinking", "reasoning", "output_format",
+                                        # SGLang leaves extra_key out of its KV-event hashes, so a change
+                                        # must be seen here (cache_salt is in them)
+                                        "extra_key",
                                         "text_format", "text", "verbosity") if body.get(k) is not None},
                                has_breakpoint=has_cache_breakpoint(body),
                                ttl_seconds=ctx.get("ttl_seconds"),
