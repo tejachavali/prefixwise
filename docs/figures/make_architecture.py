@@ -94,8 +94,8 @@ def arrow(t, pts, label=None, lx=None, ly=None, anchor="middle", dashed=False, h
     return out
 
 
-def group(t, x, y, w, h, title, right=False):
-    tx, anchor = (x + w - 14, "end") if right else (x + 14, "start")
+def group(t, x, y, w, h, title, right=False, center=False):
+    tx, anchor = (x + w / 2, "middle") if center else ((x + w - 14, "end") if right else (x + 14, "start"))
     return (f'<rect x="{x}" y="{y}" width="{w}" height="{h}" rx="12" fill="none" stroke="{t["grid"]}" '
             f'stroke-width="1.5"/>' + lines(tx, y + 22, [title], t["muted"], size=12, weight=600,
                                             anchor=anchor))
@@ -113,10 +113,11 @@ def masked(t, x, y, text, size=11.5, anchor="middle"):
 
 def architecture(t: dict) -> str:
     r = roles(t)
-    W, H = 940, 800
+    W, H = 940, 854
+    dy = 54  # room between step 3 and step 4 for the turn record, the boundary between the two halves
     b = [lines(W / 2, 34, ["How a request flows through Prefixwise"], t["ink"], size=17, weight=600),
-         lines(W / 2, 56, ["Four ways in, one row per request; the prompt itself is never stored"],
-               t["muted"], size=12.5)]
+         lines(W / 2, 56, ["An edge where the request is, a collector where the ledger is; one process or many; "
+                           "the prompt itself is never stored"], t["muted"], size=12.5)]
     # ways in
     b.append(group(t, 20, 74, W - 40, 112, "WAYS IN"))
     ins = [("Your agent", "through the proxy", "prefixwise serve / run"),
@@ -125,29 +126,38 @@ def architecture(t: dict) -> str:
            ("Agent logs", "prefixwise import", "Claude Code, Codex")]
     for x, rows in zip([40, 262, 484, 706], ins):
         b.append(box(t, x, 104, 194, 66, list(rows)))
-    # the pipeline
-    b.append(group(t, 20, 204, W - 40, 356, "PREFIXWISE", right=True))
+    # the edge: steps 1 to 3, wherever the request is
+    b.append(group(t, 20, 204, W - 40, 272, "EDGE: where the request is", right=True))
     cx, cw = 250, 440
     steps = [(234, ["1  Read the request", "session, agent, task; diagnostic fields added"]),
              (318, ["2  Forward it (proxy only)", "the client's request and auth, as sent"]),
              (402, ["3  Fingerprint the prompt", "blocks in cache order, hashed: never the text"]),
-             (486, ["4  Name one cause", "against this thread's previous turn; sub-reason; price"])]
+             (486 + dy, ["4  Name one cause", "against this conversation's previous turn; sub-reason; price"])]
     for y, rows in steps:
-        hero = y == 486
+        hero = y == 486 + dy
         b.append(box(t, cx, y, cw, 58, rows, accent=r["blue"] if hero else None,
                      fill=r["hero_fill"] if hero else None))
     for (y1, _), (y2, _) in zip(steps, steps[1:]):
         b.append(arrow(t, [(cx + cw / 2, y1 + 58), (cx + cw / 2, y2 - 2)]))
+    # the turn record: what crosses from the edge to the collector
+    b.append(lines(cx + cw / 2 + 12, 486, ["turn record: block hashes, positions, counts, usage; never the text",
+                                            "one process: a call. A fleet: HTTP to prefixwise collect, or a Redis",
+                                            "Stream partitioned by session, each partition read by one collector"],
+                   t["muted"], size=11.5, anchor="start", gap=14))
+    # the collector: step 4 and the ledger, one per fleet (or per partition of the log)
+    b.append(group(t, 20, 520, W - 40, 216, ""))
+    b.append(lines(66, 536, ["COLLECTOR: one per fleet, or one per set of log partitions"],
+                   t["muted"], size=12, weight=600, anchor="start"))
     # into step 1: the proxy, and the SDK wrappers (their call already happened: not forwarded)
     b.append(arrow(t, [(150, 170), (150, 252), (cx - 2, 252)]))
     b.append(arrow(t, [(359, 170), (359, 194), (222, 194), (222, 276), (cx - 2, 276)]))
     b.append(arrow(t, [(581, 170), (581, 194), (359, 194)], head=False))  # joins the wrap line
     b.append(lines(214, 300, ["wrap / LiteLLM:", "already sent, so", "recorded, not forwarded"],
                    t["muted"], size=11.5, anchor="end", gap=15))
-    # back to the agent: after step 4, so the verdict can ride in the headers
-    b.append(arrow(t, [(cx - 2, 528), (60, 528), (60, 172)], dashed=True))
-    b.append(lines(70, 470, ["response, unchanged,", "with the verdict in", "X-Prefixwise-* headers"],
-                   t["muted"], size=11.5, anchor="start", gap=15))
+    # back to the agent: after step 4, so the verdict can ride in the headers (in one process)
+    b.append(arrow(t, [(cx - 2, 528 + dy), (46, 528 + dy), (46, 172)], dashed=True))
+    b.append(lines(70, 392, ["response, unchanged,", "with the verdict in", "X-Prefixwise-* headers", "(one process;",
+                             "an edge says: queued)"], t["muted"], size=11.5, anchor="start", gap=15))
     # the provider or engine (spaced so the labels clear the boxes)
     px = cx + cw + 54
     b.append(box(t, px, 315, 160, 64, ["Provider or engine", "Anthropic, OpenAI,", "vLLM, SGLang"]))
@@ -155,43 +165,50 @@ def architecture(t: dict) -> str:
     b.append(lines((cx + cw + px) / 2, 327, ["request"], t["muted"], size=11.5))
     b.append(arrow(t, [(px - 2, 362), (cx + cw + 2, 362)]))
     b.append(lines((cx + cw + px) / 2, 378, ["response"], t["muted"], size=11.5))
-    b.append(box(t, px, 486, 160, 58, ["KV-cache events", "vLLM / SGLang, optional"], dashed=True, size=12))
-    b.append(arrow(t, [(px - 2, 503), (cx + cw + 2, 503)]))
-    b.append(masked(t, px + 80, 563, "evicted? which replica?"))
+    b.append(box(t, px, 398, 160, 62, ["KV-cache events", "vLLM / SGLang, optional:", "evicted? which replica?"],
+                 dashed=True, size=12))
+    b.append(arrow(t, [(px - 2, 431), (cx + cw + 2, 431)]))
     # agent logs: their own rules (the logs hold usage and events, never the prompt)
-    b.append(box(t, 690, 584, 200, 64, ["Log rules", "what the log shows changed:", "model, compaction, TTL, ..."],
-                 size=12))
-    b.append(arrow(t, [(803, 170), (803, 194), (912, 194), (912, 616), (892, 616)]))
-    b.append(arrow(t, [(688, 616), (562, 616)]))
+    b.append(box(t, 690, 584 + dy, 200, 64, ["Log rules, own ledger file", "what the log shows changed:",
+                                             "model, compaction, TTL, ..."], size=12))
+    b.append(arrow(t, [(803, 170), (803, 194), (912, 194), (912, 616 + dy), (892, 616 + dy)]))
+    b.append(arrow(t, [(688, 616 + dy), (562, 616 + dy)]))
     # ledger
-    b.append(cylinder(t, 380, 584, 180, 64, ["Ledger", "SQLite, one row per request"], stroke=r["blue"],
+    b.append(cylinder(t, 380, 584 + dy, 180, 64, ["Ledger", "SQLite, one row per request"], stroke=r["blue"],
                       fill=r["hero_fill"]))
-    b.append(arrow(t, [(cx + cw / 2, 544), (cx + cw / 2, 582)]))
-    # ways out: live per request, and read from the ledger
-    ow, gapx, oy = 168, 10, 718
-    x0 = (W - (5 * ow + 4 * gapx)) / 2
-    xs = [x0 + i * (ow + gapx) for i in range(5)]
-    outs = ["Prometheus /metrics", "OpenTelemetry spans", "prefixwise report", "HTTP API /api/v1",
-            "prefixwise export"]
-    b.append(group(t, 20, 690, W - 40, 92, "WAYS OUT"))
+    b.append(arrow(t, [(cx + cw / 2, 544 + dy), (cx + cw / 2, 582 + dy)]))
+    # ways out: live per request, read from the ledger, and copies of every row
+    ow, gapx, oy = 140, 10, 718 + dy
+    x0 = (W - (6 * ow + 5 * gapx)) / 2
+    xs = [x0 + i * (ow + gapx) for i in range(6)]
+    outs = [["OpenTelemetry", "spans"], ["Prometheus", "/metrics"], ["prefixwise", "report"], ["HTTP API", "/api/v1"],
+            ["prefixwise", "export"], ["Sinks: JSONL,", "ClickHouse"]]
+    b.append(group(t, 20, 690 + dy, W - 40, 92, "WAYS OUT", center=True))
     for x, name in zip(xs, outs):
-        b.append(box(t, x, oy, ow, 44, [name], size=12.5))
+        b.append(box(t, x, oy, ow, 44, name, size=12.5, bold_first=False))
     mids = [x + ow / 2 for x in xs]
-    bar = 672
-    b.append(f'<path d="M300,546 V{bar} M{mids[0]},{bar} H{mids[1]}" fill="none" stroke="{t["ink2"]}" '
+    bar = 672 + dy
+    # Prometheus: the collector's rows, live; OpenTelemetry: spans from the edge, where the request's trace is
+    b.append(f'<path d="M300,{544 + dy} V{bar} H{mids[1]}" fill="none" stroke="{t["ink2"]}" '
              f'stroke-width="1.4" stroke-dasharray="5 4"/>')
-    for m in mids[:2]:
-        b.append(arrow(t, [(m, bar), (m, oy - 2)], dashed=True))
-    b.append(lines(292, 600, ["live, as each", "row is recorded"], t["muted"], size=11.5, anchor="end", gap=15))
-    b.append(f'<path d="M{W / 2},650 V{bar} M{mids[2]},{bar} H{mids[4]}" fill="none" stroke="{t["ink2"]}" '
+    b.append(arrow(t, [(mids[1], bar), (mids[1], oy - 2)], dashed=True))
+    b.append(lines(308, 552 + dy, ["rows, live, from the collector"], t["muted"], size=11.5, anchor="start"))
+    b.append(f'<path d="M{cx - 2},431 H236 V470 H32 V{bar} H{mids[0]}" fill="none" stroke="{t["ink2"]}" '
+             f'stroke-width="1.4" stroke-dasharray="5 4"/>')
+    b.append(arrow(t, [(mids[0], bar), (mids[0], oy - 2)], dashed=True))
+    b.append(lines(40, 596 + dy, ["spans, live,", "from the edge"], t["muted"], size=11.5, anchor="start", gap=15))
+    b.append(f'<path d="M{W / 2},{650 + dy} V{bar} M{mids[2]},{bar} H{mids[5]}" fill="none" stroke="{t["ink2"]}" '
              f'stroke-width="1.4"/>')
     for m in mids[2:]:
         b.append(arrow(t, [(m, bar), (m, oy - 2)]))
-    b.append(masked(t, mids[3] + 10, bar - 6, "read from the ledger", anchor="start"))
-    return svg(W, H, t, b, "How a request flows through Prefixwise: four ways in; read, forward (proxy only), "
-               "fingerprint and name one cause; the response back with the verdict in headers; agent logs "
-               "through their own rules; one ledger row; Prometheus and OpenTelemetry live, report, API and "
-               "export from the ledger")
+    b.append(masked(t, mids[3] + 10, bar - 6, "read from the ledger; sinks get a copy of every row", anchor="start"))
+    return svg(W, H, t, b, "How a request flows through Prefixwise: four ways in; an edge reads, forwards (proxy "
+               "only) and fingerprints the request where it is; a turn record (hashes, counts, usage, never text) "
+               "crosses to a collector, in one process or over HTTP or a Redis Stream partitioned by session, which "
+               "names one cause and writes one ledger row; the response back with the verdict in headers; the engine's "
+               "KV-cache events joined at the edge; agent logs through their own rules into their own ledger file; "
+               "OpenTelemetry spans live from the edge, Prometheus live from the collector's rows, report, API and "
+               "export from the ledger, sinks a copy of every row")
 
 
 # -- figure 2: how the cause is decided ------------------------------------------------------

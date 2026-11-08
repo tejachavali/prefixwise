@@ -80,7 +80,7 @@ def cmd_collect(args) -> int:
     ledger = args.ledger or os.environ.get("PREFIXWISE_LEDGER_PATH") or DEFAULT_LEDGER
     try:
         serve(host=args.host, port=args.port, ledger_path=ledger, prices=args.prices,
-              allow_unauthenticated=args.allow_unauthenticated, otel=args.otel, collect_only=True,
+              allow_unauthenticated=args.allow_unauthenticated, otel="", collect_only=True,
               log_url=args.log, log_partitions=args.partitions, sinks=args.sink)
     except (ValueError, ImportError, OSError) as exc:  # bad --partitions or --sink, or redis-py missing
         sys.exit(f"prefixwise: {exc}")
@@ -548,8 +548,6 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--allow-unauthenticated", action="store_true",
                    help="listen beyond localhost without PREFIXWISE_AUTH_TOKEN (anyone who reaches the port "
                         "can write records)")
-    p.add_argument("--otel", action="store_const", const="genai", default=None,
-                   help="OpenTelemetry export, as serve --otel")
     p.add_argument("--log", metavar="URL",
                    help="also read the record log (redis://host:6379/0; default $PREFIXWISE_LOG): edges started "
                         "with PREFIXWISE_COLLECTOR=<that URL> write to it; needs pip install 'prefixwise[log]'")
