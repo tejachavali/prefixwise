@@ -50,7 +50,8 @@ ORDER_WAIT_SECONDS = 2.0
 # A call whose callback never comes (an abandoned call, a task LiteLLM dropped) is forgotten
 # 2 x ORDER_WAIT_SECONDS after the next turn of its conversation was sent (its answer had come
 # by then), or ORDER_FORGET_SECONDS after it was sent (longer than any generation), whichever
-# comes first; at most ORDER_MAX_CALLS are tracked.
+# comes first; at most ORDER_MAX_CALLS are tracked (past that, as on a LiteLLM proxy with more
+# calls in flight, the oldest stop being ordered: recorded as they come, as before).
 ORDER_FORGET_SECONDS = 900.0
 ORDER_MAX_CALLS = 10_000
 _REDACTED = "redacted-by-litellm"  # what LiteLLM logs in place of messages with logging turned off
@@ -86,8 +87,28 @@ def _conversation(model, messages, kwargs) -> tuple | None:
         return None
     opening = next((m.get("content") for m in messages or [] if isinstance(m, dict)
                     and m.get("role") not in ("system", "developer")), None)
-    digest = hashlib.sha256(json.dumps(opening, sort_keys=True, default=str).encode()).hexdigest()
+    digest = hashlib.sha256(_text(opening).encode()).hexdigest()
     return session, str(model), digest
+
+
+def _text(content) -> str:
+    """A message's content as the same string turn after turn: a string and text blocks with the
+    same text agree, and markers (cache_control, which clients move to the last message) are
+    ignored."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for b in content:
+            if isinstance(b, dict) and isinstance(b.get("text"), str):
+                parts.append(b["text"])
+            elif isinstance(b, dict):
+                parts.append(json.dumps({k: v for k, v in b.items() if k != "cache_control"},
+                                        sort_keys=True, default=str))
+            else:
+                parts.append(str(b))
+        return "".join(parts)
+    return json.dumps(content, sort_keys=True, default=str)
 
 
 def _is_anthropic_body(body) -> bool:
@@ -148,6 +169,7 @@ class PrefixwiseCallback(_Base):
                     turns[c] = now
                 elif due < now - 2 * ORDER_WAIT_SECONDS:
                     self._drop(c)
+                    self._order.notify_all()
             self._sweep(now)
             self._turns.setdefault(key, OrderedDict())[call] = None
             self._key[call] = (key, now)

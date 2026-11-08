@@ -358,3 +358,18 @@ def test_a_cancelled_async_callback_releases_its_turn():
             await waiting
     asyncio.run(go())
     assert "b" not in c._key and "a" in c._key
+
+
+def test_conversation_key_survives_moved_markers_and_content_shape():
+    # Review: clients put cache_control on the last message, which on turn 1 is the opening one;
+    # and content can be a string one turn and text blocks the next.
+    from prefixwise.litellm_callback import _conversation
+
+    kw = _kw("x", [])
+    marked = [{"role": "user", "content": [{"type": "text", "text": "fix the bug",
+                                            "cache_control": {"type": "ephemeral"}}]}]
+    plain = [{"role": "user", "content": "fix the bug"},
+             {"role": "assistant", "content": "ok"}, {"role": "user", "content": "go"}]
+    blocks = [{"role": "user", "content": [{"type": "text", "text": "fix the bug"}]}]
+    assert _conversation("m", marked, kw) == _conversation("m", plain, kw) == _conversation("m", blocks, kw)
+    assert _conversation("m", [{"role": "user", "content": "another"}], kw) != _conversation("m", plain, kw)
