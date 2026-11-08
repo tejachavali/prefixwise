@@ -272,8 +272,11 @@ def import_claude_code(root: str | os.PathLike | None = None, ledger: Ledger | N
                 # This request's own cache lifetime: what its write was granted, else what it asked for.
                 own_ttl = _granted_ttl(u) or {"1h": 3600.0, "5m": 300.0}.get(r.ttl_requested or "")
                 gap = (r.sent or r.done) - prev.done if prev is not None else None
-                avoidable = avoidable_for_turn(legit, prompt, read, prev_prompt)
                 prev_u = prev.usage if prev is not None else None
+                held = None
+                if prev_u is not None:
+                    held = _int(prev_u.get("cache_read_input_tokens")) + _int(prev_u.get("cache_creation_input_tokens"))
+                avoidable = avoidable_for_turn(legit, prompt, read, prev_prompt, held)
                 prev, prev_prompt_before, prev_prompt = r, prev_prompt, prompt
                 prev_ttl = _granted_ttl(u) or prev_ttl
                 if since is not None and r.done < since:

@@ -106,7 +106,7 @@ def avoidable_tokens(prompt_tokens: int, cached_tokens: int, *,
 
 
 def avoidable_for_turn(legit: bool | None, prompt_tokens: int, cached_tokens: int,
-                       prev_prompt_tokens: int | None) -> int:
+                       prev_prompt_tokens: int | None, prev_held_tokens: int | None = None) -> int:
     """Avoidable tokens for one classified turn.
 
     Only waste counts (legit is False). Legitimate changes (model
@@ -117,11 +117,17 @@ def avoidable_for_turn(legit: bool | None, prompt_tokens: int, cached_tokens: in
     For waste, avoidable is the prior prefix that could have been
     reused but was not: min(prev, curr) prompt tokens minus cache_read.
     Tokens appended after the prior prefix are new content, never
-    avoidable.
+    avoidable. When what the previous turn left in the cache is known
+    (`prev_held_tokens`: what it read plus what it wrote, which on
+    Anthropic ends at its last breakpoint), no more than that could
+    have been reused: the uncached tail after the breakpoint is not
+    this turn's waste.
     """
     if legit is not False:
         return 0
     reusable = min(prev_prompt_tokens, prompt_tokens) if prev_prompt_tokens else prompt_tokens
+    if prev_held_tokens:
+        reusable = min(reusable, prev_held_tokens)
     return max(0, reusable - cached_tokens)
 
 

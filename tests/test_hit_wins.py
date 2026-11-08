@@ -9,7 +9,10 @@ that was never read is visible.
    never read, and the surcharge paid to write them is shown, separately from avoidable cost.
 """
 
+import copy
+
 import pytest
+from test_details import MODEL, USER, a_usage, body, proxy, turn
 
 from prefixwise.classifier import MissCause, RequestSnapshot, classify
 from prefixwise.findings import findings, render, unread_writes
@@ -90,10 +93,6 @@ def test_report_shows_the_price_of_unread_writes():
 
 # End to end through the proxy (review: both production paths were untested).
 
-import copy
-
-from test_details import MODEL, USER, a_usage, body, proxy, turn
-
 DATED = lambda d: [{"type": "text", "text": "You are a careful agent. " * 200 + f" today {d}",  # noqa: E731
                     "cache_control": {"type": "ephemeral"}}]
 MORE = [USER, {"role": "assistant", "content": "ok"}, {"role": "user", "content": "more"}]
@@ -152,3 +151,26 @@ def test_static_breakpoint_hit_with_a_param_change_is_none():
     b2["tool_choice"] = {"type": "any"}
     e = turn(p, b2)
     assert e.cause == "none" and "param_rendered" in (e.secondary_causes or "")
+
+
+def test_steady_state_hit_with_a_param_change_is_none():
+    # Turn 2 read the system block and wrote nothing (the breakpoint stays on it); turn 3 reads
+    # the same 8,000 with a changed param. The held prefix is what turn 2 read: a full hit.
+    p = proxy([a_usage(write5=8_000), a_usage(read=8_000, fresh=300), a_usage(read=8_000, fresh=500)])
+    turn(p, dated([USER], "2026-11-07"))
+    turn(p, dated(MORE, "2026-11-07"))
+    b3 = dated(MORE + [{"role": "assistant", "content": "ok"}, {"role": "user", "content": "x"}], "2026-11-07")
+    b3["tool_choice"] = {"type": "any"}
+    e = turn(p, b3)
+    assert e.cause == "none" and "8000 of 8000" in e.evidence
+
+
+def test_compaction_counts_the_write_it_replaced():
+    # A compaction rewrites the opening message, so identity alone would call it another
+    # conversation; the compaction header says it is the same one, and its write was replaced.
+    p = proxy([a_usage(write5=8_000), a_usage(write5=8_100, fresh=100), a_usage(write5=3_000, fresh=0)])
+    turn(p, dated([USER], "2026-11-07"))
+    turn(p, dated(MORE, "2026-11-08"))
+    summary = dated([{"role": "user", "content": "Summary of the conversation so far: ..."}], "2026-11-08")
+    e = p.handle("anthropic", summary, {"x-prefixwise-session-id": "s", "x-prefixwise-compaction-event": "1"})[1]
+    assert e.cause == "compaction_rewrite" and e.unread_write_tokens == 8_100

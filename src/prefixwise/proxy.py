@@ -61,7 +61,7 @@ import urllib.request
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from .classifier import Classification, MissCause, RequestSnapshot, classify, first_divergence
+from .classifier import Classification, MissCause, RequestSnapshot, classify, first_divergence, _blocks_by_role, _role_unchanged
 from .details import Facts, body_facts, detail_for, keeps_thinking, usage_facts
 from .diagnostics import AgreementScorer, anthropic_diagnostics
 from .fingerprint import Fingerprinter
@@ -1102,7 +1102,9 @@ class PrefixwiseProxy:
             provider=provider, model=ctx["model"], cause=result.cause.value,
             prompt_tokens=prompt_tokens, cached_tokens=cached,
             avoidable_tokens=avoidable_for_turn(result.legit, prompt_tokens, cached,
-                                                prev.prompt_tokens if prev else None),
+                                                prev.prompt_tokens if prev else None,
+                                                (prev.cached_tokens + prev.cache_written) if prev is not None
+                                                and (prev.provider == "anthropic" or prev.cache_written) else None),
             avoidable_cost=None, legit=result.legit, native_reason=native_reason,
             cost=self.prices.request_cost(str(payload.get("model") or ctx["model"]), provider, usage),
             task_id=ctx["task_id"], request_id=ctx["request_id"],
@@ -1121,8 +1123,11 @@ class PrefixwiseProxy:
         entry.avoidable_cost = self.prices.avoidable_cost(priced_model, entry.avoidable_tokens, prompt_tokens,
                                                      provider, usage)
         # The previous turn's cache write, left unread: only when that turn is this conversation's
-        # own (not another conversation this request fell back to, e.g. a same-model side call).
-        own = state is not None and (interleaved or identity[0] == prior_latest)
+        # own: the same opening message, its own interleaved turn, or a compaction (which rewrites
+        # the opening). Not another conversation this request fell back to (a same-model side
+        # call), nor an edited opening message, which identity alone cannot tell from one.
+        own = state is not None and not new_thread and (interleaved or identity[0] == prior_latest
+                                                        or bool(ctx["compaction_event"]))
         if own and prev_facts is not None and prev is not None and prompt_tokens > 0:
             w5, w1, cw = unread_write(result.cause.value, cached, prev_facts.write_5m, prev_facts.write_1h,
                                       prev_facts.cache_write)
@@ -1239,11 +1244,27 @@ class PrefixwiseProxy:
         return result, entry
 
     def _mock_payload(self, provider: str, model: str, request_id: str, session_id: str,
-                      api: str = "chat") -> dict:
-        # Synthetic usage: later turns in a session reuse the prefix.
-        # 2,000 prompt tokens so the OpenAI 1,024 minimum does not fire.
-        with self._lock:
-            cached = 1000 if session_id in self.last_snapshot else 0
+                      api: str = "chat", markers: bool = True, body: dict | None = None) -> dict:
+        # Synthetic usage, shaped like a real cache: 2,000 prompt tokens (so the OpenAI 1,024
+        # minimum does not fire), of which 1,000 are read when the session's previous request on
+        # this model had the same tools and system prompt and its messages are a prefix of these
+        # (as a provider's cache would serve them), else nothing.
+        with self._lock:  # the session's latest turn on this model (each model has its own cache)
+            lane = self.lane_threads.get((session_id, model))
+            prev = lane.threads[lane.latest][0] if lane is not None and lane.latest is not None else None
+        cached = 0
+        if prev is not None and body is not None:
+            fps = self.fingerprinter.fingerprint_blocks(extract_blocks(body, provider))
+            before, now = _blocks_by_role(prev.blocks), _blocks_by_role(fps)
+            if all(_role_unchanged(r, before.get(r, []), now.get(r, []))
+                   for r in ("tools", "system", "system_dynamic", "messages", "tool_results")):
+                cached = 1000
+        write = 0
+        if provider == "anthropic":  # as Anthropic bills: nothing without cache_control; a first write
+            if not markers:
+                cached = 0
+            elif not cached:
+                write = 1000
         # Ids shaped like the real APIs' (msg_, resp_, chatcmpl-): diagnostics chaining checks them.
         rid = {"anthropic": "msg_", "responses": "resp_"}.get(
             provider if provider == "anthropic" else api, "chatcmpl-") + request_id[:8]
@@ -1251,8 +1272,8 @@ class PrefixwiseProxy:
             return {"id": rid, "type": "message", "role": "assistant", "model": model,
                     "content": [{"type": "text", "text": "[prefixwise mock]"}],
                     "stop_reason": "end_turn",
-                    "usage": {"input_tokens": 2000 - cached, "cache_read_input_tokens": cached,
-                              "cache_creation_input_tokens": 0, "output_tokens": 1}}
+                    "usage": {"input_tokens": 2000 - cached - write, "cache_read_input_tokens": cached,
+                              "cache_creation_input_tokens": write, "output_tokens": 1}}
         if api == "responses":
             return {"id": rid, "object": "response", "status": "completed", "model": model,
                     "output": [{"type": "message", "role": "assistant", "status": "completed",
@@ -1384,7 +1405,7 @@ class PrefixwiseProxy:
         for upstream errors, so the client gets the upstream's own error."""
         if self.mock:
             return 200, self._mock_payload(provider, str(body.get("model", "unknown")),
-                                           request_id, session_id, api)
+                                           request_id, session_id, api, has_cache_breakpoint(body), body)
         req = self._upstream_request(provider, body, request_id, session_id, client_headers, api)
         try:
             with urllib.request.urlopen(req, timeout=UPSTREAM_TIMEOUT) as resp:
@@ -1451,7 +1472,9 @@ class PrefixwiseProxy:
 
     def _mock_stream(self, ctx: dict) -> list[bytes]:
         payload = self._mock_payload(ctx["provider"], ctx["model"], ctx["request_id"],
-                                     ctx["session_id"], ctx.get("api", "chat"))
+                                     ctx["session_id"], ctx.get("api", "chat"),
+                                     has_cache_breakpoint(ctx.get("forward_body") or ctx["body"]),
+                                     ctx.get("forward_body") or ctx["body"])
         def ev(obj, name=None):  # one list item per line, as readline() yields them
             head = [f"event: {name}\n".encode()] if name else []
             return head + [b"data: " + json.dumps(obj).encode() + b"\n", b"\n"]

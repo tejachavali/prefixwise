@@ -83,17 +83,18 @@ pip install prefixwise
 prefixwise run -- claude                     # or any agent: your command after the --
 ```
 
-`prefixwise run` starts the proxy, points the agent at it (`ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`; the agent keeps its own API key), and when the agent exits prints what that run's cache did, in plain English. This is the real output of `prefixwise report` on a ledger from the mock provider (20 requests from four scripted sessions: a date in the system prompt, tools shuffled each turn, a well-behaved one, a Haiku side call before the main thread; every mock response reports 2,000 prompt tokens, half of them cached after a session's first request, so the token numbers are flat, the verdicts and fixes are the real ones):
+`prefixwise run` starts the proxy, points the agent at it (`ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`; the agent keeps its own API key), and when the agent exits prints what that run's cache did, in plain English. This is the real output of `prefixwise report` on a ledger from the mock provider (20 requests from four scripted sessions: a date in the system prompt on every turn, tools shuffled on every turn, a well-behaved one, and a Haiku side call before a main thread; the mock answers every request with 2,000 prompt tokens and, like a provider's cache, reads 1,000 of them when the request continues the previous one with the same tools and system prompt and carries a cache breakpoint, so the token counts are flat and the verdicts, prices and fixes are the real ones):
 
 ```
-20 requests, 40,000 prompt tokens, 40% served from cache. Cost $0.0460.
-Avoidable: 9,000 tokens ($0.0171), 22.5% of prompt tokens. Fix these, biggest first:
-  1. The system prompt changed only in a date, time or id (5 requests, 5,000 tokens, $0.0095).
+20 requests, 40,000 prompt tokens, 15% served from cache. Cost $0.0715.
+Avoidable: 9,000 tokens ($0.0193), 22.5% of prompt tokens. Fix these, biggest first:
+  1. The system prompt changed only in a date, time or id (5 requests, 5,000 tokens, $0.0107).
      Fix: Move dates, times and ids out of the system prompt, to the end of the prompt or the latest user message.
-  2. The same tools were sent in a different order or format (4 requests, 4,000 tokens, $0.0076).
+  2. The same tools were sent in a different order or format (4 requests, 4,000 tokens, $0.0086).
      Fix: Send tools in a fixed order with deterministic serialization (or let the proxy do it: prefixwise serve --fix canonical_tools).
      Prefixwise can do it for you: prefixwise serve --fix canonical_tools (proven)
 Expected misses (not waste): 4 x first request of a session: nothing to reuse yet; 1 x switched model: each model has its own cache.
+Cache writes never read: 9,000 tokens were written to the cache, and the next turn of the same conversation replaced the prefix before reading them (9 requests); the write surcharge on them cost $0.0045 above sending them uncached. Fixing the misses above saves this too; it is not counted twice.
 
 Details: prefixwise report --detail   Fixes: prefixwise fixes   Data: prefixwise export
 ```
@@ -103,14 +104,14 @@ Details: prefixwise report --detail   Fixes: prefixwise fixes   Data: prefixwise
 ```
 cause             requests  prompt  cached  avoidable  waste reqs  tokens/success     cost  avoidable $
 ----------------  --------  ------  ------  ---------  ----------  --------------  -------  -----------
-volatile_system          5  10,000   50.0%      5,000           5               -  $0.0106      $0.0095
-tool_reserialize         4   8,000   50.0%      4,000           4               -  $0.0084      $0.0076
+volatile_system          5  10,000    0.0%      5,000           5               -  $0.0226      $0.0107
+tool_reserialize         4   8,000    0.0%      4,000           4               -  $0.0180      $0.0086
 none                     6  12,000   50.0%          0           0               -  $0.0127      $0.0000
-first_write              4   8,000    0.0%          0           0               -  $0.0122      $0.0000
-model_switch             1   2,000   50.0%          0           0               -  $0.0021      $0.0000
+first_write              4   8,000    0.0%          0           0               -  $0.0138      $0.0000
+model_switch             1   2,000    0.0%          0           0               -  $0.0045      $0.0000
 ```
 
-On real traffic the same report also says, per Anthropic model, whether the 1-hour cache would have paid, and what the cache writes that the next turn replaced before reading cost. (`prefixwise run --mock -- <agent>` tries it with synthetic responses and no API calls.)
+On real traffic the same report also says, per Anthropic model, whether the 1-hour cache would have paid. (`prefixwise run --mock -- <agent>` tries it with synthetic responses and no API calls.)
 
 **On a Claude Pro or Max plan?** A proxy cannot sit in front of a subscription login, but Claude Code keeps a log of every session. Read those instead, no setup and nothing sent anywhere:
 
@@ -230,7 +231,7 @@ One cause per request: the first thing, in prefix order, that broke reuse. Each 
 | `evicted` | Engine evicted this session's blocks | depends | More KV cache memory |
 | `unknown` | Not enough evidence; never guessed | - | Send TTL / session headers, or check engine events |
 
-Avoidable tokens for a waste turn = the part of the previous turn's prompt that could have been read from cache but was not: a partial hit counts only the part not read, and appended content is never counted. A change the cache absorbed anyway (it still served the whole reusable prefix) is `none`; one in a request too short to cache, or after the entry had expired, is `below_min_prefix` or `ttl_expired`. The change is kept as a secondary cause either way.
+Avoidable tokens for a waste turn = the part of the previous turn's prompt that could have been read from cache but was not: a partial hit counts only the part not read, appended content is never counted, and on Anthropic no more than the previous turn left in the cache (what it read plus what it wrote, up to its last breakpoint) is counted, so a tail that was never cached is not blamed on the change. A change the cache absorbed anyway (it still served the whole reusable prefix) is `none`; one in a request too short to cache, or after the entry had expired, is `below_min_prefix` or `ttl_expired`. The change is kept as a secondary cause either way.
 
 ### How it knows, without keeping a prompt
 

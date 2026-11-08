@@ -178,13 +178,24 @@ def _min_prefix(curr: RequestSnapshot) -> int | None:
     return {"openai": OPENAI_MIN_PREFIX, "gemini": GEMINI_MIN_PREFIX}.get(curr.provider)
 
 
+def _reusable(prev: RequestSnapshot, curr: RequestSnapshot) -> int:
+    """What this turn could have read: the previous turn's prompt (or this one's, if shorter);
+    on Anthropic, no more than what that turn left in the cache (what it read plus what it
+    wrote, which ends at its last breakpoint), so the uncached tail after the breakpoint is
+    never expected back. Other providers report no writes (or round the reads), so there the
+    whole prompt stands."""
+    reusable = min(prev.prompt_tokens, curr.prompt_tokens) if prev.prompt_tokens else curr.prompt_tokens
+    held = prev.cached_tokens + prev.cache_written
+    if held > 0 and (prev.provider == "anthropic" or prev.cache_written > 0):
+        return min(reusable, held)
+    return reusable  # nothing known to be held (or no write counts): the whole prompt stands
+
+
 def _served_all(prev: RequestSnapshot, curr: RequestSnapshot) -> bool:
     """The cache served everything the previous turn left in it that this turn could reuse."""
     if not curr.usage_known or curr.prompt_tokens <= 0:
         return False
-    reusable = min(prev.prompt_tokens, curr.prompt_tokens) if prev.prompt_tokens else curr.prompt_tokens
-    held = prev.cached_tokens + prev.cache_written
-    target = min(reusable, held) if prev.cache_written > 0 else reusable
+    target = _reusable(prev, curr)
     return target > 0 and curr.cached_tokens >= target
 
 
@@ -302,7 +313,7 @@ def classify(prev: RequestSnapshot | None, curr: RequestSnapshot,
             # was after it (or did not reach the rendered prompt) and cost nothing.
             return Classification(MissCause.NONE, None,
                                   f"{changed.cause.value} seen, but the cache served all of the reusable "
-                                  f"prefix ({curr.cached_tokens} of {reusable} tokens): it cost nothing",
+                                  f"prefix ({curr.cached_tokens} of {_reusable(prev, curr)} tokens): it cost nothing",
                                   secondary + [changed.cause], native_reason, score=False)
         return changed
 
@@ -314,7 +325,8 @@ def classify(prev: RequestSnapshot | None, curr: RequestSnapshot,
         if prev.params != curr.params:
             secondary.append(MissCause.PARAM_RENDERED)
         return Classification(MissCause.NONE, None,
-                              f"the cache served all of the reusable prefix ({curr.cached_tokens} of {reusable} tokens)",
+                              f"the cache served all of the reusable prefix ({curr.cached_tokens} of "
+                              f"{_reusable(prev, curr)} tokens)",
                               secondary, native_reason)
     if prev.params != curr.params:
         changed = sorted(set(prev.params) ^ set(curr.params) |
