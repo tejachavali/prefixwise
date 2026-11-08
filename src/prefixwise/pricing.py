@@ -169,6 +169,30 @@ class PriceTable:
         paid = self._paid_rate(r, breakdown(provider, usage)) if provider and usage else None
         return round(avoidable_tokens * ((r["input"] if paid is None else paid) - read) / 1e6, 8)
 
+    def write_surcharge(self, model: str, prompt_tokens: int, write_5m: int = 0, write_1h: int = 0,
+                        cache_write: int = 0) -> float | None:
+        """USD paid to write these tokens into the cache above sending them uncached: Anthropic
+        0.25x input for 5 minutes, 1x for 1 hour; a provider billing writes at the input rate pays
+        none. None when a needed rate is unknown."""
+        rates = self.rates_for(model)
+        if rates is None:
+            return None
+        r = self._tier(rates, prompt_tokens)
+        inp = r.get("input")
+        if not isinstance(inp, (int, float)):
+            return None
+        total = 0.0
+        for n, rate in ((write_5m, r.get("cache_write_5m", r.get("cache_write"))),
+                        (write_1h, r.get("cache_write_1h")), (cache_write, r.get("cache_write"))):
+            if not n:
+                continue
+            if rate == "input":
+                rate = inp
+            if not isinstance(rate, (int, float)):
+                return None
+            total += n * max(0.0, rate - inp) / 1e6
+        return round(total, 8)
+
     @staticmethod
     def _paid_rate(r: dict, b: Breakdown) -> float | None:
         """USD per 1M tokens this request paid for the prompt tokens it did not read from the

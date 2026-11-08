@@ -43,7 +43,7 @@ from datetime import datetime
 from pathlib import Path
 
 from .diagnostics import NO_VERDICT, map_native_reason
-from .ledger import Ledger, LedgerEntry, avoidable_for_turn
+from .ledger import Ledger, LedgerEntry, avoidable_for_turn, unread_write
 from .pricing import PriceTable, breakdown
 
 HIT_SHARE = 0.5  # as the proxy: a turn that read at least half of the reusable prefix is a hit
@@ -272,8 +272,12 @@ def import_claude_code(root: str | os.PathLike | None = None, ledger: Ledger | N
                 # This request's own cache lifetime: what its write was granted, else what it asked for.
                 own_ttl = _granted_ttl(u) or {"1h": 3600.0, "5m": 300.0}.get(r.ttl_requested or "")
                 gap = (r.sent or r.done) - prev.done if prev is not None else None
-                avoidable = avoidable_for_turn(legit, prompt, read, prev_prompt)
-                prev, prev_prompt = r, prompt
+                prev_u = prev.usage if prev is not None else None
+                held = None
+                if prev_u is not None:
+                    held = _int(prev_u.get("cache_read_input_tokens")) + _int(prev_u.get("cache_creation_input_tokens"))
+                avoidable = avoidable_for_turn(legit, prompt, read, prev_prompt, held)
+                prev, prev_prompt_before, prev_prompt = r, prev_prompt, prompt
                 prev_ttl = _granted_ttl(u) or prev_ttl
                 if since is not None and r.done < since:
                     continue
@@ -296,6 +300,12 @@ def import_claude_code(root: str | os.PathLike | None = None, ledger: Ledger | N
                     cache_ttl_seconds=own_ttl,
                     classifier_version="log-2")
                 entry.avoidable_cost = prices.avoidable_cost(r.model, avoidable, prompt, "anthropic", u)
+                if prev_u is not None and prompt > 0:
+                    pw = breakdown("anthropic", prev_u)
+                    w5, w1, _ = unread_write(cause, read, pw.cache_write_5m, pw.cache_write_1h, 0)
+                    if w5 or w1:
+                        entry.unread_write_tokens = w5 + w1
+                        entry.unread_write_cost = prices.write_surcharge(r.model, prev_prompt_before or 0, w5, w1)
                 if entry.cost is not None:
                     entry.price_as_of = prices.as_of
                 ledger.record(entry, at=r.done)

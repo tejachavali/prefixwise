@@ -28,7 +28,7 @@ import json
 import sqlite3
 from dataclasses import astuple, dataclass, fields
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 
 @dataclass
@@ -73,7 +73,31 @@ class LedgerEntry:
     # Schema 5: this request's own cache lifetime: what its write was granted or what it asked for
     # (Anthropic 300 or 3600; an X-Prefixwise-Cache-Ttl header; None when unknown, as on OpenAI).
     cache_ttl_seconds: float | None = None
+    # Schema 6: a miss that read nothing, right after the previous turn wrote the prefix to the
+    # cache: those tokens were written (at the write rate) and never read. The surcharge paid
+    # for writing them above sending them uncached; None when unpriced or not applicable.
+    unread_write_tokens: int | None = None
+    unread_write_cost: float | None = None
     schema_version: int = SCHEMA_VERSION
+
+
+# Causes that replaced the cached prefix (or let it expire): the previous turn's write is of no
+# further use. A retry, a routing miss or an eviction leave the entry as it was, so they are not
+# here: a later turn may still read it.
+_WRITE_REPLACED = frozenset({"volatile_system", "system_edit", "tool_reserialize", "tool_catalog_change",
+                             "history_edit", "tool_result_mutation", "compaction_rewrite", "ttl_expired",
+                             "param_rendered"})
+
+
+def unread_write(cause: str, cached_tokens: int, prev_write_5m: int, prev_write_1h: int,
+                 prev_cache_write: int) -> tuple[int, int, int]:
+    """(5-minute, 1-hour, single-rate) tokens the previous turn wrote that this turn, a miss
+    reading nothing that replaced the prefix, left unread; all zero when not applicable."""
+    if cause not in _WRITE_REPLACED or cached_tokens > 0:
+        return 0, 0, 0
+    if prev_write_5m or prev_write_1h:
+        return prev_write_5m, prev_write_1h, 0
+    return 0, 0, prev_cache_write
 
 
 def avoidable_tokens(prompt_tokens: int, cached_tokens: int, *,
@@ -82,7 +106,7 @@ def avoidable_tokens(prompt_tokens: int, cached_tokens: int, *,
 
 
 def avoidable_for_turn(legit: bool | None, prompt_tokens: int, cached_tokens: int,
-                       prev_prompt_tokens: int | None) -> int:
+                       prev_prompt_tokens: int | None, prev_held_tokens: int | None = None) -> int:
     """Avoidable tokens for one classified turn.
 
     Only waste counts (legit is False). Legitimate changes (model
@@ -93,11 +117,17 @@ def avoidable_for_turn(legit: bool | None, prompt_tokens: int, cached_tokens: in
     For waste, avoidable is the prior prefix that could have been
     reused but was not: min(prev, curr) prompt tokens minus cache_read.
     Tokens appended after the prior prefix are new content, never
-    avoidable.
+    avoidable. When what the previous turn left in the cache is known
+    (`prev_held_tokens`: what it read plus what it wrote, which on
+    Anthropic ends at its last breakpoint), no more than that could
+    have been reused: the uncached tail after the breakpoint is not
+    this turn's waste.
     """
     if legit is not False:
         return 0
     reusable = min(prev_prompt_tokens, prompt_tokens) if prev_prompt_tokens else prompt_tokens
+    if prev_held_tokens:
+        reusable = min(reusable, prev_held_tokens)
     return max(0, reusable - cached_tokens)
 
 
@@ -122,7 +152,8 @@ _MIGRATIONS = {"task_id": "TEXT", "request_id": "TEXT", "completion_tokens": "IN
                "evidence": "TEXT", "secondary_causes": "TEXT", "divergence_role": "TEXT",
                "divergence_index": "INTEGER", "schema_version": "INTEGER",
                "detail": "TEXT",  # schema 4
-               "cache_ttl_seconds": "REAL"}  # schema 5
+               "cache_ttl_seconds": "REAL",  # schema 5
+               "unread_write_tokens": "INTEGER", "unread_write_cost": "REAL"}  # schema 6
 
 _COLUMNS = [f.name for f in fields(LedgerEntry)]
 

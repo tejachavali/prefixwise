@@ -18,6 +18,7 @@ from pathlib import Path
 
 from .classifier import RequestSnapshot, classify, first_divergence
 from .fingerprint import BlockFingerprint, Fingerprinter
+from .pricing import breakdown
 from .proxy import (cache_ttl_seconds, completion_tokens_of, extract_blocks, has_cache_breakpoint,
                     normalize_usage)
 
@@ -56,15 +57,18 @@ class Explanation:
 
 def _snapshot(turn: Turn, provider: str, fp: Fingerprinter) -> RequestSnapshot:
     blocks = fp.fingerprint_blocks(extract_blocks(turn.body, provider))
+    written = 0
     if turn.usage is not None:
         prompt, cached = normalize_usage(provider, turn.usage)
+        parts = breakdown(provider, turn.usage)
+        written = parts.cache_write_5m + parts.cache_write_1h + parts.cache_write
         min_prefix = None
     else:
         # Offline: pretend the shared prefix was fully served, so only a
         # divergence in the request itself can explain a miss.
         prompt, cached, min_prefix = 1, 1, 0
     return RequestSnapshot(model=str(turn.body.get("model", "unknown")), provider=provider,
-                           blocks=blocks, prompt_tokens=prompt, cached_tokens=cached,
+                           blocks=blocks, prompt_tokens=prompt, cached_tokens=cached, cache_written=written,
                            gap_seconds=turn.gap_seconds, compaction_event=turn.compaction_event,
                            params={k: turn.body.get(k) for k in PARAM_KEYS if turn.body.get(k) is not None},
                            has_breakpoint=has_cache_breakpoint(turn.body),
