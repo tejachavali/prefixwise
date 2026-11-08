@@ -1,13 +1,14 @@
 name: Release
 
 # Publishes to PyPI, then creates the GitHub Release, when a version tag is pushed
-# (git tag v0.3.0 && git push origin v0.3.0).
+# (git tag v0.3.0 && git push origin v0.3.0). Only full versions: the moving `v0.9` tag that
+# `uses: tejachavali/prefixwise@v0.9` resolves (action.yml) is not a release.
 # Uses PyPI trusted publishing (OIDC): no API token is stored anywhere. One-time setup
 # on pypi.org is described in CONTRIBUTING.md ("Releasing").
 
 on:
   push:
-    tags: ["v*"]
+    tags: ["v[0-9]+.[0-9]+.[0-9]+"]
 
 jobs:
   build:
