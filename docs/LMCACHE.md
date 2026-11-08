@@ -1,7 +1,7 @@
 # Prefixwise for LMCache: what the offload tier saved, and what the agent broke
 
-LMCache keeps KV blocks that vLLM evicts from GPU memory in CPU memory (or storage) and loads
-them back on the next turn, so a session survives a flood that would otherwise cost it a full
+LMCache keeps a CPU-memory copy of the KV vLLM computes, so blocks later evicted from the GPU are
+loaded back on the next turn and a session survives a flood that would otherwise cost it a full
 prefill. vLLM reports the result as an ordinary cache hit. Prefixwise, in front of vLLM as a
 local proxy, answers the two questions that hit does not: when a turn *missed*, was it the
 cache or the agent's prompt? And when it *hit*, did the GPU serve it or did LMCache rescue it?
@@ -36,10 +36,12 @@ Point your client at `http://127.0.0.1:8080/v1` instead of vLLM, run your worklo
 - `--enable-prompt-tokens-details` is required: it puts `cached_tokens` in every response.
   Without it every request looks like a miss, and Prefixwise warns once.
 - The connector name is LMCache's current multi-process one (`LMCacheMPConnector`, verified in
-  LMCache's quickstart and vLLM's source, Nov 2026); LMCache dropped the in-process
-  `LMCacheConnectorV1` mode and its `LMCACHE_*` variables. If your deployment still uses the
-  older connector, only the `--kv-transfer-config` line differs; Prefixwise reads vLLM, not
-  LMCache.
+  LMCache's quickstart and vLLM's source, Nov 2026); the in-process `LMCacheConnectorV1` and
+  its `LMCACHE_*` variables moved out to the separate LMCache_inprocess repository. If your
+  deployment still uses that connector, only the `--kv-transfer-config` line differs; Prefixwise
+  reads vLLM, not LMCache. The tier's events come from the LMCache server's event log
+  (`--kv-event-log-size`, default 32,768) through vLLM's publisher; `--disable-observability` on
+  the server turns them off, and with them `host_restored`.
 - `--kv-events-config` and `--kv-events` are optional. Without them, Prefixwise still names
   every agent-side cause and counts LMCache's restores as hits; it just cannot tell a GPU hit
   from a restore, and evictions are *inferred*. LMCache's HTTP port is moved to 8090 in the
@@ -60,10 +62,10 @@ a prefix that is different each turn, so the session misses every time, the dash
 cold cache, and the KV tier gets the blame. Prefixwise decides these from the request's own
 block hashes, with or without events: `tool_reserialize` ("tool multiset of canonical hashes
 equal; sequence or raw bytes differ"), `volatile_system` ("system raw hash changed, masked hash
-equal"), `history_edit`, `tool_result_mutation`; each names the first block that differs and
+equal (dates/ids/numbers only)"), `history_edit`, `tool_result_mutation`; each names the first block that differs and
 its fix. No prompt text is stored or sent anywhere: the ledger holds hashes, positions and
 counts. `--fix canonical_tools` lets the proxy sort the tools itself (proven in the E4 replay:
-97.5% of the predicted saving realised on vLLM with task success flat), and `prefixwise check`
+97.5% of the predicted saving realised on vLLM, task success flat by the experiment's bar), and `prefixwise check`
 gates the same causes in CI.
 
 **2. A hit you cannot attribute.** vLLM's `cached_tokens` is one number: local GPU prefix hits
@@ -73,7 +75,7 @@ that reads it say "hit" for a prefix LMCache fetched from CPU memory after the G
 evicted, so you cannot see what LMCache is doing for you, or that the GPU cache is too small.
 With `--kv-events` Prefixwise sees both halves: vLLM publishes `BlockRemoved` on the GPU medium
 when it reclaims a block, and the offload connector publishes its own `BlockStored` on the CPU
-or storage medium. A hit whose blocks had been removed from the GPU, on a stream that has shown
+medium (LMCache main, Nov 2026; converted to vLLM's event types and sent in the same batches). A hit whose blocks had been removed from the GPU, on a stream that has shown
 the tier's own stores, is `none` with the detail **`host_restored`**: "restored from the host or
 offload tier: N of the previous request's KV blocks had been removed from GPU memory (KV
 events; the tier's own stores were seen), yet this request read X of Y prompt tokens from the
@@ -118,7 +120,9 @@ unrelated prompts; 5 repetitions each ([record](../experiments/e_evict/runs/2026
 That is the ROI line: the same flood, the same session, 0 of 5 turns reusable without LMCache
 and 5 of 5 with it, the restored share read straight from `cached_tokens`. The two LMCache runs
 predate `host_restored` (#64), so their hits were recorded as plain `none`; the fourth row is
-the configuration that now carries the detail, and re-running it is the next validation.
+the configuration that now carries the detail, and re-running it is the next validation (the
+tier's events were verified in LMCache's current source; whether 0.5.7 already publishes them
+is what the run will show).
 
 The classifier also scores **120/120** on injected causes on vLLM + LMCache
 (`experiments/e1_open`, 120 turns across ten cause types, two sessions growing turn by turn as
@@ -131,8 +135,8 @@ agent traffic does).
   what they would have cost.
 - A restore is claimed only after the tier's own stores have appeared on the stream; the first
   restore after Prefixwise starts, before any offload store was seen, is a plain `none`.
-- Storage tiers (disk, remote) publish on their own media and are treated like the CPU tier:
-  Prefixwise does not tell them apart.
+- Prefixwise treats any non-GPU medium as the offload tier and does not tell tiers apart; LMCache
+  itself publishes only a CPU medium today.
 - How often token-level divergence happens in real agent traffic has not been measured yet.
 
 Design, alternatives considered and failure modes: [ENGINES.md](ENGINES.md). Questions and bug

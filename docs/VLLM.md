@@ -91,7 +91,7 @@ tokens and flooded with 3x that ([record](../experiments/e_evict/runs/2026-11-07
 | vLLM | prefix lost, 0/5 hits | `evicted` 5/5 (inferred) |
 | vLLM + KV events | prefix lost, 0/5 hits | `evicted` 5/5, confirmed ("211 of the previous request's KV blocks removed") |
 | vLLM + LMCache | 98% restored, 5/5 hits | `none` 5/5 |
-| vLLM + LMCache + KV events | 98% restored, 5/5 hits | `none` 5/5; recorded before #64, so without the detail: with today's code the same hits carry `host_restored` (the next thing to run live) |
+| vLLM + LMCache + KV events | 98% restored, 5/5 hits | `none` 5/5; recorded before #64, so without the detail: with today's code the same hits carry `host_restored` once LMCache's tier events reach the stream (verified in LMCache's current source; the next thing to run live) |
 | SGLang | prefix lost, 0/5 hits | `evicted` 5/5 (inferred) |
 | SGLang + KV events | prefix lost, 0/5 hits | `evicted` 5/5, confirmed ("3,382 of the previous request's KV blocks removed"; [record](../experiments/e_evict/runs/2026-11-07-colab-l4-sglang-events.md)) |
 | SGLang + HiCache | 99% restored, 5/5 hits | `none` 5/5; made without KV events; with them, `host_restored` (not yet run) |

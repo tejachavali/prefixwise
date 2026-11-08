@@ -96,7 +96,7 @@ request alone, so they hold with or without events, and each comes with its fix
 (`prefixwise report --detail`, `prefixwise fixes`). For `tool_reserialize`, `prefixwise serve
 --fix canonical_tools` sorts tools by name with deterministic serialization before forwarding,
 so SGLang sees the same bytes every turn; it is **proven**: in the E4 replay the realised saving
-was 97.5% of the prediction on vLLM (Qwen3-4B) with task success flat
+was 97.5% of the prediction on vLLM (Qwen3-4B), task success flat by the experiment's bar
 (`experiments/e4/runs/2026-11-06-live.md`). For `volatile_system`, the fix is to move the date
 or id to the end of the prompt; `prefixwise check` (the CI gate) catches both before they
 ship.
@@ -120,7 +120,7 @@ Colab L4, Qwen3-4B, SGLang 0.5.23 (sglang-kernel 0.4.10), GPU KV pool capped at 
 | SGLang + KV events, `--full-attention` | prefix lost, 0/5 hits | `evicted` 5/5, **confirmed** ("3,382 of the previous request's KV blocks removed"; 3,411, 3,376, 3,414, 3,379 on the other repetitions). 280 batches, 453,787 blocks stored, 423,501 removed, 0 dropped messages, 0 overflows |
 | SGLang + HiCache (`--hicache-ratio 4`) | **99% restored, 5/5 hits** (3,382 of 3,404 tokens cached) | `none` 5/5 |
 
-Blocks are one token at SGLang's default page size, so "blocks removed" counts tokens: about the
+Blocks are one token at page size 1, SGLang's default for dense models, so "blocks removed" counts tokens: about the
 previous request's whole chain, prompt plus output. The HiCache run predates `host_restored`
 (#64) and was made without KV events, so its hits were recorded as plain `none`; with
 `--kv-events` the same run is the one that would show `host_restored`, and it is the next thing
@@ -141,8 +141,9 @@ restart, concurrency, lost messages, overflow, and the `/server_info` checks.
 - A removal is counted from the previous request until the response: a token change and an
   eviction of exactly that block within one request's lifetime reads as a confirmed eviction
   (shared with vLLM; see [ENGINES.md](ENGINES.md)).
-- Past 2 million tracked tokens Prefixwise forgets its copy of the tree and judges nothing
-  until it rebuilds; chains kept for sessions are capped at 16 million tokens.
+- Past 2 million tracked tokens (or 1.25x the GPU cache capacity, if larger) Prefixwise forgets
+  its copy of the tree and judges nothing until it rebuilds; chains kept for sessions are capped
+  at 16 million tokens.
 - Several ranks, HiCache with KV events (`host_restored`): tested over the wire, not yet run
   live.
 
