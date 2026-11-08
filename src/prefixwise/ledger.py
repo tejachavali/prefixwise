@@ -174,6 +174,8 @@ class Ledger:
                 os.close(os.open(path, os.O_CREAT | os.O_WRONLY, 0o600))
         # timeout: the CLI and a running proxy may share one ledger file.
         self.path = path
+        self.sinks: list = []  # copies of every row (prefixwise.sinks); never on the write's critical path
+        self._sink_warned: set = set()
         self.conn = sqlite3.connect(path, check_same_thread=False, timeout=10)
         with self._lock:
             if path != ":memory:":
@@ -207,17 +209,41 @@ class Ledger:
             )
             self.conn.commit()
 
+    def add_sink(self, sink) -> None:
+        """A LedgerSink (record(entry, at), close(timeout)) that gets a copy of every row once it is
+        committed here. A sink that raises is reported once and skipped; the ledger is unaffected."""
+        self.sinks.append(sink)
+
+    def close_sinks(self, timeout: float = 5.0) -> None:
+        for sink in self.sinks:
+            try:
+                sink.close(timeout)
+            except Exception:  # noqa: BLE001
+                pass
+
     def record(self, entry: LedgerEntry, at: float | None = None) -> int:
         """Store one row. `at` is when it happened (default now); imports pass the log's time."""
         values = [int(v) if isinstance(v, bool) else v for v in astuple(entry)]
+        at = time.time() if at is None else at
         with self._lock:
             cur = self.conn.execute(
                 f"INSERT INTO entries ({', '.join(_COLUMNS)}, recorded_at) "
-                f"VALUES ({', '.join('?' * (len(_COLUMNS) + 1))})", (*values, time.time() if at is None else at))
+                f"VALUES ({', '.join('?' * (len(_COLUMNS) + 1))})", (*values, at))
             if entry.task_id and entry.task_success is not None:
                 self._set_task_outcome_locked(entry.task_id, entry.task_success)
             self.conn.commit()
-            return cur.lastrowid
+            rowid = cur.lastrowid
+        for sink in self.sinks:  # after the commit, outside the lock
+            try:
+                sink.record(entry, at)
+            except Exception as exc:  # noqa: BLE001 - a warehouse must never cost a row here
+                key = getattr(sink, "name", type(sink).__name__)
+                if key not in self._sink_warned:
+                    self._sink_warned.add(key)
+                    import sys
+                    print(f"prefixwise: sink {key} failed ({type(exc).__name__}: {exc}); the ledger is unaffected",
+                          file=sys.stderr, flush=True)
+        return rowid
 
     def prune(self, older_than_seconds: float, undated: bool = False) -> int:
         """Delete entries recorded more than older_than_seconds ago (and, with
@@ -284,6 +310,12 @@ class Ledger:
             finally:
                 conn.close()
         return _cm()
+
+    def recent_request_ids(self, limit: int = 200_000) -> list[str]:
+        """The newest request ids, for a collector's idempotency set after a restart."""
+        with self._lock:
+            return [r[0] for r in self.conn.execute(
+                "SELECT request_id FROM entries WHERE request_id IS NOT NULL ORDER BY id DESC LIMIT ?", (limit,))]
 
     def request_ids(self) -> set[str]:
         """Every request id in the ledger (imports skip what is already there)."""

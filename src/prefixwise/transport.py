@@ -12,6 +12,10 @@ full, or a batch has failed its last attempt, records are dropped and counted (`
 held: the request path pays nothing for a slow collector. A batch the collector rejects (401, 400)
 is dropped and counted too; the first such error is printed once.
 
+The wire is a backend: `HttpBackend` (the collector's `POST /api/v1/ingest`) or `prefixwise.log.RedisBackend`
+(a session-partitioned Redis Stream that several collectors consume in order). `Sender` is the same
+either way.
+
 `RemoteCollector` is what the edge's proxy talks to in place of `prefixwise.collector.Collector`:
 same methods, but `ingest` queues the record and answers without a verdict (the verdict is made at
 the collector, so the response carries `X-Prefixwise-Queued` instead of `X-Prefixwise-Cause`), and
@@ -45,12 +49,60 @@ TIMEOUT_SECONDS = 10.0
 _RETRY_STATUSES = (408, 429, 500, 502, 503, 504)
 
 
-class Sender:
-    def __init__(self, url: str, token: str | None = None, *, queue_size: int = QUEUE_SIZE,
-                 batch_size: int = BATCH_SIZE, flush_seconds: float = FLUSH_SECONDS,
-                 max_attempts: int = MAX_ATTEMPTS, timeout: float = TIMEOUT_SECONDS):
+class Retry(Exception):
+    """A delivery that may succeed later (the collector is down, a 5xx, a timeout)."""
+
+
+class Reject(Exception):
+    """A delivery that will never succeed (401, 400, a redirect): the batch is dropped."""
+
+
+class HttpBackend:
+    """Batches to a collector's POST /api/v1/ingest."""
+
+    def __init__(self, url: str, token: str | None = None, timeout: float = TIMEOUT_SECONDS):
         self.url = url.rstrip("/")
         self.token = token
+        self.timeout = timeout
+        self._opener = urllib.request.build_opener(_NoRedirect())  # a redirect would turn the POST into a GET
+
+    @property
+    def name(self) -> str:
+        return self.url
+
+    def deliver(self, batch: list[dict]) -> dict:
+        """The collector's reply ({accepted, duplicates, rejected}), read as far as it can be: any
+        2xx is delivered. Raises Retry or Reject."""
+        data = json.dumps({"records": batch}).encode()
+        headers = {"Content-Type": "application/json", "User-Agent": "prefixwise-edge"}
+        if self.token:
+            headers["X-Prefixwise-Token"] = self.token
+        try:
+            req = urllib.request.Request(self.url + INGEST_PATH, data=data, headers=headers, method="POST")
+            with self._opener.open(req, timeout=self.timeout) as r:
+                raw = r.read()
+        except urllib.error.HTTPError as exc:
+            if 300 <= exc.code < 400:
+                raise Reject(f"HTTP {exc.code} redirect from {self.url}{INGEST_PATH} to {exc.headers.get('Location')}: "
+                             "point PREFIXWISE_COLLECTOR at the final URL") from None
+            if exc.code not in _RETRY_STATUSES:  # our fault (401, 400, 413): retrying cannot help
+                raise Reject(f"HTTP {exc.code} from {self.url}{INGEST_PATH}") from None
+            raise Retry(f"HTTP {exc.code}") from None
+        except Exception as exc:  # noqa: BLE001 - URLError, socket errors, IncompleteRead, BadStatusLine, ...
+            raise Retry(f"{type(exc).__name__}: {getattr(exc, 'reason', exc)}") from None
+        try:
+            reply = json.loads(raw or b"{}")
+        except ValueError:
+            reply = {}
+        return reply if isinstance(reply, dict) else {}
+
+
+class Sender:
+    def __init__(self, backend, token: str | None = None, *, queue_size: int = QUEUE_SIZE,
+                 batch_size: int = BATCH_SIZE, flush_seconds: float = FLUSH_SECONDS,
+                 max_attempts: int = MAX_ATTEMPTS, timeout: float = TIMEOUT_SECONDS):
+        """backend: an HttpBackend, a prefixwise.log.RedisBackend, or a collector URL (http) as a string."""
+        self.backend = HttpBackend(backend, token, timeout) if isinstance(backend, str) else backend
         self.batch_size, self.flush_seconds = max(1, batch_size), flush_seconds
         self.max_attempts, self.timeout = max(1, max_attempts), timeout
         self._queue: queue.Queue = queue.Queue(maxsize=queue_size)
@@ -62,9 +114,12 @@ class Sender:
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._warned: set[str] = set()  # each kind of trouble is printed once
-        self._opener = urllib.request.build_opener(_NoRedirect())  # a redirect would turn the POST into a GET
         self._thread = threading.Thread(target=self._run, name="prefixwise-sender", daemon=True)
         self._thread.start()
+
+    @property
+    def url(self) -> str:
+        return self.backend.name
 
     # -- the edge's side -------------------------------------------------------------------
 
@@ -88,7 +143,7 @@ class Sender:
 
     def stats(self) -> dict:
         with self._lock:
-            return {**self._stats, "pending": self._queue.qsize(), "url": self.url}
+            return {**self._stats, "pending": self._queue.qsize(), "url": self.backend.name}
 
     def close(self, timeout: float = 5.0) -> None:
         """Send what is queued (up to `timeout` seconds), then stop. What could not be sent in
@@ -151,22 +206,18 @@ class Sender:
         return batch
 
     def _post(self, batch: list[dict]) -> None:
-        data = json.dumps({"records": batch}).encode()
-        headers = {"Content-Type": "application/json", "User-Agent": "prefixwise-edge"}
-        if self.token:
-            headers["X-Prefixwise-Token"] = self.token
         error = "no attempt made"
         for attempt in range(self.max_attempts):
             try:
-                req = urllib.request.Request(self.url + INGEST_PATH, data=data, headers=headers, method="POST")
-                with self._opener.open(req, timeout=self.timeout) as r:
-                    raw = r.read()
-                # Any 2xx is delivered; the reply's counts are read as far as they can be.
-                try:
-                    reply = json.loads(raw or b"{}")
-                except ValueError:
-                    reply = {}
-                reply = reply if isinstance(reply, dict) else {}
+                reply = self.backend.deliver(batch)
+            except Reject as exc:
+                self._drop(batch, str(exc))
+                return
+            except Retry as exc:
+                error = str(exc)
+            except Exception as exc:  # noqa: BLE001 - a backend bug is a retryable failure, never a dead thread
+                error = f"{type(exc).__name__}: {exc}"
+            else:
                 rejected = reply.get("rejected") if isinstance(reply.get("rejected"), list) else []
                 with self._lock:
                     self._in_flight = 0
@@ -179,17 +230,6 @@ class Sender:
                     first = rejected[0].get("error") if isinstance(rejected[0], dict) else rejected[0]
                     self._warn("rejected", f"the collector rejected {len(rejected)} record(s): {first}")
                 return
-            except urllib.error.HTTPError as exc:
-                if 300 <= exc.code < 400:
-                    self._drop(batch, f"HTTP {exc.code} redirect from {self.url}{INGEST_PATH} to "
-                                      f"{exc.headers.get('Location')}: point PREFIXWISE_COLLECTOR at the final URL")
-                    return
-                if exc.code not in _RETRY_STATUSES:  # our fault (401, 400, 413): retrying cannot help
-                    self._drop(batch, f"HTTP {exc.code} from {self.url}{INGEST_PATH}")
-                    return
-                error = f"HTTP {exc.code}"
-            except Exception as exc:  # noqa: BLE001 - URLError, socket errors, IncompleteRead, BadStatusLine, ...
-                error = f"{type(exc).__name__}: {getattr(exc, 'reason', exc)}"
             with self._lock:
                 self._stats["retries"] += 1
                 self._stats["last_error"] = error

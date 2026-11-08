@@ -18,7 +18,7 @@ The rule throughout: a guess is worse than no answer.
 | 2.1 | Dual hash and chunk sketch | Three hashes per block already (`fingerprint.py`): `raw`, `canonical`, `masked`. Equal masked hashes with different raw hashes prove `volatile_system` without text. Chunk sketches: design below, not built. |
 | 2.2 | Write surcharge, long-context tiers, 5m vs 1h | **Partly missing; fixed.** Request cost already had both write rates and `long_prompt` tiers (`pricing.py`). Avoidable cost used the input rate; it now uses the rate actually paid (the write rate on a rewrite). New: `ttl_advice` (`findings.py`). `unamortized_write_waste` is not added: see below. |
 | 2.3 | `include_usage`, Anthropic usage merge, cancelled streams | **Already built.** The proxy adds `stream_options.include_usage` and strips the extra usage chunk if the client did not ask for it. `StreamAccumulator` merges `message_start` and `message_delta`. A client hang-up records status 499 / `client_disconnected` with no verdict and leaves session history untouched. |
-| 2.4 | `SessionStateStore` (Redis), `LedgerSink` (ClickHouse...) | **Redesigned and partly built** (section 2.4): an edge that emits turn records and a collector that owns state and the ledger; the transport between them is next. |
+| 2.4 | `SessionStateStore` (Redis), `LedgerSink` (ClickHouse...) | **Redesigned and built** (section 2.4): edges emit turn records; collectors own state and the ledger; HTTP or a session-partitioned Redis Stream between them; JSONL and ClickHouse sinks. |
 | 2.5 | KV-event watermark | **Already built.** See below. |
 | 3 | Flowchart items | **Already done** in 0.7.0 (#52): the import route, the arrowhead, the gap, the label mask, hero fills, slate decisions, blue verdicts, emerald hit, `unknown` in the verdict column. `tests/test_figures.py` checks the drawings against the classifier's rule order, so the 1.2 change needed no change to the drawing: its first decision already reads "too short to cache?". |
 | 4 | `check` and `--optimize` specs | **Exist** (not built): [check-and-optimize.md](check-and-optimize.md). The spec's cost projection now specifies the rate paid. |
@@ -126,12 +126,31 @@ instead of ingesting them:
 - the engine join (vLLM/SGLang KV events) stays with the edge that fronts the engine; its verdict
   travels in the record.
 
-**Several collectors (later).** Partition records by session id on a log (Kafka, Redis Streams,
-NATS): each consumer owns its sessions, so ordering per conversation is guaranteed without the
-edge's FIFO assumption, and a consumer rebuilds its lanes from the log after a restart or a
-deploy, so no `first_write` burst. The `Collector` class is already the consumer; what is added
-is the partitioned source and a `LedgerSink` for ClickHouse or Postgres where one SQLite file is
-not enough (`ledger.py` stays the built-in sink).
+**Several collectors (built: `prefixwise.log`, `prefixwise collect --log`).** Records go on a
+Redis Stream partitioned by session id (`crc32(session_id) % PREFIXWISE_LOG_PARTITIONS`, 16 by
+default, the same on every edge and collector). Each collector owns a set of partitions
+(`--partitions 0-7`) and reads each in order through a consumer group, so:
+- a conversation's turns are compared in sequence whatever edge they came through, and no two
+  collectors ever see one session: the ordering and clock caveats of the HTTP transport are gone
+  (the record's own `sent_at`/`done_at` still drive the gap and the concurrent rule);
+- a record is acknowledged only after its ledger row is written (at-least-once); a redelivery is a
+  duplicate by request id, and the duplicate set is seeded from the ledger at start, so a restart
+  mid-batch writes no row twice;
+- at start a collector replays its partitions' retained records into its conversation state (no
+  rows, no metrics), so the first turn after a deploy is compared with its real predecessor;
+- a record a dead collector took and never acknowledged is claimed by a live one after a minute;
+- the stream is capped per partition (`PREFIXWISE_LOG_MAXLEN`, 1,000,000 records); records that
+  fall off before a collector read them are lost, visibly a capacity decision.
+Tested here against a real Redis (`tests/test_log.py`): two collectors split sessions and together
+produce exactly one proxy's rows; a restarted collector finds its state and adds no duplicate;
+a dead consumer's record is processed once; an unwritable ledger leaves records unacknowledged
+until it works again. Kafka would fit the same consumer with a partitioner; it is not built.
+
+**Ledger sinks (built: `prefixwise.sinks`).** The SQLite ledger stays what `prefixwise report`
+reads; `--sink` sends a copy of every committed row to a JSONL file or to ClickHouse (HTTP,
+`INSERT ... FORMAT JSONEachRow`, batched on the bounded sender). A sink never sits on the ledger's
+write path: a failing one is reported once and skipped. Postgres is a `LedgerSink` with two
+methods that an operator can add with their driver; it is not built in.
 
 **Engine join.** The KV-event subscription stays on the collector side conceptually, but the
 request-time half (`request_sent` freezes the previous chain before the request goes out) needs

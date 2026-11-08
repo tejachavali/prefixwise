@@ -460,10 +460,16 @@ class PrefixwiseProxy:
         if url:
             from .transport import RemoteCollector, Sender
             token = collector_token if collector_token is not None else os.environ.get("PREFIXWISE_COLLECTOR_TOKEN")
-            self.collector = RemoteCollector(Sender(url, token or None), PriceTable.load(prices))
+            if url.startswith(("redis://", "rediss://", "unix://")):  # the record log (prefixwise.log)
+                from .log import RedisBackend
+                backend = RedisBackend(url)
+            else:
+                backend = url  # an HTTP collector: the Sender builds the backend
+            self.collector = RemoteCollector(Sender(backend, token or None), PriceTable.load(prices))
         else:
             self.collector = Collector(Ledger(ledger_path), PriceTable.load(prices))
         self.collect_only = False  # `prefixwise collect`: a collector with no upstream (serves /api/v1/ingest)
+        self.log_consumer = None  # `prefixwise collect --log`: reads the record log into this collector
         self.spans = _spans(otel if otel is not None else os.environ.get("PREFIXWISE_OTEL"))
         # Self-hosted engine behind the proxy (vllm, sglang), and its KV-event
         # stream for the engine join (prefixwise.engines).
@@ -528,9 +534,14 @@ class PrefixwiseProxy:
         self._recording: dict[tuple, threading.Event] = {}  # streams ended for the client, not yet recorded
 
     def close(self, timeout: float = 5.0) -> None:
-        """Flush records still on their way to a remote collector; stop the KV-event reader."""
+        """Flush records still on their way to a remote collector; stop the log consumer and the
+        KV-event reader."""
+        if self.log_consumer is not None:
+            self.log_consumer.stop(timeout)
         if getattr(self.collector, "remote", False):
             self.collector.close(timeout)
+        elif self.ledger is not None:
+            self.ledger.close_sinks(timeout)
         if self.engine_events is not None:
             self.engine_events.stop()
 
@@ -1405,7 +1416,14 @@ def _transport_gauges(proxy) -> dict[str, tuple[str, float]]:
                 "prefixwise_records_rejected_total": ("Records the collector refused as malformed.", s["rejected"]),
                 "prefixwise_records_pending": ("Records waiting to be sent.", s["pending"])}
     s = proxy.collector.stats
-    return {"prefixwise_ingest_records_total": ("Records classified.", s["records"]),
+    log = proxy.log_consumer.snapshot() if proxy.log_consumer is not None else None
+    extra = {} if log is None else {
+        "prefixwise_log_records_consumed_total": ("Records read from the record log.", log["consumed"]),
+        "prefixwise_log_records_acked_total": ("Records acknowledged after their row was written.", log["acked"]),
+        "prefixwise_log_records_claimed_total": ("Records taken over from a consumer that died.", log["claimed"]),
+        "prefixwise_log_records_replayed_total": ("Records replayed at start to rebuild state.", log["replayed"]),
+        "prefixwise_log_errors_total": ("Log read errors.", log["errors"])}
+    return {**extra, "prefixwise_ingest_records_total": ("Records classified.", s["records"]),
             "prefixwise_ingest_failures_total": ("Failure records (no verdict).", s["failures"]),
             "prefixwise_ingest_duplicates_total": ("Records seen twice (retried batches), skipped.", s["duplicates"]),
             "prefixwise_ingest_rejected_total": ("Records refused as malformed.", s["rejected"]),
@@ -1491,6 +1509,8 @@ def make_handler(proxy: PrefixwiseProxy):
                                            if k not in ("url", "last_error")}
                 else:
                     health["ingest"] = dict(proxy.collector.stats)
+                    if proxy.log_consumer is not None:
+                        health["log"] = {k: v for k, v in proxy.log_consumer.snapshot().items() if k != "last_error"}
                 return self._json(200, health)
             if path == "/metrics":
                 if not self._authorized(bearer=True):
@@ -1725,10 +1745,12 @@ def serve(host: str = "127.0.0.1", port: int = 8080, *, ledger_path: str | None 
           allow_unauthenticated: bool = False, prices: str | None = None,
           engine: str | None = None, kv_events: str | None = None, full_attention: bool | None = None,
           otel: bool | str | None = None, collector_url: str | None = None, collect_only: bool = False,
-          ready=None):
+          ready=None, log_url: str | None = None, log_partitions: str | None = None,
+          sinks: list[str] | None = None):
     """Run the proxy until interrupted. Settings fall back to PREFIXWISE_* env vars.
-    collect_only: `prefixwise collect`, a collector with no upstream. ready: called with the bound
-    port once the server listens (tests)."""
+    collect_only: `prefixwise collect`, a collector with no upstream; with log_url it also reads the
+    record log's partitions (log_partitions: '0-7'; default all). ready: called with the bound port
+    once the server listens (tests). sinks: URLs (prefixwise.sinks) that receive a copy of every row."""
     hmac_key = os.environ.get("PREFIXWISE_HMAC_KEY")
     ledger_path = ledger_path or os.environ.get("PREFIXWISE_LEDGER_PATH", ":memory:")
     proxy = PrefixwiseProxy(ledger_path=ledger_path, upstream_url=upstream_url, mock=mock or collect_only,
@@ -1736,6 +1758,16 @@ def serve(host: str = "127.0.0.1", port: int = 8080, *, ledger_path: str | None 
                             prices=prices, engine=engine, kv_events=kv_events, full_attention=full_attention,
                             otel=otel, collector_url="" if collect_only else collector_url)
     proxy.collect_only = collect_only
+    log_url = log_url if log_url is not None else (os.environ.get("PREFIXWISE_LOG") if collect_only else None)
+    if log_url:
+        from .log import LogConsumer, parse_partitions
+        proxy.log_consumer = LogConsumer(proxy.collector, log_url, parse_partitions(log_partitions))
+    for sink_url in sinks or (os.environ.get("PREFIXWISE_SINKS") or "").split(","):
+        if sink_url.strip():
+            if getattr(proxy.collector, "remote", False):
+                raise ValueError("--sink needs a ledger here: an edge has none (give the sink to the collector)")
+            from .sinks import sink_from_url
+            proxy.ledger.add_sink(sink_from_url(sink_url.strip()))
     otel_where = None
     if proxy.spans is not None:  # Prefixwise is the application here: it sets up the exporter
         from .otel import install_provider
@@ -1760,11 +1792,19 @@ def serve(host: str = "127.0.0.1", port: int = 8080, *, ledger_path: str | None 
     if not quiet and collect_only:
         print(f"Prefixwise collector on http://{host}:{server.server_address[1]}")
         print(f"  ledger:   {ledger_path}")
+        for sink in proxy.ledger.sinks:
+            print(f"  sink:     {sink.name}")
         print(f"  prices:   {len(proxy.prices.models)} models, table of {proxy.prices.as_of}")
         print(f"  auth:     {'X-Prefixwise-Token required' if proxy.auth_token else 'none'}"
               + ("  (WARNING: listening beyond localhost without a token)" if exposed and not proxy.auth_token else ""))
-        print("  edges:    PREFIXWISE_COLLECTOR=http://<this host>:<port> prefixwise serve ... "
-              "(PREFIXWISE_COLLECTOR_TOKEN for the token)")
+        if proxy.log_consumer is not None:
+            lc = proxy.log_consumer
+            print(f"  log:      {lc.name}, partitions {lc.partitions[0]}-{lc.partitions[-1]} of "
+                  f"{len(lc.partitions)} (group {lc.group}, consumer {lc.consumer})")
+            print(f"  edges:    PREFIXWISE_COLLECTOR={lc.name} prefixwise serve ... (or any edge: wrap, LiteLLM)")
+        else:
+            print("  edges:    PREFIXWISE_COLLECTOR=http://<this host>:<port> prefixwise serve ... "
+                  "(PREFIXWISE_COLLECTOR_TOKEN for the token)")
         print("  POST /api/v1/ingest   GET /api/v1/*  GET /metrics  GET /health", flush=True)
     elif not quiet:
         target = "MOCK upstream (synthetic usage, no API calls)" if proxy.mock else proxy.upstream_url
@@ -1814,6 +1854,8 @@ def serve(host: str = "127.0.0.1", port: int = 8080, *, ledger_path: str | None 
         signal.signal(signal.SIGTERM, _stop)
     except ValueError:  # not the main thread (embedded use)
         pass
+    if proxy.log_consumer is not None:
+        proxy.log_consumer.start()  # replays its partitions, then reads them
     try:
         server.serve_forever()
     except KeyboardInterrupt:

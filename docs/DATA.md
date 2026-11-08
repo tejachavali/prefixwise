@@ -104,3 +104,30 @@ An independent review of the first version found the task metrics defined twice 
 report, the API and `/ledger` could disagree), percentiles that loaded every value under the
 writer's lock, silently partial sums, and a response without usage counted two ways. All are
 fixed above, each with a test that replays the case.
+
+## Sinks (copies of the ledger)
+
+`prefixwise collect --sink URL` (or `serve --sink`, or `PREFIXWISE_SINKS`) sends every committed row to a
+sink as well: `file:///path/rows.jsonl` (one JSON object per line) or
+`clickhouse://user:password@host:8123/db.table` (`clickhouses://` for TLS). The SQLite ledger stays the
+store the report and the API read; a sink never delays a row and a failing sink is reported once. Rows
+hold what the ledger holds, plus `recorded_at` (unix seconds). The ClickHouse table, created by you:
+
+```sql
+CREATE TABLE prefixwise.entries (
+    session_id String, agent_id String, provider String, model String, cause Nullable(String),
+    prompt_tokens Int64, cached_tokens Int64, avoidable_tokens Int64, avoidable_cost Nullable(Float64),
+    task_success Nullable(UInt8), legit Nullable(UInt8), native_reason Nullable(String),
+    classifier_version String, task_id Nullable(String), request_id Nullable(String),
+    completion_tokens Int64, fixes Nullable(String), cost Nullable(Float64), price_as_of Nullable(String),
+    status Int64, error Nullable(String), api Nullable(String), stream Nullable(UInt8),
+    uncached_tokens Nullable(Int64), cache_write_tokens Nullable(Int64), latency_ms Nullable(Float64),
+    overhead_ms Nullable(Float64), gap_seconds Nullable(Float64), evidence Nullable(String),
+    secondary_causes Nullable(String), divergence_role Nullable(String), divergence_index Nullable(Int64),
+    detail Nullable(String), cache_ttl_seconds Nullable(Float64), unread_write_tokens Nullable(Int64),
+    unread_write_cost Nullable(Float64), schema_version Int64, recorded_at Float64
+) ENGINE = MergeTree ORDER BY (model, recorded_at);
+```
+
+`cause` is null on a failure row (`status` >= 400 or `error` set). A sink receives rows from the moment
+it is configured; earlier rows are in the ledger (`prefixwise export`).

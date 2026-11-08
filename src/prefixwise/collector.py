@@ -148,12 +148,25 @@ class Collector:
             self.stats["records"] += 1
             return self._ingest_locked(rec)
 
-    def ingest_many(self, items: list) -> dict:
-        """A batch from an edge over the wire (POST /api/v1/ingest). Each item is a record's
-        dict form; malformed ones are reported back by index and skipped, a request id already
-        ingested is a duplicate (a retried batch) and skipped, and a record the collector itself
-        fails on becomes a failure row (`not_recorded`) rather than a lost request. Never raises
-        on bad input; raises on a broken ledger."""
+    def seed_seen(self, request_ids) -> None:
+        """Request ids already in the ledger (after a restart): their redelivery is a duplicate."""
+        with self._lock:
+            for rid in request_ids:
+                if rid:
+                    self._seen[rid] = None
+            while len(self._seen) > SEEN_REQUESTS:
+                self._seen.popitem(last=False)
+
+    def ingest_many(self, items: list, replay: bool = False) -> dict:
+        """A batch from an edge over the wire (POST /api/v1/ingest, or the record log). Each item
+        is a record's dict form; malformed ones are reported back by index and skipped, a request
+        id already ingested is a duplicate (a retried batch) and skipped, and a record the
+        collector itself fails on becomes a failure row (`not_recorded`) rather than a lost
+        request. Never raises on bad input; raises on a broken ledger.
+
+        replay: records this collector (or its predecessor) already turned into rows, read again
+        after a restart to rebuild the conversation state: no row, no metric, no agreement score,
+        and a duplicate check that only seeds the set."""
         if not isinstance(items, list):
             raise RecordError("records must be a list")
         if len(items) > MAX_BATCH:
@@ -166,12 +179,18 @@ class Collector:
                 rejected.append({"index": i, "error": str(exc)})
                 continue
             with self._lock:
-                if rec.request_id in self._seen:
+                if rec.request_id in self._seen and not replay:
                     duplicates += 1
                     continue
                 self._seen[rec.request_id] = None
                 while len(self._seen) > SEEN_REQUESTS:
                     self._seen.popitem(last=False)
+            if replay:
+                if not rec.failed:
+                    with self._lock:
+                        self._ingest_locked(rec, write=False)
+                accepted += 1
+                continue
             try:
                 if rec.failed:
                     self.ingest_failure(rec)
@@ -225,7 +244,7 @@ class Collector:
         old_msgs = [b for b in prior.blocks if b.role in ("messages", "tool_results")]
         return head + old_msgs + new_msgs, prior
 
-    def _ingest_locked(self, rec: TurnRecord) -> tuple[dict, LedgerEntry]:
+    def _ingest_locked(self, rec: TurnRecord, write: bool = True) -> tuple[dict, LedgerEntry]:
         provider, session_id, usage = rec.provider, rec.session_id, rec.usage
         prompt_tokens, cached = normalize_usage(provider, usage)
         native_reason, response_id, fps = rec.native_reason, rec.response_id, list(rec.blocks)
@@ -317,7 +336,7 @@ class Collector:
         elif why:
             result.evidence = f"{result.evidence}; {why}"
         self.session_facts[session_id] = facts
-        if result.score:  # a verdict overriding the compared pair is not an (dis)agreement
+        if result.score and write:  # a verdict overriding the compared pair is not an (dis)agreement
             self.scorer.record(result.cause, native_reason, provider)
         self.last_snapshot[session_id] = curr
         if state is None:
@@ -375,8 +394,9 @@ class Collector:
                 entry.unread_write_cost = self.prices.write_surcharge(priced_model, prev.prompt_tokens, w5, w1, cw)
         if entry.cost is not None:
             entry.price_as_of = self.prices.as_of
-        self.ledger.record(entry)
-        self.metrics.observe(entry)
+        if write:  # a replay after a restart rebuilds the state above; the row already exists
+            self.ledger.record(entry)
+            self.metrics.observe(entry)
         return {"request_id": rec.request_id, "status": rec.status, "cause": result.cause.value,
                 "legit": result.legit, "native_reason": native_reason, "usage": usage,
                 "prompt_tokens": prompt_tokens, "cached_tokens": cached,
