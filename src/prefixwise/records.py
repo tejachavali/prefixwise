@@ -9,12 +9,16 @@ machines the same record travels over the wire (`prefixwise.transport`).
 
 A record never holds prompt text: blocks are hashes (`prefixwise.fingerprint`), the facts are
 hashes, positions and counts (`prefixwise.details`), the usage is the provider's token counts.
-`TurnRecord.to_dict()` / `from_dict()` are its wire form; `RECORD_VERSION` changes when a
-field's meaning does, and a collector refuses a version it does not know rather than guess.
+Request parameters that affect the prompt are carried as digests of their values (`param_fingerprint`),
+and so is `prompt_cache_key`: only equality is ever asked of them. `TurnRecord.to_dict()` /
+`from_dict()` are its wire form; `RECORD_VERSION` changes when a field's meaning does, and a
+collector refuses a version it does not know rather than guess.
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import asdict, dataclass, field, fields
 
 from .details import Facts
@@ -29,6 +33,14 @@ PARAM_KEYS = ("tool_choice", "thinking", "reasoning", "output_format",
               # (cache_salt is in them)
               "extra_key",
               "text_format", "text", "verbosity")
+
+
+def param_fingerprint(value) -> str:
+    """A request parameter's value, as a record carries it: a digest of its canonical JSON. The
+    classifier and the sub-reasons only ask whether a value changed, and a value can hold text
+    (a tool name in tool_choice, a schema in text.format), so the value itself never leaves."""
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
+                          .encode()).hexdigest()[:32]
 
 
 class RecordError(ValueError):
@@ -81,10 +93,7 @@ class TurnRecord:
     # -- wire form -------------------------------------------------------------------------
 
     def to_dict(self) -> dict:
-        d = asdict(self)
-        d["blocks"] = [asdict(b) for b in self.blocks]
-        d["facts"] = asdict(self.facts)
-        return d
+        return asdict(self)  # deep copies: nested lists are not shared with the record
 
     @classmethod
     def from_dict(cls, d: dict) -> "TurnRecord":

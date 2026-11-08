@@ -71,7 +71,7 @@ from .pricing import PriceTable, breakdown, completion_tokens_of, normalize_usag
 from .ledger import Ledger, LedgerEntry
 from .collector import (Collector, LANE_THREADS, MAX_SESSIONS, _CONVERSATION, _Lane,  # noqa: F401 (re-exported)
                         _SessionMap, _best_parent, _identity)
-from .records import PARAM_KEYS, TurnRecord
+from .records import PARAM_KEYS, TurnRecord, param_fingerprint
 
 
 def extract_blocks(body: dict, provider: str) -> list[tuple[str, object]]:
@@ -517,7 +517,6 @@ class PrefixwiseProxy:
         self._lock = threading.Lock()  # edge state: requests in flight, recordings pending
         self._upstream = threading.local()  # last upstream response headers, per thread
         self._recording: dict[tuple, threading.Event] = {}  # streams ended for the client, not yet recorded
-        self._recording: dict[str, threading.Event] = {}
 
     # The collector's state and services, as the proxy's own names (the API, the CLI, tests).
     ledger = property(lambda self: self.collector.ledger)
@@ -880,7 +879,7 @@ class PrefixwiseProxy:
             compaction_event=bool(ctx["compaction_event"]), stream=bool(ctx.get("stream")),
             previous_response_id=(str(body["previous_response_id"]) if ctx.get("api") == "responses"
                                   and body.get("previous_response_id") else None),
-            blocks=fps, params={k: body.get(k) for k in PARAM_KEYS if body.get(k) is not None},
+            blocks=fps, params={k: param_fingerprint(body.get(k)) for k in PARAM_KEYS if body.get(k) is not None},
             has_breakpoint=has_cache_breakpoint(body), ttl_seconds=ctx.get("ttl_seconds"), facts=facts,
             fixes_applied=list(ctx.get("fixes_applied") or []),
             sent_at=ctx.get("span_start") or ctx.get("sent_at") or facts.done_at,

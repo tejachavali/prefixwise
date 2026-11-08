@@ -61,20 +61,29 @@ requests/s would need about 55 CPU-bound processes doing SHA-256 inline on a thr
 server; the stream-recording wait could stall a conversation under load; and there was no fleet
 ledger, so `prefixwise report` did not exist across pods.
 
-**The shape (built in 0.8: `prefixwise.records`, `prefixwise.collector`).** Two halves, one boundary.
+**The shape (built, unreleased: `prefixwise.records`, `prefixwise.collector`).** Two halves, one boundary.
 
 - **Edge (data plane).** Wherever the request already is: the proxy, `prefixwise.wrap`, the
   LiteLLM callback, later a gateway plugin. It fingerprints the request (three hashes per block,
   no text), reads the response's usage and timing, and emits one **turn record** per request
-  (`TurnRecord`, a few KB: hashes, positions, counts, the provider's usage, the engine join's
-  verdict). It keeps only what a request needs on its way out: requests in flight by prefix (for
-  `sent_before_cache_written`), streams ended but not yet recorded, fields an upstream rejected.
+  (`TurnRecord`, a few KB: hashes, positions, counts, digests of the prompt-affecting parameters,
+  the provider's usage, the engine join's verdict). It keeps only what a request needs on its way
+  out: requests in flight and entries written by prefix (for `sent_before_cache_written` and
+  `shared_prefix_not_reused`), streams ended but not yet recorded, fields an upstream rejected,
+  and the response id of each conversation's last turn (to chain the provider's diagnostics).
+  With several edges those are per edge: the two fan-out sub-reasons and the recording wait see
+  only the requests that passed through the same edge, which is stated here rather than solved.
   Hashing is its whole CPU cost, and it is independent of the number of edges.
 - **Collector (control plane).** `Collector.ingest(record)`: compares the record with the previous
   turn of its own conversation, names the cause, prices it, writes the ledger. It owns all
   conversation state (lanes, Responses snapshots, per-session facts). One lock serializes
   `ingest`, which is the ordering a conversation needs: turn N is recorded before N+1 is compared
-  with it. Classification is microseconds; one collector handles the records of many edges.
+  with it. The edge asks it two things at request time (`chain_parent`: the previous turn's
+  response id for the provider's diagnostics; `stitched_opening`: which conversation a stitched
+  Responses turn continues); in one process those are a lock away. Measured here (`Collector.ingest` on the realistic three-turn record set, this VM): about 5,800
+  records/s into a file-backed SQLite ledger (WAL, `synchronous=NORMAL`), about 170 µs per record,
+  of which the ledger commit is most; one collector takes the records of some thirty 185-request/s
+  edges before it is the bottleneck, and the partitioned log below is the way past that.
 - **In one process** (`prefixwise serve`, `prefixwise.wrap`, the callback) the edge calls the
   collector directly. Same code, same verdicts, no configuration: the single-user product is the
   fleet product with a zero-length wire.
