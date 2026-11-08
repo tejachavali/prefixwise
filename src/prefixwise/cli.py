@@ -18,6 +18,7 @@ import sys
 from pathlib import Path
 
 from . import __version__
+from .check import BASELINE_FILE, DEFAULT_FAIL_ON, DEFAULT_FIRST_TURN_DELAY, STRICT_EXTRA
 
 DEFAULT_LEDGER = "prefixwise.db"
 
@@ -368,6 +369,116 @@ def cmd_run(args) -> int:
     return code
 
 
+def cmd_check(args) -> int:
+    """A CI gate: run the agent's scenarios through a mock proxy (or judge saved trajectories) and
+    fail on the causes that are code bugs."""
+    import signal
+    import subprocess
+    import tempfile
+    import threading
+    import time
+
+    from . import check
+    from .pricing import PriceTable
+
+    try:
+        fail_on = check.parse_fail_on(args.fail_on, args.strict)
+        allow = check.load_allow(args.allow) if args.allow else []
+        baseline_path = args.baseline or (check.BASELINE_FILE if os.path.exists(check.BASELINE_FILE) else None)
+        baseline = check.load_baseline(baseline_path) if baseline_path else None
+    except (OSError, ValueError) as exc:
+        print(f"prefixwise: {exc}", file=sys.stderr)
+        return 2
+    prices = PriceTable.load(args.prices) if getattr(args, "prices", None) else PriceTable.load()
+    cmd = args.agent_command[1:] if args.agent_command[:1] == ["--"] else args.agent_command
+    if bool(cmd) == bool(args.bodies):
+        print("usage: prefixwise check [options] -- <command that runs the agent's scenarios>\n"
+              "       prefixwise check [options] --bodies FILE...   (saved request bodies, explain's format)",
+              file=sys.stderr)
+        return 2
+
+    if args.bodies:
+        try:
+            rows = check.rows_from_bodies(args.bodies)
+        except (OSError, ValueError) as exc:
+            print(f"prefixwise: {exc}", file=sys.stderr)
+            return 2
+        rep = check.judge(rows, fail_on, allow, mock=False)
+        check.project(rep, baseline, prices)
+        return _emit_check(rep, args)
+
+    from .proxy import PrefixwiseHTTPServer, PrefixwiseProxy, make_handler
+
+    tmp = None
+    ledger = args.ledger
+    if not ledger:
+        tmp = tempfile.TemporaryDirectory(prefix="prefixwise-check-")
+        ledger = os.path.join(tmp.name, "check.db")
+    watch = check.VolatileWatch()
+    try:
+        proxy = PrefixwiseProxy(ledger_path=ledger, mock=True, upstreams=None, otel="")
+    except ValueError as exc:
+        print(f"prefixwise: {exc}", file=sys.stderr)
+        return 2
+    proxy.versioned = {"openai"}
+    proxy.api_key = None
+    proxy.default_session = "default"
+    proxy.check_mode = True
+    proxy.mock_tool_calls = True
+    proxy.mock_first_turn_delay = max(0.0, args.first_turn_delay)
+    proxy.request_observer = watch
+    server = PrefixwiseHTTPServer(("127.0.0.1", args.port), make_handler(proxy))
+    base = f"http://127.0.0.1:{server.server_address[1]}"
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    env = {**os.environ, "ANTHROPIC_BASE_URL": base, "OPENAI_BASE_URL": base + "/v1", "PREFIXWISE_URL": base,
+           "PREFIXWISE_CHECK": "1"}
+    if os.path.basename(cmd[0]) == "codex":
+        env.setdefault("OPENAI_API_KEY", "prefixwise-check")  # the mock never sees it
+        cmd = [cmd[0], *_codex_args(base), *cmd[1:]]
+    print(f"prefixwise check: mock proxy on {base}; gate: {', '.join(fail_on)}", file=sys.stderr, flush=True)
+    start = time.time()
+    code = 127
+    try:  # with --json, stdout is the report: the command's own output goes to stderr
+        child = subprocess.Popen(cmd, env=env, stdout=sys.stderr if args.json else None)
+    except FileNotFoundError:
+        child = None
+        print(f"prefixwise: command not found: {cmd[0]}", file=sys.stderr)
+    if child is not None:
+        old_int = signal.signal(signal.SIGINT, signal.SIG_IGN)
+        old_term = signal.signal(signal.SIGTERM, lambda *_: child.terminate())
+        try:
+            code = child.wait()
+        finally:
+            signal.signal(signal.SIGINT, old_int)
+            signal.signal(signal.SIGTERM, old_term)
+    server.shutdown()
+    server.drain(5)
+    server.server_close()
+    code = 128 - code if code < 0 else code
+    rows = check.rows_since(proxy.ledger, start)
+    rep = check.judge(rows, fail_on, allow, mock=True)
+    rep.agent_exit = code
+    rep.warnings = watch.warnings(rep) + rep.warnings
+    check.project(rep, baseline, prices)
+    proxy.close()
+    if tmp is not None:
+        tmp.cleanup()
+    return _emit_check(rep, args)
+
+
+def _emit_check(rep, args) -> int:
+    from .check import render
+
+    if args.json_file:
+        with open(args.json_file, "w") as fh:
+            json.dump(rep.to_dict(), fh, indent=2)
+    if args.json:
+        print(json.dumps(rep.to_dict(), indent=2))
+    else:
+        print(render(rep))
+    return rep.exit_code
+
+
 def cmd_export(args) -> int:
     """Raw ledger rows (facts, never prompt text) as JSONL or CSV, oldest first."""
     import csv
@@ -375,6 +486,22 @@ def cmd_export(args) -> int:
     from . import api, metrics
 
     led = _open_existing_ledger(args)
+    if args.baseline:
+        from .check import BASELINE_FILE, baseline_from_ledger
+        try:
+            since = api._time(args.since, "--since")
+        except (ValueError, api.ApiError) as exc:
+            print(f"prefixwise: {exc}", file=sys.stderr)
+            return 2
+        base = baseline_from_ledger(led, since)
+        out = args.output or BASELINE_FILE
+        with open(out, "w") as fh:
+            json.dump(base, fh, indent=2)
+            fh.write("\n")
+        models = ", ".join(f"{m} ({v['eligible_turns_per_month']:,.0f} eligible turns/month)"
+                           for m, v in base["models"].items()) or "no turns"
+        print(f"wrote {out}: {base['window_days']:g} days of ledger scaled to a month; {models}", file=sys.stderr)
+        return 0
     try:
         since = api._time(args.since, "--since")
         filters = dict(f.split("=", 1) for f in args.where)
@@ -646,7 +773,41 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("agent_command", nargs=argparse.REMAINDER, metavar="-- COMMAND")
     p.set_defaults(func=cmd_run)
 
+    p = sub.add_parser("check", help="CI gate: fail when a code change breaks prompt-cache reuse",
+                       description="Runs the agent's scenarios through a local mock proxy (no API calls) and "
+                                   "exits 2 when a turn misses its cache for a cause that is a code bug: "
+                                   "tool_reserialize, volatile_system, breakpoint_misplaced, tool_result_mutation. "
+                                   "Each turn is compared with its conversation's previous turn, as in production; "
+                                   "nothing is compared with another branch and no prompt is stored. The mock "
+                                   "answers a turn that offers tools with a tool call, so the agent's loop runs a "
+                                   "second turn. Exit 1 when the command itself fails.")
+    p.add_argument("--fail-on", metavar="CAUSES",
+                   help=f"comma-separated causes that fail (default: {','.join(DEFAULT_FAIL_ON)})")
+    p.add_argument("--strict", action="store_true",
+                   help=f"also fail on {', '.join(STRICT_EXTRA)}: real misses, but a scenario that edits "
+                        "history or switches a parameter on purpose will trip them")
+    p.add_argument("--allow", metavar="FILE",
+                   help='known findings to pass: JSON list of {"scenario", "cause", "divergence_role"} ("*" = any)')
+    p.add_argument("--baseline", metavar="FILE",
+                   help=f"production baseline from `prefixwise export --baseline`, for the monthly projection "
+                        f"(default: ./{BASELINE_FILE} when present; else tokens only)")
+    p.add_argument("--bodies", nargs="+", metavar="FILE",
+                   help="judge saved request bodies instead of running a command (prefixwise explain's format)")
+    p.add_argument("--first-turn-delay", type=float, default=DEFAULT_FIRST_TURN_DELAY, metavar="SECONDS",
+                   help="hold each conversation's first mock response, so a per-second timestamp in the prompt "
+                        f"changes before the second turn (default {DEFAULT_FIRST_TURN_DELAY}; 0 = off)")
+    p.add_argument("--port", type=int, default=0, help="mock proxy port (default: any free port)")
+    p.add_argument("--prices", metavar="FILE", help="price table for the projection (default: built in)")
+    p.add_argument("--json", action="store_true", help="the report as JSON on stdout")
+    p.add_argument("--json-file", metavar="FILE", help="also write the JSON report here")
+    p.add_argument("--ledger", help="keep this run's ledger here (default: a temporary file, deleted)")
+    p.add_argument("agent_command", nargs=argparse.REMAINDER, metavar="-- COMMAND")
+    p.set_defaults(func=cmd_check)
+
     p = sub.add_parser("export", help="raw ledger rows as JSONL or CSV (facts, never prompt text)")
+    p.add_argument("--baseline", action="store_true",
+                   help=f"instead: write ./{BASELINE_FILE} for `prefixwise check` (per model: turns per month, "
+                        "eligible turns per month, mean reusable prefix tokens; counts only, no ids or text)")
     p.add_argument("--format", choices=["jsonl", "csv"], default="jsonl")
     p.add_argument("--since", metavar="WHEN", help="unix seconds, or a duration back from now: 24h, 7d")
     p.add_argument("--where", action="append", default=[], metavar="FIELD=VALUE",

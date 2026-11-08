@@ -196,6 +196,23 @@ class PriceTable:
         paid = self._paid_rate(r, breakdown(provider, usage)) if provider and usage else None
         return round(avoidable_tokens * ((r["input"] if paid is None else paid) - read) / 1e6, 8)
 
+    def miss_rate(self, model: str, provider: str | None, prompt_tokens: int) -> float | None:
+        """USD per token a miss costs above a hit for prefix tokens that are sent again: the rate
+        paid to resend them (on Anthropic the 5-minute cache-write rate, as they are written again;
+        elsewhere the input rate) minus the cache-read rate. None when a rate is unknown."""
+        rates = self.rates_for(model)
+        if rates is None:
+            return None
+        r = self._tier(rates, prompt_tokens)
+        inp, read = r.get("input"), r.get("cache_read")
+        if not isinstance(inp, (int, float)) or not isinstance(read, (int, float)):
+            return None
+        paid = inp
+        if provider == "anthropic":
+            w = r.get("cache_write_5m", r.get("cache_write"))
+            paid = inp if w == "input" else w if isinstance(w, (int, float)) else inp
+        return max(0.0, paid - read) / 1e6
+
     def write_surcharge(self, model: str, prompt_tokens: int, write_5m: int = 0, write_1h: int = 0,
                         cache_write: int = 0) -> float | None:
         """USD paid to write these tokens into the cache above sending them uncached: Anthropic

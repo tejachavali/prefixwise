@@ -1,9 +1,44 @@
 # Specs: `prefixwise check` and `prefixwise serve --optimize`
 
-Status: **proposed, not built** (2026-11-08). Both keep the core guarantee: the prompt itself is
+Status: `prefixwise check` **built** (0.9, 2026-11-08, as amended below); `--optimize` **proposed, not built**. Both keep the core guarantee: the prompt itself is
 never stored or sent anywhere; only block hashes, counts and Prefixwise's verdicts are.
 
 ## 1. `prefixwise check`: a CI gate for cache regressions
+
+**Built as amended (2026-11-08 review):**
+- Default `--fail-on` is `tool_reserialize,volatile_system,breakpoint_misplaced,tool_result_mutation`
+  (mutating an earlier turn's tool output is always a code bug); `--strict` adds `history_edit`,
+  `system_edit`, `param_rendered`, which a scenario that edits history or switches a parameter on
+  purpose will trip, so they are not default.
+- `--allow FILE` keys on `(scenario, cause, divergence_role)`, not session and turn (test session
+  ids change run to run). The scenario is `X-Prefixwise-Session-Id` when the agent sends one; under
+  pytest the bundled plugin (`prefixwise.pytest_plugin`, a `pytest11` entry point, inert unless
+  `PREFIXWISE_CHECK` and `PREFIXWISE_URL` are set) posts each test's node id to
+  `POST /api/v1/check/scenario`, so requests without a session id are recorded under the test.
+- The baseline is a small JSON summary, not a ledger on the CI runner: `prefixwise export
+  --baseline` writes `.prefixwise-baseline.json` (per model `turns_per_month`,
+  `eligible_turns_per_month`, `mean_reusable_tokens`; counts only), and `check` auto-detects it in
+  the working directory when `--baseline` is not given.
+- The projection's denominator is eligible turns: `affected eligible turns / eligible turns in the
+  run` (first turns excluded) x the baseline's `eligible_turns_per_month` x `mean_reusable_tokens` x
+  `PriceTable.miss_rate` (the rate a miss pays above a hit per token). Without a baseline, tokens.
+- **Multi-turn mock driver.** An agent test that runs one turn tests nothing (`first_write`). The
+  mock answers a user turn that offers tools with a call to the first function tool (arguments are
+  placeholders by type for the schema's required properties; Anthropic `tool_use`, chat
+  `tool_calls`, Responses `function_call`, streamed too), so the loop runs a second turn, the one
+  the gate judges; a turn that answers a tool call gets text, so one round per user message, never
+  a loop. A run with no turn that had a previous turn warns: `0 cache-eligible multi-turn sequences
+  observed`.
+- **Sub-second clocks.** Against a fast mock, turn 1 and turn 2 are milliseconds apart, so a
+  per-second timestamp never changes. `check` holds each conversation's first mock response for
+  `--first-turn-delay` seconds (1.1) so `int(time.time())` and `%S` stamps do change; a date or
+  time the fingerprinter's masks find in a system prompt that did not change within the run is a
+  `WARN` naming the scenario (a per-minute or per-day stamp would cost a miss per change in
+  production; a fixed cutoff date is to be ignored).
+- Exit codes: 2 when a gated cause is found and not allowed, else 1 when the command exited
+  non-zero, else 0. With `--json` the command's own stdout goes to stderr so stdout is the report.
+- The Action pins the version from its own tag (`@v0.9.0` installs `prefixwise==0.9.0`; a moving
+  `@v0.9` installs the latest).
 
 **Problem.** The costly cache regressions are code changes: a tool list built from a set (order
 drifts, `tool_reserialize`), a timestamp added to the system prompt (`volatile_system`), a
@@ -54,7 +89,7 @@ a baseline, report tokens only. Never invent a price (the pricing rule).
 **GitHub Action** (composite, in this repo as `action.yml`):
 
 ```yaml
-- uses: tejachavali/prefixwise@v0.7
+- uses: tejachavali/prefixwise@v0.9
   with:
     command: pytest tests/agent_scenarios
     fail-on: tool_reserialize,volatile_system,breakpoint_misplaced

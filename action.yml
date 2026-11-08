@@ -1,0 +1,85 @@
+name: prefixwise check
+description: >-
+  Fail the job when a code change breaks prompt-cache reuse: runs the agent's scenarios through a
+  local mock proxy and gates on tool_reserialize, volatile_system, breakpoint_misplaced and
+  tool_result_mutation (prefixwise check). Nothing leaves the runner.
+author: tejachavali
+branding:
+  icon: shield
+  color: purple
+inputs:
+  command:
+    description: The command that runs the agent's scenarios (for example "pytest tests/agent_scenarios").
+    required: true
+  fail-on:
+    description: Comma-separated causes that fail the job. Default tool_reserialize,volatile_system,breakpoint_misplaced,tool_result_mutation.
+    required: false
+    default: ""
+  strict:
+    description: Also fail on history_edit, system_edit and param_rendered.
+    required: false
+    default: "false"
+  allow:
+    description: Path to an allow-list (JSON) of known findings, keyed scenario, cause, divergence_role.
+    required: false
+    default: ""
+  baseline:
+    description: Path to a baseline from `prefixwise export --baseline`, for the monthly projection. Default .prefixwise-baseline.json when present.
+    required: false
+    default: ""
+  version:
+    description: Prefixwise version to install (PyPI). Default the version this action was tagged as, or the latest.
+    required: false
+    default: ""
+  python-version:
+    description: Python to run Prefixwise with (actions/setup-python).
+    required: false
+    default: "3.12"
+outputs:
+  report:
+    description: Path of the JSON report (prefixwise check --json).
+    value: ${{ steps.check.outputs.report }}
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-python@v5
+      with:
+        python-version: ${{ inputs.python-version }}
+    - name: Install Prefixwise
+      shell: bash
+      env:
+        VERSION: ${{ inputs.version }}
+        ACTION_REF: ${{ github.action_ref }}
+      run: |
+        if [ -z "$VERSION" ] && [[ "$ACTION_REF" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then VERSION="${ACTION_REF#v}"; fi
+        if [ -n "$VERSION" ]; then python -m pip install -q "prefixwise==$VERSION"; else python -m pip install -q prefixwise; fi
+        prefixwise --version
+    - name: prefixwise check
+      id: check
+      shell: bash
+      env:
+        FAIL_ON: ${{ inputs.fail-on }}
+        STRICT: ${{ inputs.strict }}
+        ALLOW: ${{ inputs.allow }}
+        BASELINE: ${{ inputs.baseline }}
+        COMMAND: ${{ inputs.command }}
+      run: |
+        set +e
+        args=()
+        [ -n "$FAIL_ON" ] && args+=(--fail-on "$FAIL_ON")
+        [ "$STRICT" = "true" ] && args+=(--strict)
+        [ -n "$ALLOW" ] && args+=(--allow "$ALLOW")
+        [ -n "$BASELINE" ] && args+=(--baseline "$BASELINE")
+        report="$RUNNER_TEMP/prefixwise-check.json"
+        text="$RUNNER_TEMP/prefixwise-check.txt"
+        prefixwise check "${args[@]}" --json-file "$report" -- bash -c "$COMMAND" | tee "$text"
+        code=${PIPESTATUS[0]}
+        echo "report=$report" >> "$GITHUB_OUTPUT"
+        {
+          echo "## prefixwise check"
+          echo
+          echo '```'
+          cat "$text"
+          echo '```'
+        } >> "$GITHUB_STEP_SUMMARY"
+        exit $code

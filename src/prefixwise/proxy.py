@@ -268,6 +268,72 @@ def has_cache_breakpoint(body: dict) -> bool:
                for k in ("tools", "system", "messages"))
 
 
+def _mock_tool_call(body: dict, provider: str, api: str) -> tuple[str, dict] | None:
+    """prefixwise check: a call to the first function tool when the latest message is a user turn
+    that carries no tool result, so an agent's tool loop runs a second turn (the result, then the
+    answer) and the second turn is what the gate judges. Arguments are placeholders, by type, for
+    the schema's required properties. None: no tools, or the turn already answers a tool call."""
+    tools = body.get("tools")
+    msgs = body.get("input") if api == "responses" else body.get("messages")
+    if isinstance(msgs, str):
+        msgs = [{"role": "user", "content": msgs}]
+    if not isinstance(tools, list) or not tools or not isinstance(msgs, list) or not msgs:
+        return None
+    last = msgs[-1]
+    if not isinstance(last, dict) or last.get("role") != "user":
+        return None  # a tool result (OpenAI: role tool / function_call_output), or an assistant turn
+    if provider == "anthropic" and isinstance(last.get("content"), list) and any(
+            isinstance(b, dict) and b.get("type") == "tool_result" for b in last["content"]):
+        return None
+    for t in tools:
+        if not isinstance(t, dict):
+            continue
+        if provider == "anthropic":  # built-in server tools (web_search_2025...) have no schema: skipped
+            if t.get("type") not in (None, "custom"):
+                continue
+            name, schema = t.get("name"), t.get("input_schema")
+        elif api == "responses":
+            if t.get("type") != "function":
+                continue
+            name, schema = t.get("name"), t.get("parameters")
+        else:
+            fn = t.get("function") if t.get("type") == "function" else None
+            if not isinstance(fn, dict):
+                continue
+            name, schema = fn.get("name"), fn.get("parameters")
+        if isinstance(name, str) and name:
+            return name, _placeholder_args(schema)
+    return None
+
+
+def _placeholder_args(schema) -> dict:
+    """Values of the right JSON type for a schema's required properties."""
+    if not isinstance(schema, dict):
+        return {}
+    props = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+    out = {}
+    for key in schema.get("required") if isinstance(schema.get("required"), list) else []:
+        p = props.get(key) if isinstance(props.get(key), dict) else {}
+        typ = p.get("type")
+        if isinstance(typ, list):
+            typ = next((t for t in typ if t != "null"), None)
+        if isinstance(p.get("enum"), list) and p["enum"]:
+            out[key] = p["enum"][0]
+        elif typ == "integer":
+            out[key] = 1
+        elif typ == "number":
+            out[key] = 1.0
+        elif typ == "boolean":
+            out[key] = False
+        elif typ == "array":
+            out[key] = []
+        elif typ == "object":
+            out[key] = _placeholder_args(p)
+        else:
+            out[key] = "prefixwise"
+    return out
+
+
 def _diagnostic_objects(payload: dict):
     usage = payload.get("usage") or {}
     for diag in (payload.get("prompt_cache_diagnostics"), payload.get("diagnostics"),
@@ -513,6 +579,13 @@ class PrefixwiseProxy:
         self.mock = mock if mock is not None else (
             not (self.upstream_url or self.upstreams) or os.environ.get("PREFIXWISE_MOCK_UPSTREAM") == "1")
         self.default_session = "default"  # for requests that carry no session id
+        # prefixwise check (prefixwise.check): sees every request's blocks (never stored), makes the
+        # mock answer a user turn that offers tools with a tool call so an agent's loop runs a second
+        # turn, and holds a conversation's first mock response so per-second timestamps move.
+        self.request_observer = None  # callable(provider, session_id, raw_blocks)
+        self.check_mode = False  # POST /api/v1/check/scenario may rename default_session
+        self.mock_tool_calls = False
+        self.mock_first_turn_delay = 0.0
         self.engine_notes: list[str] = []  # what the engine check found; printed by serve()
         # Fields Prefixwise adds to requests that an upstream rejected, by provider: they are
         # not sent again (a gateway or compatible server that rejects unknown fields).
@@ -782,6 +855,8 @@ class PrefixwiseProxy:
         # Only the system blocks and the opening message are fingerprinted here (cheap; a block's
         # hash does not depend on its position), to find this request's conversation.
         raw_blocks = extract_blocks(forward_body, provider)
+        if self.request_observer is not None:
+            self.request_observer(provider, session_id, raw_blocks)
         identity = _identity(self.fingerprinter.fingerprint_blocks(
             [blk for blk in raw_blocks if blk[0] in ("system", "system_dynamic")]
             + [blk for blk in raw_blocks if blk[0] in _CONVERSATION][:1]))
@@ -1052,25 +1127,35 @@ class PrefixwiseProxy:
                 cached = 0
             elif not cached:
                 write = 2000
+        call = _mock_tool_call(body, provider, api) if self.mock_tool_calls and body is not None else None
+        if self.mock_first_turn_delay and prev is None:
+            time.sleep(self.mock_first_turn_delay)
         # Ids shaped like the real APIs' (msg_, resp_, chatcmpl-): diagnostics chaining checks them.
         rid = {"anthropic": "msg_", "responses": "resp_"}.get(
             provider if provider == "anthropic" else api, "chatcmpl-") + request_id[:8]
+        call_id = "call_mock" + request_id[:8]
         if provider == "anthropic":
+            content = ([{"type": "tool_use", "id": "toolu_mock" + request_id[:8], "name": call[0], "input": call[1]}]
+                       if call else [{"type": "text", "text": "[prefixwise mock]"}])
             return {"id": rid, "type": "message", "role": "assistant", "model": model,
-                    "content": [{"type": "text", "text": "[prefixwise mock]"}],
-                    "stop_reason": "end_turn",
+                    "content": content, "stop_reason": "tool_use" if call else "end_turn",
                     "usage": {"input_tokens": 2000 - cached - write, "cache_read_input_tokens": cached,
                               "cache_creation_input_tokens": write, "output_tokens": 1}}
         if api == "responses":
+            item = ({"type": "function_call", "id": "fc_mock" + request_id[:8], "call_id": call_id,
+                     "name": call[0], "arguments": json.dumps(call[1]), "status": "completed"} if call else
+                    {"type": "message", "role": "assistant", "status": "completed",
+                     "content": [{"type": "output_text", "text": "[prefixwise mock]", "annotations": []}]})
             return {"id": rid, "object": "response", "status": "completed", "model": model,
-                    "output": [{"type": "message", "role": "assistant", "status": "completed",
-                                "content": [{"type": "output_text", "text": "[prefixwise mock]",
-                                             "annotations": []}]}],
+                    "output": [item],
                     "usage": {"input_tokens": 2000, "input_tokens_details": {"cached_tokens": cached},
                               "output_tokens": 1, "total_tokens": 2001}}
+        message = ({"role": "assistant", "content": None,
+                    "tool_calls": [{"id": call_id, "type": "function",
+                                    "function": {"name": call[0], "arguments": json.dumps(call[1])}}]} if call else
+                   {"role": "assistant", "content": "[prefixwise mock]"})
         return {"id": rid, "object": "chat.completion", "model": model,
-                "choices": [{"index": 0, "finish_reason": "stop",
-                             "message": {"role": "assistant", "content": "[prefixwise mock]"}}],
+                "choices": [{"index": 0, "finish_reason": "tool_calls" if call else "stop", "message": message}],
                 "usage": {"prompt_tokens": 2000, "completion_tokens": 1, "total_tokens": 2001,
                           "prompt_tokens_details": {"cached_tokens": cached}}}
 
@@ -1267,47 +1352,73 @@ class PrefixwiseProxy:
             return head + [b"data: " + json.dumps(obj).encode() + b"\n", b"\n"]
         if ctx["provider"] == "anthropic":
             u = payload["usage"]
+            block = payload["content"][0]
             start = {"type": "message_start", "message": {
                 "id": payload["id"], "type": "message", "role": "assistant", "model": ctx["model"],
                 "content": [], "usage": {**u, "output_tokens": 0}}}
             out = ev(start, "message_start")
-            out += ev({"type": "content_block_start", "index": 0,
-                       "content_block": {"type": "text", "text": ""}}, "content_block_start")
-            out += ev({"type": "content_block_delta", "index": 0,
-                       "delta": {"type": "text_delta", "text": "[prefixwise mock]"}}, "content_block_delta")
+            if block["type"] == "tool_use":
+                out += ev({"type": "content_block_start", "index": 0,
+                           "content_block": {**block, "input": {}}}, "content_block_start")
+                out += ev({"type": "content_block_delta", "index": 0,
+                           "delta": {"type": "input_json_delta", "partial_json": json.dumps(block["input"])}},
+                          "content_block_delta")
+            else:
+                out += ev({"type": "content_block_start", "index": 0,
+                           "content_block": {"type": "text", "text": ""}}, "content_block_start")
+                out += ev({"type": "content_block_delta", "index": 0,
+                           "delta": {"type": "text_delta", "text": "[prefixwise mock]"}}, "content_block_delta")
             out += ev({"type": "content_block_stop", "index": 0}, "content_block_stop")
-            out += ev({"type": "message_delta", "delta": {"stop_reason": "end_turn"},
+            out += ev({"type": "message_delta", "delta": {"stop_reason": payload["stop_reason"]},
                        "usage": {"output_tokens": u["output_tokens"]}}, "message_delta")
             return out + ev({"type": "message_stop"}, "message_stop")
         if ctx.get("api") == "responses":
             # The full event sequence SDKs expect: item and part opened, text
             # delta, then every done event, then response.completed.
             created = {**payload, "status": "in_progress", "output": [], "usage": None}
-            item = {**payload["output"][0], "id": "msg_mock"}
-            part = item["content"][0]
-            text = part["text"]
-            seq = [("response.created", {"response": created}),
-                   ("response.in_progress", {"response": created}),
-                   ("response.output_item.added", {"output_index": 0,
-                                                   "item": {**item, "status": "in_progress", "content": []}}),
-                   ("response.content_part.added", {"item_id": "msg_mock", "output_index": 0,
-                                                    "content_index": 0, "part": {**part, "text": ""}}),
-                   ("response.output_text.delta", {"item_id": "msg_mock", "output_index": 0,
-                                                   "content_index": 0, "delta": text}),
-                   ("response.output_text.done", {"item_id": "msg_mock", "output_index": 0,
-                                                  "content_index": 0, "text": text}),
-                   ("response.content_part.done", {"item_id": "msg_mock", "output_index": 0,
-                                                   "content_index": 0, "part": part}),
-                   ("response.output_item.done", {"output_index": 0, "item": item}),
-                   ("response.completed", {"response": {**payload, "output": [item]}})]
+            item = payload["output"][0]
+            if item["type"] == "function_call":
+                ids = {"item_id": item["id"], "output_index": 0}
+                seq = [("response.created", {"response": created}),
+                       ("response.in_progress", {"response": created}),
+                       ("response.output_item.added", {"output_index": 0,
+                                                       "item": {**item, "status": "in_progress", "arguments": ""}}),
+                       ("response.function_call_arguments.delta", {**ids, "delta": item["arguments"]}),
+                       ("response.function_call_arguments.done", {**ids, "arguments": item["arguments"]}),
+                       ("response.output_item.done", {"output_index": 0, "item": item}),
+                       ("response.completed", {"response": payload})]
+            else:
+                item = {**item, "id": "msg_mock"}
+                part = item["content"][0]
+                text = part["text"]
+                seq = [("response.created", {"response": created}),
+                       ("response.in_progress", {"response": created}),
+                       ("response.output_item.added", {"output_index": 0,
+                                                       "item": {**item, "status": "in_progress", "content": []}}),
+                       ("response.content_part.added", {"item_id": "msg_mock", "output_index": 0,
+                                                        "content_index": 0, "part": {**part, "text": ""}}),
+                       ("response.output_text.delta", {"item_id": "msg_mock", "output_index": 0,
+                                                       "content_index": 0, "delta": text}),
+                       ("response.output_text.done", {"item_id": "msg_mock", "output_index": 0,
+                                                      "content_index": 0, "text": text}),
+                       ("response.content_part.done", {"item_id": "msg_mock", "output_index": 0,
+                                                       "content_index": 0, "part": part}),
+                       ("response.output_item.done", {"output_index": 0, "item": item}),
+                       ("response.completed", {"response": {**payload, "output": [item]}})]
             out = []
             for i, (name, data) in enumerate(seq):
                 out += ev({"type": name, "sequence_number": i, **data}, name)
             return out
         base = {"id": payload["id"], "object": "chat.completion.chunk", "model": ctx["model"]}
-        out = ev({**base, "choices": [{"index": 0, "delta": {"role": "assistant",
-                                                             "content": "[prefixwise mock]"}}]})
-        out += ev({**base, "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]})
+        choice = payload["choices"][0]
+        if choice["finish_reason"] == "tool_calls":
+            call = choice["message"]["tool_calls"][0]
+            out = ev({**base, "choices": [{"index": 0, "delta": {"role": "assistant", "content": None,
+                                                                 "tool_calls": [{"index": 0, **call}]}}]})
+        else:
+            out = ev({**base, "choices": [{"index": 0, "delta": {"role": "assistant",
+                                                                 "content": "[prefixwise mock]"}}]})
+        out += ev({**base, "choices": [{"index": 0, "delta": {}, "finish_reason": choice["finish_reason"]}]})
         if (ctx["forward_body"].get("stream_options") or {}).get("include_usage"):
             out += ev({**base, "choices": [], "usage": payload["usage"]})
         return out + [b"data: [DONE]\n", b"\n"]
