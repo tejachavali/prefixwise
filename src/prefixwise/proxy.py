@@ -1486,8 +1486,9 @@ def make_handler(proxy: PrefixwiseProxy):
             path, _ = route(self.path)
             if path == "/health":
                 health = {"ok": True, "mock": proxy.mock, "role": _role(proxy)}
-                if getattr(proxy.collector, "remote", False):
-                    health["collector"] = proxy.collector.stats()
+                if getattr(proxy.collector, "remote", False):  # counts only: no hostnames on an open endpoint
+                    health["collector"] = {k: v for k, v in proxy.collector.stats().items()
+                                           if k not in ("url", "last_error")}
                 else:
                     health["ingest"] = dict(proxy.collector.stats)
                 return self._json(200, health)
@@ -1571,6 +1572,9 @@ def make_handler(proxy: PrefixwiseProxy):
             if path.startswith(api.PREFIX + "/"):
                 if not self._authorized():
                     return
+                if path == api.PREFIX + "/ingest" and getattr(proxy.collector, "remote", False):
+                    return self._json(404, _error(404, "this is an edge, not a collector: records go to "
+                                                      f"{proxy.collector.url}; POST there"))  # before reading the body
                 if path != api.PREFIX + "/ingest" and path != api.PREFIX + "/explain" and self._no_ledger_here():
                     return
                 try:
@@ -1586,7 +1590,7 @@ def make_handler(proxy: PrefixwiseProxy):
                 except Exception as exc:
                     print(f"prefixwise: internal error on {path}: {type(exc).__name__}", file=sys.stderr)
                     return self._json(500, _error(500, "internal error in the Prefixwise API"))
-            if proxy.collect_only:
+            if proxy.collect_only and path != "/tasks":
                 return self._json(404, _error(404, "this is a collector (prefixwise collect): it has no upstream; "
                                                   "point clients at an edge (prefixwise serve)"))
             if path not in CLASSIFIED_PATHS and path != "/tasks":

@@ -57,6 +57,13 @@ class Recorder:
         self.proxy = PrefixwiseProxy(ledger_path=path, mock=True, fixes=(), engine="", kv_events="")
         self.agent_id = agent_id
         self._warned = False
+        if getattr(self.proxy.collector, "remote", False):
+            import atexit
+            atexit.register(self.close)  # a script's last records must reach the collector
+
+    def close(self, timeout: float = 5.0) -> None:
+        """Send records still queued for a remote collector (PREFIXWISE_COLLECTOR); a no-op otherwise."""
+        self.proxy.close(timeout)
 
     @property
     def ledger(self):

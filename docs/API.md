@@ -74,7 +74,7 @@ The dated price table behind the dollar metrics, and the files it came from.
 
 ### `POST /api/v1/ingest`
 
-Turn records from an edge (`prefixwise.transport`; see `docs/specs/hyperscale.md`): `{"records": [<TurnRecord.to_dict()>, ...]}`, at most 1,000 per call. Answers `{"accepted": n, "duplicates": d, "rejected": [{"index": i, "error": "..."}]}`: a request id already ingested is a duplicate (a retried batch adds no rows), a malformed record is named by index and skipped, and a record the collector fails on becomes a `not_recorded` row. Served only by a collector (`prefixwise collect`, or a proxy with its own ledger); an edge answers 404 with its collector's URL. Needs the collector's `X-Prefixwise-Token` when one is set.
+Turn records from an edge (`prefixwise.transport`; see `docs/specs/hyperscale.md`): `{"records": [<TurnRecord.to_dict()>, ...]}`, at most 1,000 per call. Answers `{"accepted": n, "duplicates": d, "rejected": [{"index": i, "error": "..."}]}`: a request id already ingested is a duplicate (a retried batch adds no rows while the collector runs; the last 200,000 ids are kept in memory), a malformed record is named by index and skipped, and a record the collector fails on becomes a `not_recorded` row. Served only by a collector (`prefixwise collect`, or a proxy with its own ledger); an edge answers 404 with its collector's URL. Needs the collector's `X-Prefixwise-Token` when one is set.
 
 ### `POST /api/v1/explain`
 `{"previous": <request body>, "current": <request body>, "current_usage": {...}?}`: why would

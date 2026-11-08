@@ -28,6 +28,9 @@ from .prom import Metrics
 from .records import RecordError, TurnRecord
 
 SEEN_REQUESTS = 200_000  # request ids remembered for idempotent ingest (a retried batch adds no rows)
+# Seconds a turn may appear to have been sent before the compared turn ended and still count as
+# sequential: the two timestamps may come from different edges' clocks.
+CLOCK_SKEW = float(os.environ.get("PREFIXWISE_CLOCK_SKEW", "1.0"))
 MAX_BATCH = 1000
 
 # Sessions remembered at once (snapshot, facts); the least recently seen are forgotten. A
@@ -180,7 +183,12 @@ class Collector:
                 print(f"prefixwise: record {rec.request_id} not classified ({type(exc).__name__}: {exc})",
                       file=sys.stderr, flush=True)
                 rec.error = "not_recorded"
-                self.ingest_failure(rec)
+                try:
+                    self.ingest_failure(rec)
+                except Exception:
+                    with self._lock:  # nothing written: a retry of this record must not read as a duplicate
+                        self._seen.pop(rec.request_id, None)
+                    raise
             accepted += 1
         with self._lock:
             self.stats["duplicates"] += duplicates
@@ -241,7 +249,7 @@ class Collector:
                 parent, interleaved, new_thread = _best_parent(state, identity, rec.compaction_event)
             prev, prev_done, parent_facts, _ = parent
             gap_seconds = max(0.0, started - prev_done)
-            concurrent = started < prev_done - 0.001  # sent while the compared turn was still in flight
+            concurrent = started < prev_done - CLOCK_SKEW  # sent while the compared turn was still in flight
         else:
             concurrent = False
             # First turn on this model: FIRST_WRITE for a new session, else

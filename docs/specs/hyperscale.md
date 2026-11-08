@@ -103,7 +103,8 @@ instead of ingesting them:
 - a bearer token on the collector (`PREFIXWISE_AUTH_TOKEN`; the edge sends
   `PREFIXWISE_COLLECTOR_TOKEN`); a collector listening beyond localhost refuses to start without
   one unless told otherwise; TLS at the ingress;
-- ingest is idempotent by `request_id` (the last 200,000 are remembered), malformed records are
+- ingest is idempotent by `request_id` while the collector runs (the last 200,000 are remembered in
+  memory; a restart mid-retry can admit a duplicate, which the log transport below removes), malformed records are
   reported back by index and skipped, and a record the collector itself fails on becomes a
   `not_recorded` failure row, never a lost request;
 - ordering: a conversation's turns are sequential, and an edge emits turn N's record at N's
@@ -113,7 +114,13 @@ instead of ingesting them:
   ended is `unknown` with the reason ("sent N s before the previous turn had finished"), counted
   as `prefixwise_ingest_concurrent_total`: the failure mode is visible, not a wrong cause. The same
   rule names parallel sampling of one conversation, which could not have read the other sample's
-  write either;
+  write either. Two consequences are stated, not solved, here: a conversation's turns should take
+  one edge (across edges, a backed-up sender can deliver N after N+1: N+1 is then a `first_write`
+  and N `unknown`), and edge clocks must agree within `PREFIXWISE_CLOCK_SKEW` (1 s) for the rule
+  to see sequential turns as sequential. The partitioned log below removes both;
+- sizing: the queue holds 10,000 records, about 54 s of a 185-request/s edge, while a batch to a
+  black-holed collector is given up after about 75 s (six 10 s timeouts and 15.5 s of backoff), so
+  an outage of a minute already drops records, counted;
 - the collector serves the existing `/api/v1`, `/metrics` and `prefixwise report` over the fleet's
   one ledger; an edge answers `/api/v1`, `/ledger` and `/tasks` with 409 and the collector's URL;
 - the engine join (vLLM/SGLang KV events) stays with the edge that fronts the engine; its verdict
