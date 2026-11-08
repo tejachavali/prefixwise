@@ -174,3 +174,19 @@ def test_compaction_counts_the_write_it_replaced():
     summary = dated([{"role": "user", "content": "Summary of the conversation so far: ..."}], "2026-11-08")
     e = p.handle("anthropic", summary, {"x-prefixwise-session-id": "s", "x-prefixwise-compaction-event": "1"})[1]
     assert e.cause == "compaction_rewrite" and e.unread_write_tokens == 8_100
+
+
+def test_compaction_while_another_conversation_is_interleaved_claims_nothing():
+    # Main thread M and subagent S share the lane (same model and system prompt). S's turn is the
+    # lane's latest when M compacts: M's rewritten opening matches neither, so it is compared with
+    # S's turn; S's write is not M's to call unread (S's next turn reads it).
+    p = proxy([a_usage(write5=8_000), a_usage(write5=6_000), a_usage(write5=8_100, fresh=100),
+               a_usage(write5=6_100, fresh=100), a_usage(write5=3_000, fresh=0)])
+    sub = [{"role": "user", "content": "subagent: explore"}]
+    turn(p, dated([USER], "2026-11-07"))
+    turn(p, dated(sub, "2026-11-07"))
+    turn(p, dated(MORE, "2026-11-07"))
+    turn(p, dated(sub + [{"role": "assistant", "content": "ok"}, {"role": "user", "content": "go on"}], "2026-11-07"))
+    summary = dated([{"role": "user", "content": "Summary of the conversation so far: ..."}], "2026-11-07")
+    e = p.handle("anthropic", summary, {"x-prefixwise-session-id": "s", "x-prefixwise-compaction-event": "1"})[1]
+    assert e.cause == "compaction_rewrite" and e.unread_write_tokens is None

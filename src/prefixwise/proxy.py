@@ -1126,8 +1126,11 @@ class PrefixwiseProxy:
         # own: the same opening message, its own interleaved turn, or a compaction (which rewrites
         # the opening). Not another conversation this request fell back to (a same-model side
         # call), nor an edited opening message, which identity alone cannot tell from one.
-        own = state is not None and not new_thread and (interleaved or identity[0] == prior_latest
-                                                        or bool(ctx["compaction_event"]))
+        own = state is not None and not new_thread and (
+            interleaved or identity[0] == prior_latest
+            # a compaction while several conversations share the lane: the turn it fell back to may
+            # be another conversation's (whose next turn will read that write): claim nothing
+            or (bool(ctx["compaction_event"]) and len(state.threads) <= 1))
         if own and prev_facts is not None and prev is not None and prompt_tokens > 0:
             w5, w1, cw = unread_write(result.cause.value, cached, prev_facts.write_5m, prev_facts.write_1h,
                                       prev_facts.cache_write)
