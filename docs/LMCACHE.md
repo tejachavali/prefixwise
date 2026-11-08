@@ -86,7 +86,7 @@ cache without recomputing them".
 | what happened | verdict | detail | evidence |
 |---|---|---|---|
 | GPU prefix hit | `none` | | `cached_tokens` covers the previous prompt; nothing removed |
-| LMCache rescued the prefix after a GPU eviction | `none` | `host_restored` | GPU `BlockRemoved` for the previous request's blocks, the tier's own stores seen, the blocks read back |
+| LMCache rescued the prefix after a GPU eviction | `none` | `host_restored` | GPU `BlockRemoved` for the previous request's blocks, the tier's own stores seen, the blocks read back (live: 5/5, below) |
 | the prefix was lost from every tier and recomputed | `evicted`, confirmed | | the block where the read stopped was removed from the GPU ("211 of the previous request's KV blocks removed") |
 | the same, no events | `evicted`, inferred | | one engine, prefix unchanged, not reused |
 | the block is still on the GPU: the token prefix changed although the request did not (chat template) | `unknown`, "not an eviction" | | KV events, stream current, nothing lost |
@@ -115,14 +115,15 @@ unrelated prompts; 5 repetitions each ([record](../experiments/e_evict/runs/2026
 | vLLM alone | prefix lost, **0/5 hits** (0 of 3,404 tokens cached) | `evicted` 5/5, inferred |
 | vLLM + KV events | prefix lost, 0/5 hits | `evicted` 5/5, **confirmed** ("211 of the previous request's KV blocks removed"; the prefix spans about 213 blocks of 16) |
 | vLLM + LMCache | **98% restored, 5/5 hits** (3,328 of 3,404 tokens cached, from CPU memory) | `none` 5/5 |
-| vLLM + LMCache + KV events | 98% restored, 5/5 hits | `none` 5/5 |
+| vLLM + LMCache + KV events (2026-11-08, Prefixwise 0.9.0) | 98% restored, 5/5 hits | `none` 5/5, each with **`host_restored`**: "208 of the previous request's KV blocks had been removed from GPU memory (KV events; the tier's own stores were seen), yet this request read 3,328 of 3,404 prompt tokens from the cache without recomputing them" ([record](../experiments/e_evict/runs/2026-11-08-colab-l4-host-restored.md)) |
 
 That is the ROI line: the same flood, the same session, 0 of 5 turns reusable without LMCache
-and 5 of 5 with it, the restored share read straight from `cached_tokens`. The two LMCache runs
-predate `host_restored` (#64), so their hits were recorded as plain `none`; the fourth row is
-the configuration that now carries the detail, and re-running it is the next validation (the
-tier's events were verified in LMCache's current source; whether 0.5.7 already publishes them
-is what the run will show).
+and 5 of 5 with it, the restored share read straight from `cached_tokens`, and with KV events each
+rescued turn named as such. The 2026-11-07 LMCache rows predate `host_restored` (#64) and recorded
+plain `none`; the 2026-11-08 run is the same configuration on 0.9.0. It also settles the version
+question: LMCache 0.5.7 publishes its tier's stores into vLLM's event stream
+(`offload_tier_seen: true`, 569 batches, 0 lost messages). 3,328 tokens is 13 chunks of 256: the
+sub-chunk tail is recomputed, as LMCache's chunking predicts.
 
 The classifier also scores **120/120** on injected causes on vLLM + LMCache
 (`experiments/e1_open`, 120 turns across ten cause types, two sessions growing turn by turn as
@@ -132,7 +133,7 @@ agent traffic does).
 
 - `host_restored` is attribution, not a measurement of LMCache's own hit rate: LMCache's
   `/metrics` (port 8090 in the script) has that. Prefixwise says which *turns* were rescued and
-  what they would have cost.
+  what they would have cost. Validated live on LMCache 0.5.7 (above).
 - A restore is claimed only after the tier's own stores have appeared on the stream; the first
   restore after Prefixwise starts, before any offload store was seen, is a plain `none`.
 - Prefixwise treats any non-GPU medium as the offload tier and does not tell tiers apart; LMCache

@@ -93,7 +93,7 @@ changed never reaches RadixAttention's match at all. The verdicts, and the evide
 | what happened | verdict | detail | evidence |
 |---|---|---|---|
 | **GPU hit.** RadixAttention matched the prefix on the device | `none` | | `cached_tokens` covers the previous prompt |
-| **HiCache restore.** The GPU copy was evicted; `--enable-hierarchical-cache` brought the prefix back from host memory, no prefill recomputed | `none` | `host_restored` | `BlockRemoved` on the GPU medium for the previous request's blocks, the host tier's own stores seen on the stream (`CPU_PINNED` medium), and this request read those blocks back. Not run live yet: see below |
+| **HiCache restore.** The GPU copy was evicted; `--enable-hierarchical-cache` brought the prefix back from host memory, no prefill recomputed | `none` | `host_restored` | `BlockRemoved` on the GPU medium for the previous request's blocks, the host tier's own stores seen on the stream (`CPU_PINNED` medium), and this request read those blocks back. Live: 5/5, below |
 | **Eviction.** The radix tree dropped the prefix (leaves first) and this turn recomputed it | `evicted`, confirmed | | the block where the cache read stopped was removed (`"3,382 of the previous request's KV blocks removed"`) |
 | Eviction without events | `evicted`, inferred | | one engine, prefix unchanged, not reused; the evidence says *inferred* |
 | **Not an eviction.** The block is still on the GPU, so the token prefix changed although the request did not (a chat template re-rendering history) | `unknown` | | KV events, `--full-attention`, the request's own store arrived (up to 0.5 s) and nothing was lost |
@@ -127,12 +127,12 @@ Colab L4, Qwen3-4B, SGLang 0.5.23 (sglang-kernel 0.4.10), GPU KV pool capped at 
 | SGLang | prefix lost, 0/5 hits (3 of 3,404 tokens cached: the chat template's opening survived) | `evicted` 5/5, inferred |
 | SGLang + KV events, `--full-attention` | prefix lost, 0/5 hits | `evicted` 5/5, **confirmed** ("3,382 of the previous request's KV blocks removed"; 3,411, 3,376, 3,414, 3,379 on the other repetitions). 280 batches, 453,787 blocks stored, 423,501 removed, 0 dropped messages, 0 overflows |
 | SGLang + HiCache (`--hicache-ratio 4`) | **99% restored, 5/5 hits** (3,382 of 3,404 tokens cached) | `none` 5/5 |
+| SGLang + HiCache + KV events, `--full-attention` (2026-11-08, Prefixwise 0.9.0) | 99% restored, 5/5 hits | `none` 5/5, each with **`host_restored`** ("3379 of the previous request's KV blocks had been removed from GPU memory (KV events; the tier's own stores were seen), yet this request read 3,382 of 3,404 prompt tokens"); 284 batches, 0 lost messages ([record](../experiments/e_evict/runs/2026-11-08-colab-l4-host-restored.md)) |
 
 Blocks are one token at page size 1, SGLang's default for dense models, so "blocks removed" counts tokens: about the
-previous request's whole chain, prompt plus output. The HiCache run predates `host_restored`
-(#64) and was made without KV events, so its hits were recorded as plain `none`; with
-`--kv-events` the same run is the one that would show `host_restored`, and it is the next thing
-to run.
+previous request's whole chain, prompt plus output. The 2026-11-07 HiCache row predates
+`host_restored` (#64) and was made without KV events, so its hits were recorded as plain `none`;
+the 2026-11-08 row is the same flood with the events on.
 
 The classifier scores **120/120** on injected causes on SGLang (`experiments/e1_open`: every
 category 100%, with and without session ids sent), and `tests/test_sglang_events.py` replays
@@ -152,8 +152,7 @@ restart, concurrency, lost messages, overflow, and the `/server_info` checks.
 - Past 2 million tracked tokens (or 1.25x the GPU cache capacity, if larger) Prefixwise forgets
   its copy of the tree and judges nothing until it rebuilds; chains kept for sessions are capped
   at 16 million tokens.
-- Several ranks, HiCache with KV events (`host_restored`): tested over the wire, not yet run
-  live.
+- Several ranks: tested over the wire, not yet run live (a single L4 runs one rank).
 
 Design, alternatives considered and failure modes: [ENGINES.md](ENGINES.md). Questions and bug
 reports: GitHub issues.
