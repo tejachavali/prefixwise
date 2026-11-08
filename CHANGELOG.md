@@ -1,6 +1,38 @@
 # Changelog
 
-## Unreleased
+## 0.9.0: 2026-11-08
+
+Prefixwise now stops cache regressions before they ship. `prefixwise check -- pytest
+tests/agent_scenarios` runs an agent's scenarios through a local mock provider and fails the build
+on the causes that are code bugs (a tool list in a drifting order, a timestamp in the system
+prompt, a dropped breakpoint, a mutated tool result), with a GitHub Action, a pytest plugin that
+names each test as the scenario, and a monthly projection from a production baseline. Behind
+self-hosted engines, a hit that an offload tier rescued after a GPU eviction is told from a GPU
+hit (`host_restored`), and new guides cover SGLang, HiCache and LMCache end to end. One verdict
+got more honest: an Anthropic breakpoint left early while the stable prompt grows past it is a
+misplaced breakpoint, not a hit. Every change was reviewed independently; each confirmed finding
+is a test.
+
+**Upgrading:** nothing to change; no ledger migration (schema 6). What moves:
+- **Verdicts, Anthropic:** when the breakpoint stays early (on the system block) while the stable
+  prompt grows, turns that were `none` are now `breakpoint_misplaced` ("breakpoint too early") with
+  the stable tail as avoidable tokens. A report spanning the upgrade shows more
+  `breakpoint_misplaced` and more avoidable cost on Anthropic sessions with a system-only
+  breakpoint. The fix text says to add a breakpoint on the last message.
+- **New detail:** `none` rows can carry `host_restored` (one self-hosted engine with
+  `--kv-events`, once the offload tier's own events have been seen).
+- **Mock numbers:** `prefixwise run --mock` and `prefixwise serve --mock` now read all 2,000
+  synthetic prompt tokens on a continuing request and write all 2,000 on a miss (before: 1,000 of
+  2,000, a shape that was itself an early breakpoint). Avoidable tokens and dollars in mock
+  reports roughly double; verdicts are unchanged.
+- **pytest:** installing Prefixwise registers a `pytest11` plugin, `prefixwise`, that does nothing
+  unless run under `prefixwise check` (`PREFIXWISE_CHECK` and `PREFIXWISE_URL` set); `-p no:prefixwise`
+  disables it.
+- **Release tags:** the release workflow now runs for `vX.Y.Z` tags only, so the moving `v0.9` tag
+  the GitHub Action is used by (`uses: tejachavali/prefixwise@v0.9`) is not a release.
+New: `prefixwise check` (`--fail-on`, `--strict`, `--allow`, `--baseline`, `--bodies`, `--json`,
+`--first-turn-delay`), `prefixwise export --baseline`, `action.yml`, `POST /api/v1/check/scenario`,
+`PriceTable.miss_rate`; `docs/SGLANG.md`, `docs/LMCACHE.md`.
 
 - **Docs:** `docs/SGLANG.md` (RadixAttention, HiCache, data-parallel ranks) and `docs/LMCACHE.md` (which hits the offload tier rescued, which misses were the agent's) join `docs/VLLM.md`, which now covers `--kv-events auto`, replicas behind a router and `host_restored`; all three linked from the README.
 

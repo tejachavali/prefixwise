@@ -473,4 +473,4 @@ def test_the_action_runs_prefixwise_check_and_the_plugin_is_an_entry_point():
     assert "using: composite" in action and "prefixwise check" in action and "PIPESTATUS" in action
     assert "fail-on" in action and "strict" in action and "allow" in action and "baseline" in action
     assert 'prefixwise = "prefixwise.pytest_plugin"' in (ROOT / "pyproject.toml").read_text()
-    assert "## Unreleased" in (ROOT / "CHANGELOG.md").read_text()
+    assert "**`prefixwise check`" in (ROOT / "CHANGELOG.md").read_text()  # the gate is in the changelog
