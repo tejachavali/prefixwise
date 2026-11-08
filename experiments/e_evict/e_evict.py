@@ -35,6 +35,7 @@ import json
 import random
 import sys
 import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -78,11 +79,44 @@ def flood(url: str, model: str, total_tokens: int, each: int, seed: int, mock_st
     return n
 
 
+def in_engine_turn(url: str, b: dict, sid: str, ledger_path: str) -> tuple[dict, object]:
+    """Prefixwise runs inside the engine (--middleware prefixwise.PrefixwiseMiddleware): send the
+    request straight to the engine, then read the verdict the middleware wrote from its ledger."""
+    import time as _time
+
+    from prefixwise.ledger import Ledger
+    req = urllib.request.Request(f"{url}/v1/chat/completions", data=json.dumps(b).encode(),
+                                 headers={"Content-Type": "application/json", "X-Prefixwise-Session-Id": sid}, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=600) as r:
+            rid, payload, status = r.headers.get("X-Prefixwise-Request-Id"), json.loads(r.read()), r.status
+    except urllib.error.HTTPError as exc:
+        return {"status": exc.code, "response": {"error": exc.read()[:300].decode("utf-8", "replace")}}, None
+    row = None
+    led = Ledger(ledger_path)
+    deadline = _time.time() + 5
+    while row is None and _time.time() < deadline:
+        with led.reader() as conn:
+            row = conn.execute("SELECT cause, evidence, detail, prompt_tokens, cached_tokens FROM entries WHERE request_id = ?",
+                               (rid,)).fetchone()
+        if row is None:
+            _time.sleep(0.05)
+    if row is None:
+        raise SystemExit(f"no ledger row for request {rid} in {ledger_path}: is the middleware loaded and writing there?")
+    cause, evidence, detail, prompt, cached = row
+    res = {"status": status, "cause": cause, "evidence": evidence, "prompt_tokens": prompt or 0,
+           "cached_tokens": cached or 0, "response": payload, "request_id": rid}
+    return res, type("Entry", (), {"detail": detail})()
+
+
 def run(args) -> dict:
     engine = "vllm" if args.engine.startswith("vllm") else "sglang"
-    proxy = (PrefixwiseProxy(upstream_url=args.url, api_key="sk-dummy", engine=engine, kv_events=args.kv_events,
-                             full_attention=args.full_attention)
-             if not args.mock else PrefixwiseProxy(engine=engine))
+    if args.in_engine:
+        proxy = None  # Prefixwise is the middleware inside the server; its notes are in the server log
+    else:
+        proxy = (PrefixwiseProxy(upstream_url=args.url, api_key="sk-dummy", engine=engine, kv_events=args.kv_events,
+                                 full_attention=args.full_attention)
+                 if not args.mock else PrefixwiseProxy(engine=engine))
     mock_state = None
     if args.mock:
         # Simulated engine: hits until flooded; after a flood only an offload tier keeps the prefix.
@@ -118,7 +152,10 @@ def run(args) -> dict:
                 continue
             if label != "t1":
                 turns.append(f"Question {r}.{len(turns) + 1}: and now?")
-            res, entry = proxy.handle("vllm", {**body(args.model, system, turns), "session_id": sid})
+            if proxy is None:
+                res, entry = in_engine_turn(args.url, body(args.model, system, turns), sid, args.in_engine)
+            else:
+                res, entry = proxy.handle("vllm", {**body(args.model, system, turns), "session_id": sid})
             if res["status"] >= 400:
                 raise SystemExit(f"rep {r} {label}: upstream {res['status']}: {json.dumps(res['response'])[:300]}")
             row[label] = {"cause": res["cause"], "evidence": res.get("evidence"),
@@ -142,10 +179,14 @@ def run(args) -> dict:
     verdicts: dict[str, int] = {}
     for x in reps:
         verdicts[x["t3"]["cause"]] = verdicts.get(x["t3"]["cause"], 0) + 1
-    engine = {"notes": proxy.engine_notes,  # what Prefixwise's startup check of the engine found
-              "events": proxy.engine_events.snapshot() if proxy.engine_events is not None else None}
-    if proxy.engine_events is not None:
-        proxy.engine_events.stop()
+    if proxy is None:
+        engine = {"notes": ["Prefixwise ran inside the engine (--middleware): its notes and the KV-event stream are in "
+                            f"the server log; verdicts read from {args.in_engine}"], "events": None}
+    else:
+        engine = {"notes": proxy.engine_notes,  # what Prefixwise's startup check of the engine found
+                  "events": proxy.engine_events.snapshot() if proxy.engine_events is not None else None}
+        if proxy.engine_events is not None:
+            proxy.engine_events.stop()
     return {"engine": args.engine, "model": args.model, "mock": args.mock, "repeats": args.repeats,
             "kv_events": args.kv_events,
             "prefix_tokens": args.prefix_tokens, "gpu_kv_tokens": args.gpu_kv_tokens,
@@ -203,6 +244,9 @@ def main() -> int:
                     "Prefixwise should name the GPU-only eviction 'evicted' (the engine join)")
     ap.add_argument("--full-attention", action="store_true",
                     help="SGLang: the model has full attention only (Qwen3-4B does), so events can rule an eviction out")
+    ap.add_argument("--in-engine", metavar="LEDGER",
+                    help="Prefixwise runs inside the engine (vllm serve --middleware prefixwise.PrefixwiseMiddleware): send "
+                         "requests straight to --url and read each verdict from the ledger the middleware writes at LEDGER")
     ap.add_argument("--output-dir", default=str(Path(__file__).resolve().parent / "results"))
     args = ap.parse_args()
     res = run(args)
