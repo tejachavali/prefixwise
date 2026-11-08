@@ -64,6 +64,19 @@ def test_sglang_is_detected_from_server_info_with_its_events_and_cache_report():
         assert any("--enable-cache-report off" in n for n in info["notes"])
     finally:
         s.stop()
+    # a config given but no usable tcp descriptor (ipc://, a null publisher): kv_events is None, so not publishing
+    s = _Server({"/server_info": (200, {**SGLANG_INFO, "kv_events": None, "kv_events_config": '{"publisher": "zmq", "endpoint": "ipc:///tmp/kv"}'})})
+    try:
+        assert probe_upstream(s.url)["publishes_events"] is False
+    finally:
+        s.stop()
+    # a key-protected SGLang: a note saying which variable to set, no engine
+    s = _Server({"/server_info": (401, {"error": "unauthorized"})})
+    try:
+        info = probe_upstream(s.url)
+        assert info["engine"] is None and "PREFIXWISE_API_KEY" in info["notes"][0]
+    finally:
+        s.stop()
 
 
 def test_older_sglang_falls_back_to_the_deprecated_endpoint():
@@ -97,16 +110,12 @@ def test_vllm_is_detected_from_version_and_its_event_sources():
         s.stop()
 
 
-def test_models_owner_is_the_last_resort_and_unknown_servers_detect_nothing():
+def test_models_endpoint_is_never_trusted_and_unknown_servers_detect_nothing():
+    # A router relays its workers' /v1/models (owned_by vllm or sglang), and a router is not one engine.
     s = _Server({"/v1/models": (200, {"data": [{"id": "m", "owned_by": "vllm"}]})})
     try:
-        assert probe_upstream(s.url)["engine"] == "vllm"
-    finally:
-        s.stop()
-    s = _Server({"/v1/models": (200, {"data": [{"id": "m", "owned_by": "openai"}]})})
-    try:
         info = probe_upstream(s.url)
-        assert info["engine"] is None and info["notes"] == []
+        assert info["engine"] is None and info["notes"] == [] and "/v1/models" not in s.hits
     finally:
         s.stop()
     # unreachable: a note, no engine, and quickly
@@ -118,15 +127,20 @@ def test_models_owner_is_the_last_resort_and_unknown_servers_detect_nothing():
     assert probe_upstream("https://api.openai.com/v1")["engine"] is None
 
 
+PROBE_SGLANG = lambda url, api_key=None: {"engine": "sglang", "version": "0.5.23", "publishes_events": True,  # noqa: E731
+                                            "cache_report": True, "notes": []}
+
+
 def test_detect_engine_fills_the_flags_and_explicit_flags_stand(monkeypatch):
     pytest.importorskip("zmq")
     pytest.importorskip("msgspec")
-    probe = lambda url, api_key=None: {"engine": "sglang", "version": "0.5.23", "publishes_events": True,  # noqa: E731
-                                        "cache_report": True, "notes": []}
+    probe = PROBE_SGLANG
     engine, kv, lines = _detect_engine("http://127.0.0.1:30000", None, None, None, probe=probe)
     assert (engine, kv) == ("sglang", "auto")
     assert lines[0].startswith("prefixwise: upstream is SGLang 0.5.23 (detected): --engine sglang, --kv-events auto")
-    assert any("--full-attention" in l for l in lines)
+    assert any("--full-attention" in l for l in lines) and any("--engine none" in l for l in lines)
+    # --engine none: no probe, no engine, nothing printed
+    assert _detect_engine("http://127.0.0.1:30000", "none", None, None, probe=lambda *a, **k: 1 / 0) == (None, None, [])
     # explicit --engine: nothing probed, nothing printed
     assert _detect_engine("http://127.0.0.1:30000", "vllm", None, None, probe=lambda *a, **k: 1 / 0) == ("vllm", None, [])
     # explicit --kv-events kept; --full-attention given: no hint
@@ -140,7 +154,9 @@ def test_detect_engine_fills_the_flags_and_explicit_flags_stand(monkeypatch):
                                          "cache_report": None, "notes": []}
     engine, kv, lines = _detect_engine("http://x", None, None, None, probe=probe2)
     assert (engine, kv) == ("vllm", None) and any("publishes no KV events" in l for l in lines)
-    # the extras missing: engine set, events not subscribed, told how
+
+
+def test_without_the_engines_extra_the_engine_is_set_but_events_are_not(monkeypatch):
     import builtins
     real_import = builtins.__import__
 
@@ -149,5 +165,5 @@ def test_detect_engine_fills_the_flags_and_explicit_flags_stand(monkeypatch):
             raise ImportError
         return real_import(name, *a, **k)
     monkeypatch.setattr(builtins, "__import__", no_zmq)
-    engine, kv, lines = _detect_engine("http://x", None, None, None, probe=probe)
+    engine, kv, lines = _detect_engine("http://x", None, None, None, probe=PROBE_SGLANG)
     assert (engine, kv) == ("sglang", None) and any("prefixwise[engines]" in l for l in lines)
