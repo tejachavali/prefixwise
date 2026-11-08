@@ -65,6 +65,7 @@ def test_clickhouse_sink_posts_json_each_row_in_batches():
         for i in range(3):
             led.record(entry(f"r{i}"))
         wait_for(lambda: sum(len(b.splitlines()) for _, _, b in ch.requests) == 3)
+        wait_for(lambda: sink.stats()["sent"] == 3)  # the sender counts a batch after it reads the reply
         path, headers, body = ch.requests[0]
         query = urllib.parse.parse_qs(urllib.parse.urlsplit(path).query)["query"][0]
         assert query == "INSERT INTO prefixwise.entries FORMAT JSONEachRow"
