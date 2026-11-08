@@ -349,7 +349,7 @@ Inside vLLM itself, with no proxy: `vllm serve <model> ... --middleware prefixwi
 
 Step-by-step guides, with what each verdict means and the live numbers: **[docs/VLLM.md](docs/VLLM.md)** (vLLM, KV events, several caches), **[docs/LMCACHE.md](docs/LMCACHE.md)** (vLLM with an offload tier: which hits LMCache rescued, which misses were the agent's), **[docs/SGLANG.md](docs/SGLANG.md)** (SGLang, HiCache, data-parallel ranks).
 
-Prefixwise reads the engine's `cached_tokens` like any provider's: start vLLM with `--enable-prompt-tokens-details`, SGLang with `--enable-cache-report`. It recognises the engine behind `--upstream` at startup (vLLM's `/version`, SGLang's `/server_info`) and, when the engine publishes KV events, subscribes to them (`--kv-events auto`); `--engine` and `--kv-events` are the explicit form:
+Prefixwise reads the engine's `cached_tokens` like any provider's: start vLLM with `--enable-prompt-tokens-details`, SGLang with `--enable-cache-report`. It recognises the engine behind `--upstream` at startup (vLLM's `/version`, SGLang's `/server_info`) and, when the engine publishes KV events, subscribes to them (`--kv-events auto`); `--engine` and `--kv-events` are the explicit form, and `--engine none` says a URL is a router, not one engine:
 
 ```bash
 prefixwise serve --upstream http://127.0.0.1:8000                    # detected: vLLM or SGLang, KV events if published

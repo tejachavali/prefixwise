@@ -524,10 +524,13 @@ def probe_upstream(upstream_url: str, timeout: float = 1.5, api_key: str | None 
     """What is behind --upstream, from the endpoints the engines serve: {"engine": "vllm" | "sglang" |
     None, "version": str | None, "publishes_events": bool | None, "cache_report": bool | None,
     "notes": [...]}. SGLang: GET /server_info (the deprecated /get_server_info on 404), which carries
-    `version`, `model_path`, `kv_events` / `kv_events_config` and `enable_cache_report`. vLLM: GET /version
-    ({"version": ...}), then /kv_event_sources (per-rank publisher configs; empty when none). Anything
-    else, or an upstream that does not answer in `timeout` seconds, is no engine (a hosted API, a
-    gateway): the caller keeps its defaults. Read-only; nothing is sent but GETs."""
+    `version`, `model_path`, `kv_events` (the tcp publisher descriptor; None when none is usable) and
+    `enable_cache_report`. vLLM: GET /version ({"version": ...}), then /kv_event_sources (per-rank
+    publisher configs; empty when none). Anything else, or an upstream that does not answer in
+    `timeout` seconds, is no engine (a hosted API, most gateways): the caller keeps its defaults.
+    `/v1/models` is deliberately not read: routers relay it, and a router is not one engine. A
+    router that relays its worker's /server_info (the SGLang model gateway) cannot be told from the
+    worker here: `--engine none` says so. Read-only; nothing is sent but GETs."""
     import json as _json
     import urllib.error
     import urllib.parse
@@ -561,12 +564,16 @@ def probe_upstream(upstream_url: str, timeout: float = 1.5, api_key: str | None 
     if status is None:
         out["notes"].append("upstream did not answer: no engine detected")
         return out
+    if status in (401, 403):
+        out["notes"].append(f"upstream answered {status} to /server_info: set PREFIXWISE_API_KEY so the engine can be "
+                            "detected, or pass --engine")
+        return out
     if status == 200 and isinstance(info, dict) and info.get("version") and (
             "model_path" in info or "server_args" in info or "kv_events" in info or info.get("frontend")):
         args = info.get("server_args") if isinstance(info.get("server_args"), dict) else info
         out.update(engine="sglang", version=str(info["version"]))
-        events = args.get("kv_events") or info.get("kv_events")
-        out["publishes_events"] = bool(events) or bool(args.get("kv_events_config") or info.get("kv_events_config"))
+        events = args.get("kv_events") or info.get("kv_events")  # None for ipc:// or a null publisher
+        out["publishes_events"] = isinstance(events, dict) and bool(events.get("endpoint_port_base"))
         if "enable_cache_report" in args or "enable_cache_report" in info:
             out["cache_report"] = bool(args.get("enable_cache_report", info.get("enable_cache_report")))
             if not out["cache_report"]:
@@ -582,13 +589,6 @@ def probe_upstream(upstream_url: str, timeout: float = 1.5, api_key: str | None 
                                           and c.get("publisher") == "zmq" and c.get("endpoint")
                                           for c in sources.values())
         return out
-    status, models = get("/v1/models")
-    if status == 200 and isinstance(models, dict):
-        owners = {str((m or {}).get("owned_by") or "") for m in models.get("data") or [] if isinstance(m, dict)}
-        if "vllm" in owners:
-            out["engine"] = "vllm"
-        elif "sglang" in owners:
-            out["engine"] = "sglang"
     return out
 
 

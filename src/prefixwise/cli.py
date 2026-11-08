@@ -66,11 +66,16 @@ def _detect_engine(upstream: str | None, engine: str | None, kv_events: str | No
     a vLLM or SGLang server is one engine (`--engine`), and one that publishes KV events gets
     `--kv-events auto` when the engines extra is installed. Explicit flags always stand. Returns
     (engine, kv_events, lines to print)."""
+    if engine == "none":  # a hosted API or a router: no engine, and no probe
+        return None, kv_events, []
     if engine is not None or mock or not upstream:
         return engine, kv_events, []
     from .engines import probe_upstream
     info = (probe or probe_upstream)(upstream, api_key=os.environ.get("PREFIXWISE_API_KEY"))
     lines = [f"prefixwise: {n}" for n in info["notes"] if "did not answer" not in n]
+    if info["engine"] == "sglang" and kv_events is None and info["publishes_events"]:
+        lines.append("prefixwise: if this URL is a router in front of several SGLang servers (it relays their "
+                     "/server_info), pass --engine none: one engine's verdicts do not hold behind a router")
     if not info["engine"]:
         return engine, kv_events, lines
     name = {"vllm": "vLLM", "sglang": "SGLang"}[info["engine"]]
@@ -99,8 +104,8 @@ def cmd_serve(args) -> int:
     from .proxy import serve
 
     ledger = args.ledger or os.environ.get("PREFIXWISE_LEDGER_PATH") or DEFAULT_LEDGER
-    engine, kv_events, lines = _detect_engine(args.upstream, args.engine, args.kv_events, args.full_attention,
-                                              mock=bool(args.mock))
+    engine, kv_events, lines = _detect_engine(args.upstream or os.environ.get("PREFIXWISE_UPSTREAM_URL"), args.engine,
+                                              args.kv_events, args.full_attention, mock=bool(args.mock))
     for line in lines:
         print(line, file=sys.stderr, flush=True)
     try:
@@ -755,11 +760,12 @@ def build_parser() -> argparse.ArgumentParser:
                    help="also send every row to a sink (repeatable): file:///path.jsonl, or "
                         "clickhouse://user:pass@host:8123/db.table (default: $PREFIXWISE_SINKS)")
     ledger_opt(p)
-    p.add_argument("--engine", choices=["vllm", "sglang"],
+    p.add_argument("--engine", choices=["vllm", "sglang", "none"],
                    help="one self-hosted engine behind --upstream: no routing, so an unchanged prefix "
                         "that misses is an eviction (inferred; see --kv-events). Default: detected from the "
                         "upstream at startup (vLLM's /version, SGLang's /server_info), and --kv-events auto when "
-                        "it publishes KV events; a hosted API or a gateway detects as none")
+                        "it publishes KV events; a hosted API detects as none. 'none': skip detection (a router "
+                        "that relays a worker's /server_info, such as the SGLang model gateway, is not one engine)")
     p.add_argument("--kv-events", metavar="ENDPOINT",
                    help="the engine's KV-event stream, e.g. tcp://127.0.0.1:5557, to confirm evictions "
                         "or rule them out (vLLM, or SGLang >= 0.5.20; needs: pip install 'prefixwise[engines]'). "
