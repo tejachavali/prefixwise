@@ -336,6 +336,10 @@ skew, failed requests), fixed above. The rules above answer all of them.
   0.5.7 and SGLang 0.5.23 + HiCache, each with KV events, 5 of 5 restored hits named `none` with
   the detail `host_restored`, `offload_tier_seen` true on both streams, 0 lost messages
   (`experiments/e_evict/runs/2026-11-08-colab-l4-host-restored.md`).
+- **The middleware, live 2026-11-08:** `vllm serve --middleware prefixwise.PrefixwiseMiddleware`
+  on vLLM 0.33.0 with the same flood: `evicted`, confirmed, 5 of 5 with the proxy's block counts,
+  KV events discovered from the engine client, verdict headers on the response
+  (`experiments/e_evict/runs/2026-11-08-colab-l4-middleware.md`).
 - `tests/test_engine_fleet.py`: several caches, each verdict and each no-claim case (a prefix
   rendered differently, a side call served elsewhere, the next request sent before this one was
   judged, a stream behind, two caches reporting one request, a replica that went away), over

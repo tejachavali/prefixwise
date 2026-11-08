@@ -84,9 +84,12 @@ without a collector. The same class works in your own FastAPI or Starlette app
 flag and its KV join needs `/server_info`, so SGLang users run the proxy ([SGLANG.md](SGLANG.md)).
 The middleware sits outside vLLM's API-key check, so an unauthenticated request is fingerprinted
 before it is rejected and its 401 is a row without a verdict; bodies over 32 MiB
-(`PREFIXWISE_MAX_BODY_BYTES`) pass through unexamined. Tested against a stand-in ASGI engine
-(`tests/test_asgi.py`, including a client that leaves mid-stream); not yet run inside a live
-`vllm serve`.
+(`PREFIXWISE_MAX_BODY_BYTES`) pass through unexamined. Run live inside `vllm serve` 0.33.0 on an
+L4 (Qwen3-4B): the same flood as the proxy's, the same five confirmed evictions with the same
+block counts, the KV events found from the engine itself, the verdict headers on the response
+([record](../experiments/e_evict/runs/2026-11-08-colab-l4-middleware.md)). Note that in-process every request is recorded, the flood included, where the proxy's
+E-evict sends the flood past Prefixwise. Not yet run live: streaming under load,
+`--api-server-count` above 1 with a collector.
 
 ## What the verdicts mean
 
