@@ -369,6 +369,7 @@ python experiments/e1_open/e1_open.py --mock           # harness smoke test
 
 ## Design notes
 
+How it is built today (parts, request flow, data, rules): [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 The original research and architecture, kept as written: [docs/DESIGN.md](docs/DESIGN.md).
 Current designs: [docs/DATA.md](docs/DATA.md) (data and metrics), [docs/API.md](docs/API.md),
 [docs/ENGINES.md](docs/ENGINES.md) (vLLM and SGLang engine join).
