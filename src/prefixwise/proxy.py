@@ -1003,6 +1003,7 @@ class PrefixwiseProxy:
         identity = _identity(fps)
         new_thread, interleaved, parent_facts = False, False, None
         prior_latest = state.latest if state is not None else None
+        prior_threads = len(state.threads) if state is not None else 0  # before this turn is added
         if state is not None:
             # Compare with the previous turn of this request's own conversation: the lane's latest
             # turn, unless another conversation interleaved (parallel subagents on one model).
@@ -1130,7 +1131,7 @@ class PrefixwiseProxy:
             interleaved or identity[0] == prior_latest
             # a compaction while several conversations share the lane: the turn it fell back to may
             # be another conversation's (whose next turn will read that write): claim nothing
-            or (bool(ctx["compaction_event"]) and len(state.threads) <= 1))
+            or (bool(ctx["compaction_event"]) and prior_threads <= 1))
         if own and prev_facts is not None and prev is not None and prompt_tokens > 0:
             w5, w1, cw = unread_write(result.cause.value, cached, prev_facts.write_5m, prev_facts.write_1h,
                                       prev_facts.cache_write)
