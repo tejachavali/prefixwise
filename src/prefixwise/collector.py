@@ -351,14 +351,17 @@ class Collector:
 
         div = first_divergence(prev.blocks, curr.blocks) if prev is not None else None
         priced_model = str(rec.response_model or rec.model)
+        # Waste is capped at what the previous turn left in the cache, except for a misplaced
+        # breakpoint, whose waste is exactly the stable prefix it left out of the cache.
+        held = ((prev.cached_tokens + prev.cache_written) if prev is not None
+                and (prev.provider == "anthropic" or prev.cache_written)
+                and result.cause is not MissCause.BREAKPOINT_MISPLACED else None)
         entry = LedgerEntry(
             session_id=session_id, agent_id=rec.agent_id,
             provider=provider, model=rec.model, cause=result.cause.value,
             prompt_tokens=prompt_tokens, cached_tokens=cached,
             avoidable_tokens=avoidable_for_turn(result.legit, prompt_tokens, cached,
-                                                prev.prompt_tokens if prev else None,
-                                                (prev.cached_tokens + prev.cache_written) if prev is not None
-                                                and (prev.provider == "anthropic" or prev.cache_written) else None),
+                                                prev.prompt_tokens if prev else None, held),
             avoidable_cost=None, legit=result.legit, native_reason=native_reason,
             cost=self.prices.request_cost(priced_model, provider, usage),
             task_id=rec.task_id, request_id=rec.request_id,

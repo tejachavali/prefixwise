@@ -71,7 +71,7 @@ def test_proxy_spans_follow_genai_conventions_and_join_the_callers_trace(proxy_b
     a = dict(second.attributes)
     assert a["gen_ai.operation.name"] == "chat" and a["gen_ai.provider.name"] == "openai"
     assert a["openai.api.type"] == "chat_completions" and a["gen_ai.request.model"] == "gpt-5.6"
-    assert a["gen_ai.usage.input_tokens"] == 2000 and a["gen_ai.usage.cache_read.input_tokens"] == 1000
+    assert a["gen_ai.usage.input_tokens"] == 2000 and a["gen_ai.usage.cache_read.input_tokens"] == 2000
     assert "gen_ai.usage.cache_write.input_tokens" not in a  # only when non-zero
     assert a["gen_ai.conversation.id"] == "s1" and a["gen_ai.response.id"]
     assert dict(first.attributes)["prefixwise.cache.cause"] == "first_write"

@@ -199,6 +199,26 @@ def _served_all(prev: RequestSnapshot, curr: RequestSnapshot) -> bool:
     return target > 0 and curr.cached_tokens >= target
 
 
+def _stable_uncached_tail(prev: RequestSnapshot, curr: RequestSnapshot) -> tuple[int, int, int]:
+    """Anthropic, blocks unchanged: (held, shared, tail). `held` is what the previous turn left in
+    the cache (its reads plus its write, which ends at its last breakpoint), `shared` the prefix
+    both turns have in common (the shorter prompt), `tail` the part of it after the breakpoint:
+    stable, yet sent uncached on every turn. The tail counts only when the cache served all it held
+    (so nothing else explains the miss) and the tail is at least the model's minimum cacheable
+    size, so a later breakpoint would have cached it; a breakpoint that moves forward each turn
+    leaves no tail. (0, 0, 0) when the rule does not apply."""
+    if prev.provider != "anthropic" or not curr.usage_known or not curr.has_breakpoint:
+        return 0, 0, 0
+    held = prev.cached_tokens + prev.cache_written
+    if held <= 0 or prev.prompt_tokens <= 0 or curr.prompt_tokens <= 0 or curr.cached_tokens < held:
+        return 0, 0, 0
+    shared = min(prev.prompt_tokens, curr.prompt_tokens)
+    tail = shared - held
+    if tail < max(_min_prefix(curr) or 0, 1):
+        return 0, 0, 0
+    return held, shared, tail
+
+
 def _first_change(prev: RequestSnapshot, curr: RequestSnapshot, secondary: list,
                   native_reason: str | None) -> Classification | None:
     """The cause named by the first part of the prompt that changed, or None if none did
@@ -299,7 +319,6 @@ def classify(prev: RequestSnapshot | None, curr: RequestSnapshot,
                               f"{changed.cause.value} in it cost nothing",
                               secondary + [changed.cause], native_reason, score=False)
     if changed is not None:
-        reusable = min(prev.prompt_tokens, curr.prompt_tokens) if prev.prompt_tokens else curr.prompt_tokens
         gap, ttl = curr.gap_seconds, curr.ttl_seconds
         if (curr.usage_known and ttl is not None and gap is not None and gap > ttl
                 and curr.prompt_tokens > 0 and curr.cached_tokens == 0):
@@ -320,8 +339,17 @@ def classify(prev: RequestSnapshot | None, curr: RequestSnapshot,
     # Blocks equal (or only the user turn changed). A full hit wins over every inference below:
     # if the cache served all of the reusable prefix, a changed param did not reach the rendered
     # prompt, the markers were not needed (or were not misplaced) and the minimum did not apply.
-    reusable = min(prev.prompt_tokens, curr.prompt_tokens) if prev.prompt_tokens else curr.prompt_tokens
+    # One exception: a breakpoint that stays early while the stable prompt grows past it. The
+    # cache serves all it holds, turn after turn, and the stable part after the breakpoint is paid
+    # uncached every time: that is a misplaced breakpoint, not a hit.
     if _served_all(prev, curr):
+        held, shared, tail = _stable_uncached_tail(prev, curr)
+        if tail:
+            return Classification(MissCause.BREAKPOINT_MISPLACED, False,
+                                  f"breakpoint too early: the cache held {held} tokens and served them all, but "
+                                  f"both turns share a {shared}-token prefix; the {tail} stable tokens after the "
+                                  "last breakpoint are sent uncached every turn (a later breakpoint would cache "
+                                  "them)", secondary, native_reason)
         if prev.params != curr.params:
             secondary.append(MissCause.PARAM_RENDERED)
         return Classification(MissCause.NONE, None,
@@ -363,6 +391,7 @@ def classify(prev: RequestSnapshot | None, curr: RequestSnapshot,
     # not to this turn's prompt, which includes the newly appended tail.
     # A real hit wins over every timing rule below: if the cache served
     # the prefix, it did not expire and was not evicted.
+    reusable = min(prev.prompt_tokens, curr.prompt_tokens) if prev.prompt_tokens else curr.prompt_tokens
     if curr.prompt_tokens > 0 and curr.cached_tokens >= reusable * 0.5:
         return Classification(MissCause.NONE, None,
                               "append-only turn; cache_read at least half of the prior prefix",

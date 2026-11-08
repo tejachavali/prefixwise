@@ -234,8 +234,10 @@ def mock_forward_factory(provider: str, state: dict):
             # Real shape, observed live 2026-11-06: null on a hit, a nested
             # cache_miss_reason on a miss.
             payload = {"id": f"msg_{request_id[:8]}",
-                       "usage": {"input_tokens": tokens - cached, "cache_read_input_tokens": cached,
-                                 "cache_creation_input_tokens": 0, "output_tokens": 1},
+                       # A hit reads what the previous turn held and writes the new tail (the breakpoint
+                       # moves with the last message), as Anthropic's cache does.
+                       "usage": {"input_tokens": 0 if hit else tokens, "cache_read_input_tokens": cached,
+                                 "cache_creation_input_tokens": tokens - cached if hit else 0, "output_tokens": 1},
                        "diagnostics": ({"cache_miss_reason": {"type": reason, "cache_missed_input_tokens": tokens}}
                                        if reason else None)}
         else:

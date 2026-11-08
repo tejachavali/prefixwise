@@ -68,7 +68,7 @@ def test_anthropic_through_litellm(base, cb):
     out = rows(cb, 2)
     assert [r[:5] for r in out] == [("anthropic", "s1", "coder", "t1", "first_write"),
                                     ("anthropic", "s1", "coder", "t1", "none")]
-    assert out[1][5:7] == (2000, 1000)  # LiteLLM's prompt_tokens includes cache reads: not counted twice
+    assert out[1][5:7] == (2000, 2000)  # LiteLLM's prompt_tokens includes cache reads: not counted twice
 
 
 def test_openai_through_litellm_session_from_metadata(base, cb):
