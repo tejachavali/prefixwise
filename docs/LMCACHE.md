@@ -138,7 +138,8 @@ agent traffic does).
   restore after Prefixwise starts, before any offload store was seen, is a plain `none`.
 - Prefixwise treats any non-GPU medium as the offload tier and does not tell tiers apart; LMCache
   itself publishes only a CPU medium today.
-- How often token-level divergence happens in real agent traffic has not been measured yet.
+- Token-level divergence ("not an eviction") did not occur in the live runs (0 of 50 harness turns, 0
+  of 8 agent requests; [VLLM.md](VLLM.md)).
 
 Design, alternatives considered and failure modes: [ENGINES.md](ENGINES.md). Questions and bug
 reports: GitHub issues.

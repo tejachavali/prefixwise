@@ -302,3 +302,49 @@ def test_dropping_thinking_on_a_model_that_drops_it_itself_is_no_edit():
     e = turn(p, body([USER, STRIPPED, NEXT, {"role": "assistant", "content": "a"},
                       {"role": "user", "content": "more"}], model="claude-haiku-4-5"))
     assert e.cause == "none" and e.avoidable_tokens == 0
+
+
+def test_output_rerendered_names_the_previous_output_a_prompt_only_read_left_behind():
+    """Live (E-template, vLLM and SGLang, Qwen3-4B): the read stops at the previous prompt and the
+    previous output, 573 tokens, is prefilled again in the form the template renders it."""
+    from prefixwise.details import Facts, detail_for
+    prev = Facts(provider="openai", model="m", prompt_tokens=403, completion_tokens=573, msgs=["s", "u1"])
+    curr = Facts(provider="openai", model="m", prompt_tokens=510, msgs=["s", "u1", "a1", "u2"])
+    hit = dict(prompt_tokens=510, cached_tokens=400, engine=True, prompt_served=True)
+    new, detail, why = detail_for("none", prev, curr, **hit)
+    assert new is None and detail == "output_rerendered" and "573-token output was not reused" in why
+    # the output was read back (a template that keeps history as generated): no claim
+    assert detail_for("none", prev, curr, prompt_tokens=976 + 107, cached_tokens=960, engine=True,
+                      prompt_served=True)[1] is None
+    # the read did not cover the previous prompt (an eviction tail, judged a hit by the half rule): no claim
+    assert detail_for("none", prev, curr, prompt_tokens=510, cached_tokens=240, engine=True,
+                      prompt_served=False)[1] is None
+    # a hosted API: its output count includes reasoning it never returns, and it may not cache output
+    assert detail_for("none", prev, curr, prompt_tokens=510, cached_tokens=400, engine=False,
+                      prompt_served=True)[1] is None
+    # too short an output: the rounding of reads could hide a reused one
+    short = Facts(provider="openai", model="m", prompt_tokens=403, completion_tokens=60, msgs=["s", "u1"])
+    assert detail_for("none", short, curr, **{**hit, "prompt_tokens": 470})[1] is None
+    # the earlier messages changed (a different conversation shape): not this detail
+    edited = Facts(provider="openai", model="m", prompt_tokens=510, msgs=["s", "u1x", "a1", "u2"])
+    assert detail_for("none", prev, edited, **hit)[1] is None
+    # a miss is not this detail either
+    assert detail_for("evicted", prev, curr, prompt_tokens=510, cached_tokens=0, engine=True)[1] is None
+
+
+def test_usage_facts_keep_the_turn_token_counts():
+    from prefixwise.details import Facts, usage_facts
+    f = usage_facts(Facts(provider="openai"), {"prompt_tokens": 510, "completion_tokens": 348,
+                                               "prompt_tokens_details": {"cached_tokens": 400}}, 0)
+    assert (f.prompt_tokens, f.completion_tokens) == (510, 348)
+    g = usage_facts(Facts(provider="anthropic"), a_usage(read=300, fresh=100), 0)
+    assert (g.prompt_tokens, g.completion_tokens) == (400, 5)
+
+
+def test_the_engine_is_scoped_to_the_providers_it_serves():
+    """`prefixwise run` behind vLLM with Anthropic traffic going to Anthropic: only the OpenAI
+    requests are the engine's."""
+    p = PrefixwiseProxy(upstream_url="http://unused", api_key="k", engine="vllm")
+    assert p.engine_for("openai") == "vllm" and p.engine_for("anthropic") == "vllm"
+    p.engine_providers = {"openai"}
+    assert p.engine_for("openai") == "vllm" and p.engine_for("anthropic") is None

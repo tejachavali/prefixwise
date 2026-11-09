@@ -19,7 +19,7 @@ import threading
 import time
 from collections import OrderedDict
 
-from .classifier import Classification, MissCause, RequestSnapshot, classify, first_divergence
+from .classifier import Classification, MissCause, RequestSnapshot, classify, first_divergence, served_all
 from .details import Facts, detail_for
 from .diagnostics import AgreementScorer
 from .ledger import Ledger, LedgerEntry, avoidable_for_turn, unread_write
@@ -342,7 +342,9 @@ class Collector:
             prev_facts = None  # a stitched branch: the lane's latest request may be another branch
         new_cause, detail, why = detail_for(result.cause.value, prev_facts, facts,
                                             prompt_tokens=prompt_tokens, cached_tokens=cached,
-                                            evicted_blocks=curr.evicted_blocks if rec.engine_caches == 1 else None)
+                                            evicted_blocks=curr.evicted_blocks if rec.engine_caches == 1 else None,
+                                            engine=rec.engine is not None,
+                                            prompt_served=prev is not None and served_all(prev, curr))
         if new_cause:
             cause_name, legit = new_cause
             result = Classification(MissCause(cause_name), legit,

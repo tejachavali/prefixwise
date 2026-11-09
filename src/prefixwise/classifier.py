@@ -228,6 +228,11 @@ def _served_all(prev: RequestSnapshot, curr: RequestSnapshot) -> bool:
     return curr.cached_tokens >= target or curr.cached_tokens + slack > target
 
 
+def served_all(prev: RequestSnapshot, curr: RequestSnapshot) -> bool:
+    """Public form of `_served_all`, for the details that need the same hit check."""
+    return _served_all(prev, curr)
+
+
 def _served(prev: RequestSnapshot, curr: RequestSnapshot) -> str:
     """'N of M tokens', with the rounding named when the count is short of the prefix."""
     target = _reusable(prev, curr)
