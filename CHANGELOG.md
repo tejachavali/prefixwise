@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.10.7: 2026-11-09
+
+One correction to the session view from 0.10.5: what the number under "first changed" means.
 
 - **`report --session`: what the number in `messages[8]` means, said correctly.** It is the block's position in the whole prompt, from 0: tools, then system, then the conversation, one position per tool, system prompt and message. It is not the message's own index, as the footer, the API doc and the 0.10.5 notes said. The footer and docs now say so, and that on an append-only hit it is the first block of the new turn. A `model_switch` or `first_write` row no longer shows a first-changed block: it was a comparison with another model's or another conversation's request.
 
