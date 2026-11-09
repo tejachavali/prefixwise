@@ -49,12 +49,20 @@ def test_rounded_read_with_a_param_change_is_a_hit():
     c = classify(prev, curr)
     assert c.cause is MissCause.NONE and MissCause.PARAM_RENDERED in c.secondary
     assert "whole cache blocks" in c.evidence
-    # the same numbers without a change: the same hit
+    # the same numbers without a change: the same hit; a previous prompt whose tail was its
+    # generation prompt (never reusable) reads a block further short, still a hit
     assert classify(snap(407, 0), snap(489, 400)).cause is MissCause.NONE
-    # a read that stopped well short of the prefix is not rounded up to a hit
+    assert classify(snap(579, 0), snap(616, 560)).cause is MissCause.NONE
+    # a read that stopped short of the prefix is not rounded up to a hit
     short = classify(prev, snap(489, 16, chat_template_kwargs={"enable_thinking": False}))
     assert short.cause is MissCause.PARAM_RENDERED
     assert classify(snap(50, 0), snap(70, 16)).cause is not MissCause.NONE
+    assert classify(snap(240, 0), snap(300, 128)).cause is not MissCause.NONE  # 112 tokens recomputed
+    # a count a whole block short is not a full read: OpenAI reports a full 2,048 as 2,048, not 1,920
+    assert classify(snap(2048, 0, thinking="a"), snap(2300, 1920, thinking="b")).cause is MissCause.PARAM_RENDERED
+    assert classify(snap(2048, 0), snap(2300, 1920)).cause is not MissCause.NONE or \
+        "whole cache blocks" not in classify(snap(2048, 0), snap(2300, 1920)).evidence
+    assert classify(snap(1100, 0, thinking="a"), snap(1300, 1024, thinking="b")).cause is MissCause.NONE
     # Anthropic reports exact counts: no slack there
     a_prev = RequestSnapshot(model="m", provider="anthropic", blocks=BLOCKS, prompt_tokens=4000, cached_tokens=0,
                              cache_written=4000, has_breakpoint=True, params={"thinking": "a"})
