@@ -348,6 +348,29 @@ class Ledger:
             names = [d[0] for d in cur.description]
         return dict(zip(names, row)) if row else None
 
+    def latest_session(self) -> str | None:
+        """The session of the most recent row, for `report --session latest`."""
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT session_id FROM entries WHERE session_id IS NOT NULL ORDER BY id DESC LIMIT 1").fetchone()
+        return row[0] if row else None
+
+    def turns(self, session_id: str) -> list[dict]:
+        """One session's requests in order, numbered from 1: hashes, counts and verdicts only. The
+        `first_changed` field names the block where the prompt first diverged from the previous
+        turn (`system[0]`, `tools[2]`, `messages[5]`), None when nothing diverged or no verdict."""
+        with self._lock:
+            cur = self.conn.execute("SELECT * FROM entries WHERE session_id = ? ORDER BY id", (session_id,))
+            names = [d[0] for d in cur.description]
+            rows = [dict(zip(names, r)) for r in cur.fetchall()]
+        for n, r in enumerate(rows, 1):
+            r["turn"] = n
+            role, idx = r.get("divergence_role"), r.get("divergence_index")
+            r["first_changed"] = f"{role}[{idx}]" if role and idx is not None else (role or None)
+            p = r.get("prompt_tokens") or 0
+            r["hit_rate"] = (r.get("cached_tokens") or 0) / p if p else None
+        return rows
+
     def summary(self, since: float | None = None) -> dict:
         """Totals across the whole ledger (or since a time), for reports. Defined in prefixwise.metrics."""
         from . import metrics
