@@ -1,12 +1,12 @@
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling", "hatch-fancy-pypi-readme"]
 build-backend = "hatchling.build"
 
 [project]
 name = "prefixwise"
 version = "0.10.0"
 description = "Name why your LLM prompt cache missed, price the miss, and measure tokens per successful task. A local proxy and CLI for OpenAI, Anthropic and vLLM."
-readme = "README.md"
+dynamic = ["readme"]  # README.md with its relative links made absolute for PyPI (below)
 requires-python = ">=3.10"
 license = "MIT"
 authors = [{name = "Teja Chavali"}]
@@ -28,6 +28,8 @@ dependencies = []
 
 [project.urls]
 Homepage = "https://github.com/tejachavali/prefixwise"
+Documentation = "https://github.com/tejachavali/prefixwise/tree/main/docs"
+Changelog = "https://github.com/tejachavali/prefixwise/blob/main/CHANGELOG.md"
 Issues = "https://github.com/tejachavali/prefixwise/issues"
 
 [project.scripts]
@@ -42,6 +44,24 @@ engines = ["pyzmq>=25", "msgspec>=0.18"]
 otel = ["opentelemetry-sdk>=1.30", "opentelemetry-exporter-otlp-proto-http>=1.30"]
 log = ["redis>=5"]
 dev = ["pytest", "pyzmq>=25", "msgspec>=0.18", "prometheus-client", "openai", "anthropic", "litellm[mcp]", "opentelemetry-sdk>=1.30", "opentelemetry-exporter-otlp-proto-http>=1.30", "redis>=5"]
+
+# PyPI shows README.md as the project page. Its links are relative to the repository (docs/, experiments/,
+# benchmarks/, the top-level .md files), which PyPI cannot resolve, so the build rewrites them to GitHub.
+[tool.hatch.metadata.hooks.fancy-pypi-readme]
+content-type = "text/markdown"
+fragments = [{path = "README.md"}]
+
+[[tool.hatch.metadata.hooks.fancy-pypi-readme.substitutions]]
+pattern = '\]\(((?:docs|experiments|benchmarks|examples|deploy|src|tests)/[^)\s]*)\)'
+replacement = '](https://github.com/tejachavali/prefixwise/blob/main/\1)'
+
+[[tool.hatch.metadata.hooks.fancy-pypi-readme.substitutions]]
+pattern = '\]\(((?:SECURITY|CONTRIBUTING|CHANGELOG|LICENSE|WORKLOG)\.md)\)'
+replacement = '](https://github.com/tejachavali/prefixwise/blob/main/\1)'
+
+[[tool.hatch.metadata.hooks.fancy-pypi-readme.substitutions]]
+pattern = '\]\(#([^)]+)\)'
+replacement = '](https://github.com/tejachavali/prefixwise#\1)'
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/prefixwise"]
