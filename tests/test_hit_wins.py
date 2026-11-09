@@ -78,7 +78,10 @@ def test_unread_write_only_after_a_cold_miss_that_replaced_the_prefix():
     assert unread_write("history_edit", 14_000, 4_000, 0, 0, prev_cached_tokens=10_000) == (0, 0, 0)
     assert unread_write("history_edit", 9_000, 4_000, 0, 0, prev_cached_tokens=10_000) == (4_000, 0, 0)
     assert unread_write("history_edit", 10_000, 3_000, 1_000, 0, prev_cached_tokens=10_000) == (3_000, 1_000, 0)
-    assert unread_write("history_edit", 12_000, 3_000, 1_000, 0, prev_cached_tokens=10_000) == (1_500, 500, 0)
+    # the 1-hour part comes first in the prompt: a read of 2,000 into the write covers the 1,000 at 1 hour
+    # and 1,000 of the 3,000 at 5 minutes
+    assert unread_write("history_edit", 12_000, 3_000, 1_000, 0, prev_cached_tokens=10_000) == (2_000, 0, 0)
+    assert unread_write("history_edit", 10_500, 3_000, 1_000, 0, prev_cached_tokens=10_000) == (3_000, 500, 0)
     assert unread_write("history_edit", 10_000, 0, 0, 4_000, prev_cached_tokens=10_000) == (0, 0, 4_000)
     # The entry was not replaced: a later turn may still read it (review: a retry, then a hit).
     for kept in ("none", "first_write", "fork_boundary", "model_switch", "retry_replay", "routing_miss",

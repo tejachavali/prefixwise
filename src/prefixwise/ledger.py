@@ -102,7 +102,8 @@ def unread_write(cause: str, cached_tokens: int, prev_write_5m: int, prev_write_
     system+tools prefix (an agent that trims history every turn while its system prompt still
     hits) leaves the whole write unread: before, any read at all zeroed this (Reddit,
     Specialist-Can2889: 535k tokens written, 334k read, in one session that trims history).
-    Where the two cache lifetimes both wrote, the unread share is apportioned to them."""
+    Where the two cache lifetimes both wrote, the 1-hour part comes first in the prompt (Anthropic
+    requires 1-hour breakpoints before 5-minute ones), so a partial read consumes it first."""
     if cause not in _WRITE_REPLACED:
         return 0, 0, 0
     total = (prev_write_5m + prev_write_1h) or prev_cache_write
@@ -113,8 +114,9 @@ def unread_write(cause: str, cached_tokens: int, prev_write_5m: int, prev_write_
     if unread == 0:
         return 0, 0, 0
     if prev_write_5m or prev_write_1h:
-        unread_5m = round(unread * prev_write_5m / total)
-        return unread_5m, unread - unread_5m, 0
+        read_1h = min(prev_write_1h, read_from_write)
+        read_5m = min(prev_write_5m, read_from_write - read_1h)
+        return prev_write_5m - read_5m, prev_write_1h - read_1h, 0
     return 0, 0, unread
 
 
