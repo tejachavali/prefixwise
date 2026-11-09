@@ -39,8 +39,8 @@ Shared handoff between the agents working on Prefixwise. It says **what is being
 
 ## Now
 
-**Prefixwise 0.10.0 is released** (2026-11-09; PyPI and the GitHub Release match, the Action's moving tag
-`v0.10` resolves). Since 0.4.0, in order: 0.5 to 0.8 (sub-reasons, importers for Claude Code and Codex
+**Prefixwise 0.10.1 is released** (2026-11-09; 0.10.0 the same day; PyPI and the GitHub Release match, the
+Action's moving tag `v0.10` points at it, the README's links on PyPI resolve to GitHub). Since 0.4.0, in order: 0.5 to 0.8 (sub-reasons, importers for Claude Code and Codex
 logs, LiteLLM/OpenTelemetry/SDK middleware, Prometheus and Grafana, the collector and record log, the
 multi-replica engine join, SGLang data-parallel ranks over the wire), 0.9.0 (`prefixwise check`,
 `host_restored`, docs/SGLANG.md and docs/LMCACHE.md), 0.10.0 (Prefixwise inside `vllm serve` as ASGI
@@ -56,8 +56,6 @@ size on the record; `output_rerendered`; E-template live on vLLM, SGLang, real a
   collector: not yet run live.
 - Outreach beyond the vLLM Slack post (0.4.0): SGLang and LMCache communities have not been told; the
   guides for them (docs/SGLANG.md, docs/LMCACHE.md) are the material. Waits on Teja.
-- The PyPI page: until this change ships in the next release, the README's relative links on the 0.10.0
-  PyPI page do not resolve (the build now rewrites them to GitHub).
 
 **Standing rules unchanged:** Muse runs only (tags releases); API keys never in files, reports or chat;
 no force-pushes; independent review before every merge; nothing changed to make a run pass.
@@ -176,3 +174,4 @@ Then a soft launch to a few people who run agents (Omni's founder is a candidate
 - **2026-11-07:** Muse ran SGLang 0.5.23 with KV events live (Colab L4, Qwen3-4B; SGLang in a Python 3.12 venv because outlines_core has no 3.13 wheel): T3 `evicted` **confirmed 5/5**, T2 hits 5/5, 0 dropped messages; E1-open 120/120 with session ids sent. Record: experiments/e_evict/runs/2026-11-07-colab-l4-sglang-events.md. PR #34 to merge; then release 0.4.1.
 - **2026-11-08:** 0.5.0 to 0.8.0 shipped (see CHANGELOG: sub-reasons, importers, LiteLLM/OTel/SDK middleware, Prometheus, collector and record log, multi-replica join, SGLang DP ranks over the wire). Three review edge cases fixed (#62). `prefixwise check` built to the amended spec (#63). `host_restored` (#64), docs/SGLANG.md and docs/LMCACHE.md (#65). 0.9.0 released (#66); Muse tagged v0.9.0 and the moving v0.9. Upstream auto-detection (#68) and the vLLM ASGI middleware (#69) merged after independent reviews. Muse: `host_restored` live 5/5 on LMCache 0.5.7 and SGLang HiCache (#70); middleware inside `vllm serve` 5/5 confirmed evictions (#71). Teja: hold 0.10.0 for one more validation round (token-level divergence; `--dp-size 2` needs two GPUs, deferred).
 - **2026-11-09:** E-template built (#72). Muse ran it: vLLM first run exposed a classifier bug (block-rounded reads with a parameter change read as `param_rendered`), fixed with a strict block comparison and slack capped at an eighth of the prefix (#73), then the engine's block size on the record (#74). The Colab runtime recycled twice; Muse re-ran end to end on a fresh L4: "not an eviction" 0 of 50 harness turns and 0 of 8 agent requests; the previous answer recomputed on 47 of 50 Qwen3 turns. Built `output_rerendered` (engines only, from 160 output tokens, with the hit check), `prefixwise run` engine detection on both base URLs (#75). 0.10.0 released (#76; README audited; Muse tagged v0.10.0 and v0.10, hashes match). Muse swept three more templates (#77): DeepSeek-R1 distill 25/25 `output_rerendered` (57%), Qwen2.5 full reuse 25/25, Llama 3.2 template alone (vLLM did not fit at 131k). Then: PyPI README links made absolute at build time (hatch-fancy-pypi-readme); this file brought up to date after two days without entries.
+- **2026-11-09 (later):** Reddit feedback on 0.10.0 turned into two fixes: a timestamp in any format is one volatile value and the `volatile_system` verdict names what the prompt carries (#80, after a review caught word-eating patterns and path masking in the first version); the Codex importer tells a reordered tool list from a changed catalog and prices the waste (#81). Also the PyPI README links (#78), the three-template record and README table (#77, #79). 0.10.1 released (#82); Muse tagged v0.10.1, moved v0.10, verified hashes and the PyPI links (0 relative, 21 to GitHub).
