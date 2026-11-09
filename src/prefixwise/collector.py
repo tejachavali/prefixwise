@@ -393,7 +393,7 @@ class Collector:
             or (rec.compaction_event and prior_threads <= 1))
         if own and prev_facts is not None and prev is not None and prompt_tokens > 0:
             w5, w1, cw = unread_write(result.cause.value, cached, prev_facts.write_5m, prev_facts.write_1h,
-                                      prev_facts.cache_write)
+                                      prev_facts.cache_write, prev.cached_tokens)
             if w5 or w1 or cw:
                 entry.unread_write_tokens = w5 + w1 + cw
                 entry.unread_write_cost = self.prices.write_surcharge(priced_model, prev.prompt_tokens, w5, w1, cw)
