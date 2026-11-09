@@ -103,6 +103,7 @@ class RequestSnapshot:
     # (data-parallel ranks, or replicas behind a router), as far as Prefixwise knows.
     engine: bool = False
     engine_caches: int = 1
+    block_size: int | None = None  # tokens per KV block, when the engine's events have shown it
     # From the engine's KV events (prefixwise.engines; None = nothing to judge):
     # evicted_blocks > 0 when the block where the cache read stopped was removed (on a hit: blocks
     # the read covered that had been removed, so they came back from a host tier: host_restored);
@@ -196,17 +197,22 @@ def _reusable(prev: RequestSnapshot, curr: RequestSnapshot) -> int:
 # of 128 tokens, vLLM and SGLang in their block (page) size, 1 to 128. A full read of a prefix is
 # reported rounded down, so a count less than one block short of the prefix is a full read; one
 # that is a whole block or more short is not (a 2,048-token prefix read in full says 2,048, not
-# 1,920). The engine's own block size is not on the record, so the slack is the largest block any
-# provider uses, capped at an eighth of the prefix so that a short prefix read only in part is not
-# rounded up to a hit. Live: 400 of a 403-token prefix, 560 of 579 (the previous prompt's tail
-# was its generation prompt, never reusable) on vLLM with 16-token blocks, experiments/e_template.
+# 1,920). Behind an engine the previous prompt also ends in its generation prompt (`<|im_start|>
+# assistant`, a thinking stub), tokens the rendered history never repeats, so a full read stops a
+# few tokens before the previous prompt's end as well. When the engine's events have shown its
+# block size, the slack is that block plus the generation tail; otherwise it is the largest block
+# any provider uses. Either way it is capped at an eighth of the prefix, so a short prefix read
+# only in part is not rounded up to a hit. Live: 400 of a 403-token prefix, 560 of 579 on vLLM
+# with 16-token blocks (experiments/e_template).
 READ_GRANULARITY = 128
+GENERATION_TAIL = 32
 
 
 def _read_slack(curr: RequestSnapshot, target: int) -> int:
     if curr.provider == "anthropic":  # exact counts
         return 0
-    return min(READ_GRANULARITY, target // 8)
+    slack = curr.block_size + GENERATION_TAIL if curr.block_size else READ_GRANULARITY
+    return min(slack, target // 8)
 
 
 def _served_all(prev: RequestSnapshot, curr: RequestSnapshot) -> bool:

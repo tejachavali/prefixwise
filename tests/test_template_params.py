@@ -69,3 +69,20 @@ def test_rounded_read_with_a_param_change_is_a_hit():
     a_curr = RequestSnapshot(model="m", provider="anthropic", blocks=BLOCKS, prompt_tokens=4200, cached_tokens=3990,
                              has_breakpoint=True, params={"thinking": "b"})
     assert classify(a_prev, a_curr).cause is MissCause.PARAM_RENDERED
+
+
+def test_a_known_block_size_tightens_the_slack():
+    """With the engine's block size on the record (from its KV events), the slack is that block plus
+    the generation tail, not the 128-token ceiling: a divergence 112 tokens before the end of a
+    2,000-token prompt is caught on vLLM (16-token blocks), while the live 560-of-579 read, a block
+    and a thinking stub short, stays a hit. On SGLang (page size 1) a 597-of-600 read is a hit."""
+    def esnap(prompt, cached, block, **params):
+        s = snap(prompt, cached, **params)
+        s.block_size = block
+        return s
+    assert classify(esnap(579, 0, 16), esnap(616, 560, 16)).cause is MissCause.NONE
+    assert classify(esnap(600, 0, 1), esnap(640, 597, 1)).cause is MissCause.NONE
+    far = classify(esnap(2000, 0, 16, thinking="a"), esnap(2200, 1888, 16, thinking="b"))
+    assert far.cause is MissCause.PARAM_RENDERED
+    # the same read with the block size unknown falls back to the 128-token ceiling: a hit
+    assert classify(snap(2000, 0, thinking="a"), snap(2200, 1888, thinking="b")).cause is MissCause.NONE

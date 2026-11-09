@@ -24,7 +24,7 @@ from dataclasses import asdict, dataclass, field, fields
 from .details import Facts
 from .fingerprint import BlockFingerprint
 
-RECORD_VERSION = 1
+RECORD_VERSION = 2  # 2: engine_block (0.10.0)
 
 # Prompt-affecting request parameters the classifier compares (RequestSnapshot.params). A change
 # in one of these re-renders the prompt without changing any block.
@@ -79,6 +79,7 @@ class TurnRecord:
     engine: str | None = None  # vllm | sglang | None
     engine_caches: int = 1
     engine_verdict: list | None = None  # [evicted_blocks, resident_blocks, routed] or None
+    engine_block: int | None = None  # tokens per KV block (page), from the engine's events; None if unseen
     # -- the response ---------------------------------------------------------------------
     status: int = 200
     error: str | None = None  # set on a failure record (no verdict)

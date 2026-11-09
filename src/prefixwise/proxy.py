@@ -1000,6 +1000,7 @@ class PrefixwiseProxy:
             fixes_applied=list(ctx.get("fixes_applied") or []),
             sent_at=ctx.get("span_start") or ctx.get("sent_at") or facts.done_at,
             engine=self.engine, engine_caches=self.engine_caches, engine_verdict=verdict,
+            engine_block=getattr(self.engine_events, "block_size", None),
             status=status, error=error, usage=usage, response_model=(str(payload["model"]) if payload.get("model")
                                                                       else None),
             response_id=payload.get("id"), native_reason=native_reason_from(payload) if payload else None,
