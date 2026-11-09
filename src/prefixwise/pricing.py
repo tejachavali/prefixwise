@@ -115,6 +115,8 @@ class PriceTable:
     models: dict = field(default_factory=dict)
     as_of: str | None = None
     sources: list[str] = field(default_factory=list)  # files the table was built from
+    # `as_of` is the table's revision date (the newest read of any provider's page), stamped on
+    # priced ledger rows as price_as_of; each row of the table names its own source and read date.
 
     @classmethod
     def load(cls, extra_path: str | None = None) -> "PriceTable":
@@ -134,26 +136,58 @@ class PriceTable:
             table.sources.append(path)
         return table
 
-    def rates_for(self, model: str, today: date | None = None) -> dict | None:
-        """Rates for a model id: exact, or a table id plus only a dated snapshot
-        (-20261007) and/or a cloud version suffix (-v1, -v1:0), optionally behind a
-        cloud prefix ('us.anthropic.'). A different model that merely starts with
-        a table id (gpt-5.6-sol-pro) is NOT matched. Rates past their
-        valid_until date (promotional prices) are unknown."""
+    def resolve(self, model: str, today: date | None = None) -> tuple[str | None, dict | None, bool]:
+        """(table id, rates, approximate) for a model id. Exact, or a table id plus only a dated
+        snapshot (-20261007) and/or a cloud version suffix (-v1, -v1:0), optionally behind a cloud
+        prefix ('us.anthropic.'); a different model that merely starts with a table id
+        (gpt-5.6-sol-pro) is NOT matched that way. Failing that, a Claude id of a known family
+        (claude-opus-4-9) is priced at the nearest version of that family in the table, the newest
+        at or below it, else the nearest above, and `approximate` is True so the report can say so:
+        a dash where the cost should be helps no one, and families keep their price across point
+        releases far more often than not. Rates past their valid_until date (promotional prices)
+        are unknown: (None, None, False)."""
         if not model:
-            return None
+            return None, None, False
         key = model if model in self.models else None
+        approx = False
         if key is None:
             for k in self.models:
                 if re.search(rf"(^|[./:]){re.escape(k)}(-\d{{8}})?(-v\d+(:\d+)?)?$", model) and (key is None or len(k) > len(key)):
                     key = k
         if key is None:
-            return None
+            key, approx = self._nearest_in_family(model), True
+        if key is None:
+            return None, None, False
         rates = self.models[key]
         until = rates.get("valid_until")
         if until and (today or date.today()) > date.fromisoformat(until):
+            return None, None, False
+        return key, rates, approx
+
+    def _nearest_in_family(self, model: str) -> str | None:
+        # A bare family id only (a cloud prefix, a dated snapshot or a version suffix allowed): a variant
+        # such as -fast or -pro is another product at another price, and stays unpriced.
+        # The minor is at most three digits: a dated snapshot (claude-opus-4-20250514) is not a minor.
+        m = re.fullmatch(r"(?:.*[./:])?claude-(opus|sonnet|haiku|fable|mythos)-(\d+)(?:-(\d{1,3}))?(?:-\d{8})?"
+                         r"(?:-v\d+(?::\d+)?)?", model)
+        if not m:
             return None
-        return rates
+        family, want = m.group(1), (int(m.group(2)), int(m.group(3) or 0))
+        best = None
+        for k in self.models:
+            mk = re.fullmatch(rf"claude-{family}-(\d+)(?:-(\d+))?", k)
+            if not mk:
+                continue
+            have = (int(mk.group(1)), int(mk.group(2) or 0))
+            # the newest at or below the asked version first; else the nearest above
+            rank = (0, (-have[0], -have[1])) if have <= want else (1, have)
+            if best is None or rank < best[0]:
+                best = (rank, k)
+        return best[1] if best else None
+
+    def rates_for(self, model: str, today: date | None = None) -> dict | None:
+        """Rates for a model id (see `resolve`); None when unknown."""
+        return self.resolve(model, today)[1]
 
     @staticmethod
     def _tier(rates: dict, prompt_tokens: int) -> dict:

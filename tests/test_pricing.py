@@ -12,7 +12,7 @@ T = PriceTable.load()
 
 
 def test_builtin_table_is_dated_and_sourced():
-    assert T.as_of == "2026-11-07"
+    assert T.as_of == "2026-11-09"
     official = {"anthropic": "platform.claude.com", "openai": "developers.openai.com"}
     for name, r in T.models.items():
         assert official[r["provider"]] in r["source"], name  # official pages only
@@ -39,7 +39,9 @@ def test_one_hour_writes_and_long_prompt_tier():
 def test_model_ids_match_snapshots_and_cloud_prefixes_but_not_other_models():
     assert T.rates_for("claude-haiku-5-5-20261007") is T.models["claude-haiku-5-5"]
     assert T.rates_for("us.anthropic.claude-sonnet-5-5-v1:0") is T.models["claude-sonnet-5-5"]
-    assert T.rates_for("claude-haiku-5") is None and T.rates_for("gpt-5.6") is None
+    # a Claude id the table does not list is priced at the nearest version of its family, and said so
+    assert T.resolve("claude-haiku-5")[0] == "claude-haiku-4-5" and T.resolve("claude-haiku-5")[2] is True
+    assert T.rates_for("gpt-5.6") is None  # no family rule for OpenAI ids
 
 
 def test_unknown_is_none_never_zero(tmp_path):
@@ -85,7 +87,7 @@ def test_proxy_records_cost_and_report_shows_dollars(tmp_path, capsys):
             "system": [{"type": "text", "text": "x", "cache_control": {"type": "ephemeral"}}]}
     proxy.handle("anthropic", dict(body))
     _, entry = proxy.handle("anthropic", dict(body))
-    assert entry.cost is not None and entry.cost > 0 and entry.price_as_of == "2026-11-07"
+    assert entry.cost is not None and entry.cost > 0 and entry.price_as_of == "2026-11-09"
     proxy.handle("openai", {"model": "gpt-5.6", "session_id": "o", "messages": []})  # unpriced
     main(["report", "--ledger", path])
     out = capsys.readouterr().out
