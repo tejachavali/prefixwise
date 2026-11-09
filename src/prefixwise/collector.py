@@ -309,6 +309,7 @@ class Collector:
                                session_id=session_id)
         curr.engine = rec.engine is not None
         curr.engine_caches = rec.engine_caches
+        curr.block_size = rec.engine_block
         parts = breakdown(provider, usage)
         curr.cache_written = parts.cache_write_5m + parts.cache_write_1h + parts.cache_write
         curr.new_thread, curr.interleaved = new_thread, interleaved

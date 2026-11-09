@@ -15,7 +15,7 @@ from prefixwise.collector import Collector
 from prefixwise.ledger import Ledger
 from prefixwise.pricing import PriceTable
 from prefixwise.proxy import PrefixwiseHTTPServer, PrefixwiseProxy, make_handler
-from prefixwise.records import TurnRecord
+from prefixwise.records import RECORD_VERSION, TurnRecord
 from prefixwise.transport import RemoteCollector, Sender
 
 SYSTEM = [{"type": "text", "text": "You are careful. " * 300, "cache_control": {"type": "ephemeral"}}]
@@ -146,7 +146,7 @@ def test_ingest_is_idempotent_and_names_malformed_records():
         bad = {**good, "request_id": "r-2", "version": 99}
         s, reply, _ = http("POST", url + "/api/v1/ingest", {"records": [good, bad]})
         assert s == 200 and reply["accepted"] == 1 and reply["duplicates"] == 0
-        assert reply["rejected"] == [{"index": 1, "error": "record version 99; this collector reads version 1"}]
+        assert reply["rejected"] == [{"index": 1, "error": f"record version 99; this collector reads version {RECORD_VERSION}"}]
         s, reply, _ = http("POST", url + "/api/v1/ingest", {"records": [good]})
         assert s == 200 and reply == {"accepted": 0, "duplicates": 1, "rejected": []}
         assert len(rows(coll.ledger)) == 1 and coll.collector.stats["duplicates"] == 1

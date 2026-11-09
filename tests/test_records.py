@@ -98,3 +98,16 @@ def test_a_failure_record_leaves_a_row_with_no_verdict():
     assert e.cause is None and e.status == 502 and e.error == "upstream_unreachable"
     assert metrics.query(c.ledger, ["requests_failed"])[0]["requests_failed"] == 1
     assert c.stats["failures"] == 1 and c.stats["records"] == 0
+
+
+def test_the_engine_block_size_travels_on_the_record():
+    """The proxy puts the block size its KV-event watcher has seen on every record (None until
+    seen), it survives the wire, and the collector hands it to the classifier as the read slack."""
+    from types import SimpleNamespace
+    b = body([{"role": "user", "content": "hi"}])
+    p = proxy([a_usage(write5=8_000), a_usage(write5=8_000)])
+    [plain] = _records(p, [b])
+    assert plain.engine_block is None
+    p.engine_events = SimpleNamespace(block_size=16)
+    [rec] = _records(p, [b])
+    assert rec.engine_block == 16 and TurnRecord.from_dict(json.loads(json.dumps(rec.to_dict()))).engine_block == 16

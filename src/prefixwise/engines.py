@@ -77,6 +77,7 @@ class EngineEvents:
         self._checks: OrderedDict = OrderedDict()  # token -> in-flight check
         self._tokens = itertools.count(1)
         self.hybrid = False  # the model has non-full-attention groups: no negative claims
+        self.block_size: int | None = None  # tokens per KV block (page), from the first store seen
         self.offload_seen = False  # a BlockStored on a non-GPU medium: an offload tier (CPU, storage) exists
         self.stats = {"batches": 0, "stored": 0, "removed": 0, "cleared": 0, "engine_restarts": 0,
                       "dropped_messages": 0, "decode_errors": 0, "overflows": 0, "disconnects": 0,
@@ -151,6 +152,7 @@ class EngineEvents:
         parent_pos = self._alive.get((group, parent)) if parent is not None else -1
         pos = None if parent_pos is None else parent_pos + 1  # unknown parent: unplaced
         w = self._window(session) if session else None
+        self.block_size = self.block_size or ev.get("block_size") or None
         if w is not None:
             w.block_size = w.block_size or ev.get("block_size")
             w.seen += len(hashes)
@@ -180,6 +182,7 @@ class EngineEvents:
         for check in self._checks.values():
             check["lost"].update(check["keys"])
         self._alive.clear()
+        self.block_size = None  # a restarted engine may have another block size
 
     def _window(self, session: str) -> _Window:
         w = self._windows.get(session)
@@ -440,6 +443,13 @@ class EngineFleet:
         for s in self.sources:
             s.hybrid = value
 
+    @property
+    def block_size(self) -> int | None:
+        """The block size the caches report (one setting per fleet; ranks that have not stored yet
+        do not count), or None until seen, or when they differ."""
+        sizes = {s.block_size for s in self.sources} - {None}
+        return sizes.pop() if len(sizes) == 1 else None
+
     def start(self) -> "EngineFleet":
         for s in self.sources:
             s.start()
@@ -681,6 +691,7 @@ class SGLangEvents(EngineEvents):
         self.stats["stored"] += len(hashes)
         tokens = len(ev.get("token_ids") or ()) or len(hashes) * (ev.get("block_size") or 1)
         block = ev.get("block_size") or max(1, tokens // len(hashes))
+        self.block_size = self.block_size or ev.get("block_size") or None  # the field, not the estimate
         try:
             packed = array("q", hashes)  # SGLang's hashes are signed 64-bit
         except (TypeError, OverflowError):
@@ -754,6 +765,7 @@ class SGLangEvents(EngineEvents):
         for seg in set(self._alive.values()):
             seg.cut = 0
         self._alive.clear()
+        self.block_size = None
         for check in self._checks.values():  # chains not indexed any more (stored long ago) too
             check["cleared"] = True
 

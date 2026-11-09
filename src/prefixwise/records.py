@@ -79,6 +79,7 @@ class TurnRecord:
     engine: str | None = None  # vllm | sglang | None
     engine_caches: int = 1
     engine_verdict: list | None = None  # [evicted_blocks, resident_blocks, routed] or None
+    engine_block: int | None = None  # tokens per KV block (page), from the engine's events; None if unseen
     # -- the response ---------------------------------------------------------------------
     status: int = 200
     error: str | None = None  # set on a failure record (no verdict)
