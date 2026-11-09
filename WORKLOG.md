@@ -39,7 +39,7 @@ Shared handoff between the agents working on Prefixwise. It says **what is being
 
 ## Now
 
-**Prefixwise 0.10.5 is released** (2026-11-09; 0.10.0 to 0.10.4 the same day; 0.10.0 to 0.10.2 the same day; PyPI and the GitHub Release match, the
+**Prefixwise 0.10.5 is released** (2026-11-09; 0.10.0 to 0.10.5 the same day; PyPI and the GitHub Release match, the
 Action's moving tag `v0.10` points at it, the README's links on PyPI resolve to GitHub). Since 0.4.0, in order: 0.5 to 0.8 (sub-reasons, importers for Claude Code and Codex
 logs, LiteLLM/OpenTelemetry/SDK middleware, Prometheus and Grafana, the collector and record log, the
 multi-replica engine join, SGLang data-parallel ranks over the wire), 0.9.0 (`prefixwise check`,
