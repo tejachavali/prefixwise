@@ -328,7 +328,8 @@ def import_claude_code(root: str | os.PathLike | None = None, ledger: Ledger | N
 # `session_meta` the thread id, its parent (subagents) and what it was forked from.
 #
 # Causes, from what changes OpenAI's cached prefix: model_switch, compaction_rewrite,
-# tool_catalog_change (tools come first in the prefix). OpenAI's in-memory cache lifetime
+# tool_catalog_change and tool_reserialize (the same tools in another order; tools come first in
+# the prefix). OpenAI's in-memory cache lifetime
 # is not a fixed number, so expiry is never claimed: an unexplained miss is unknown.
 
 
@@ -341,8 +342,9 @@ class _CodexRequest:
     usage: dict  # Responses API shape, for pricing
     prompt: int
     cached: int
-    tools_hash: str | None
+    tools_hash: str | None  # the tool list as sent, in order
     compacted: bool
+    tools_set_hash: str | None = None  # the same tools in any order: equal with tools_hash changed is a reorder
 
 
 def _codex_usage(u: dict) -> tuple[dict, int, int]:
@@ -357,7 +359,7 @@ def _codex_requests(path: Path) -> tuple[dict, list[_CodexRequest]]:
     meta: dict = {}
     records: list[_CodexRequest] = []
     counts: list[_CodexRequest] = []  # older logs: token_count events, used only when no records exist
-    model, tools_hash, compacted, last_input = "unknown", None, False, None
+    model, tools_hash, tools_set_hash, compacted, last_input = "unknown", None, None, False, None
     with open(path, encoding="utf-8", errors="replace") as fh:
         for n, line in enumerate(fh):
             try:
@@ -375,11 +377,18 @@ def _codex_requests(path: Path) -> tuple[dict, list[_CodexRequest]]:
             elif kind == "compacted":
                 compacted = True
             elif kind == "dynamic_tools_updated":
-                tools_hash = hashlib.sha256(json.dumps(p.get("tools"), sort_keys=True).encode()).hexdigest()[:16]
+                tools = p.get("tools")
+                tools_hash = hashlib.sha256(json.dumps(tools, sort_keys=True).encode()).hexdigest()[:16]
+                # Order-independent: the multiset of tools. Reported on Reddit (kantorcodes1): Codex rebuilds
+                # its dynamic tool list and sends the same tools in another order, which is waste
+                # (tool_reserialize), not a catalog change.
+                tools_set_hash = (hashlib.sha256(json.dumps(sorted(json.dumps(t, sort_keys=True) for t in tools))
+                                                 .encode()).hexdigest()[:16] if isinstance(tools, list) else None)
             elif kind == "token_usage_record" and isinstance(p.get("usage"), dict) and ts is not None:
                 shaped, prompt, cached = _codex_usage(p["usage"])
                 rid = str(p.get("response_id") or f"{path.stem}:{n}")
-                records.append(_CodexRequest(rid, last_input, ts, model, shaped, prompt, cached, tools_hash, compacted))
+                records.append(_CodexRequest(rid, last_input, ts, model, shaped, prompt, cached, tools_hash, compacted,
+                                             tools_set_hash))
                 compacted = False
                 continue
             elif kind == "event_msg" and p.get("type") == "token_count" and ts is not None:
@@ -388,7 +397,7 @@ def _codex_requests(path: Path) -> tuple[dict, list[_CodexRequest]]:
                 if isinstance(last, dict):
                     shaped, prompt, cached = _codex_usage(last)
                     counts.append(_CodexRequest(f"{path.stem}:{n}", last_input, ts, model, shaped, prompt, cached,
-                                                tools_hash, compacted))
+                                                tools_hash, compacted, tools_set_hash))
                     if not records:
                         compacted = False
                 continue
@@ -413,6 +422,8 @@ def _classify_codex(prev: _CodexRequest | None, r: _CodexRequest, forked: bool, 
     if r.compacted:
         return "compaction_rewrite", True, "the conversation was compacted before this request"
     if prev.tools_hash != r.tools_hash and r.tools_hash is not None:
+        if prev.tools_set_hash is not None and prev.tools_set_hash == r.tools_set_hash:
+            return "tool_reserialize", False, "the same tools were sent in a different order (dynamic tools updated)"
         return "tool_catalog_change", True, "the tool catalog changed (dynamic tools updated)"
     gap = (r.sent or r.done) - (prev.sent or prev.done)
     return "unknown", None, (f"nothing in the log explains it ({gap:.0f} s since the previous request; OpenAI's "
@@ -445,12 +456,19 @@ def import_codex(root: str | os.PathLike | None = None, ledger: Ledger | None = 
         session = str(meta.get("id") or log.stem)
         subagent = bool(meta.get("parent_thread_id"))
         agent = "subagent" if subagent else "main"
-        prev = None
+        prev, prev_prompt = None, None
         for r in reqs:
             stats["requests"] += 1
             cause, legit, why = _classify_codex(prev, r, bool(meta.get("forked_from_id")), subagent)
             gap = (r.sent or r.done) - prev.done if prev is not None else None
-            prev = r
+            # Waste (legit False, e.g. a reordered tool list) is priced as the proxy and the Claude Code
+            # importer price it: the previous prompt that could have been read but was not.
+            held = None  # what the previous request left in the cache, when the log says (OpenAI rarely does)
+            if prev is not None:
+                write = _int((prev.usage.get("input_tokens_details") or {}).get("cache_write_tokens"))
+                held = prev.cached + write if write else None
+            avoidable = avoidable_for_turn(legit, r.prompt, r.cached, prev_prompt, held)
+            prev, prev_prompt = r, r.prompt
             if since is not None and r.done < since:
                 continue
             stats["in_window"] += 1
@@ -463,11 +481,12 @@ def import_codex(root: str | os.PathLike | None = None, ledger: Ledger | None = 
             parts = breakdown("openai", r.usage)
             entry = LedgerEntry(
                 session_id=session, agent_id=agent, provider="openai", model=r.model, cause=cause,
-                prompt_tokens=r.prompt, cached_tokens=r.cached, avoidable_tokens=0, avoidable_cost=None,
+                prompt_tokens=r.prompt, cached_tokens=r.cached, avoidable_tokens=avoidable, avoidable_cost=None,
                 legit=legit, request_id=r.request_id, completion_tokens=_int(r.usage.get("output_tokens")),
                 cost=prices.request_cost(r.model, "openai", r.usage), api="responses",
                 uncached_tokens=parts.uncached_input, cache_write_tokens=parts.cache_write,
-                gap_seconds=gap, evidence=f"from the log: {why}", classifier_version="codex-log-1")
+                gap_seconds=gap, evidence=f"from the log: {why}", classifier_version="codex-log-2")
+            entry.avoidable_cost = prices.avoidable_cost(r.model, avoidable, r.prompt, "openai", r.usage)
             if entry.cost is not None:
                 entry.price_as_of = prices.as_of
             ledger.record(entry, at=r.done)
