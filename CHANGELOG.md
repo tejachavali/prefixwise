@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **`prefixwise explain --diff` shows what changed.** The hashes say where two requests diverge; with `--diff`, `explain` also prints the first differing block before and after, as a unified diff of the request files you gave it, cut at 40 lines. It reads your own files on your machine: the proxy and the ledger still never see prompt text. From a Reddit thread (r/opencodeCLI): "hashes won't explain what changed".
+
 ## 0.10.2: 2026-11-09
 
 Two more from this week's feedback, both about costs that were hidden. An agent that trims its history

@@ -307,7 +307,7 @@ Each detail is claimed only when all of its conditions hold; otherwise there is 
 | `prefixwise report [--by cause\|session_id\|agent_id\|model\|provider\|task_id] [--json]` | Totals and a breakdown, most avoidable first. |
 | `prefixwise task ID --success\|--failure` | Record a task outcome (safe while the proxy runs). |
 | `prefixwise request REQUEST_ID [--json]` | One request's ledger entry (from `X-Prefixwise-Request-Id`). |
-| `prefixwise explain A.json B.json` / `explain SESSION.jsonl [--json] [--fail-on-waste]` | Offline diagnosis of saved request bodies, or `{"request": ..., "usage": ..., "session_id": ..., "gap_seconds": ...}` records. |
+| `prefixwise explain A.json B.json` / `explain SESSION.jsonl [--json] [--fail-on-waste] [--diff]` | Offline diagnosis of saved request bodies, or `{"request": ..., "usage": ..., "session_id": ..., "gap_seconds": ...}` records. |
 
 **HTTP endpoints:** `POST /v1/chat/completions`, `POST /v1/responses`, `POST /v1/messages` (streaming supported on all three; the same paths without `/v1` also work, and query strings are forwarded). Any other path, such as `GET /v1/models` or `count_tokens`, passes through to the upstream unchanged and is not recorded. Also: `POST /tasks {"task_id", "success"}`, `GET /requests/<id>`, `GET /engine` (the KV-event stream's health), `GET /ledger`, `GET /metrics` (Prometheus), `GET /health`.
 
