@@ -1,6 +1,6 @@
 # E-template on three more templates: Llama 3.2, Qwen2.5, DeepSeek-R1 distill. Colab L4, 2026-11-09
 
-Run by Muse on main at 19c9a2e (0.10.0), vLLM 0.33.0, KV events on, 5 variants x 6 turns per model, one
+Run by Muse on main at 19c9a2e (0.10.0), vLLM 0.33.0, KV events on, 5 variants x 6 turns per model (Llama 3.2: template alone), one
 server at a time. No code changed, nothing pushed from Colab, no key printed. Transcribed by Claude from
 Muse's report. The Qwen3-4B runs this extends: [2026-11-09-colab-l4-rerun.md](2026-11-09-colab-l4-rerun.md).
 
@@ -11,7 +11,7 @@ Muse's report. The Qwen3-4B runs this extends: [2026-11-09-colab-l4-rerun.md](20
 | Qwen/Qwen2.5-3B-Instruct | yes | **full 25 of 25** | 0 | 0 of 25, live |
 | unsloth/Llama-3.2-3B-Instruct | yes (template alone; vLLM did not start, below) | full (template alone) | 0 | none (template alone) |
 
-"Not an eviction" (`unknown`): 0 on every model. No block removed on any stream.
+"Not an eviction" (`unknown`): 0 on every model that ran. No block removed on either stream.
 
 ## DeepSeek-R1-Distill-Qwen-1.5B (vLLM, block 16)
 
@@ -53,8 +53,8 @@ those turns' prompt tokens. Prefixwise: `first_write` x5, `none` x25, every `non
 `output_rerendered`; `unknown` 0; truncated answers 8. KV stream: 1,456 batches, 3,517 blocks stored, 0
 removed, 0 dropped.
 
-Template alone (CPU): turn 2's prompt shares 66 of turn 1's 68-token prompt plus output, for `kept` and
-`stripped` alike: the template renders earlier assistant turns as `<｜Assistant｜>` + content +
+Template alone (CPU): turn 2's prompt shares 66 tokens of turn 1's 68-token prompt (and none of its output), for
+`kept` and `stripped` alike: the template renders earlier assistant turns as `<｜Assistant｜>` + content +
 `<｜end▁of▁sentence｜>`, and the generation prompt's `<think>\n` (2 tokens) is never repeated. It ignores
 `enable_thinking` (tail empty) and renders no date. The harness's template-alone mode read that as
 `break` (no slack); it now allows the generation tail, as the live classification does.
@@ -126,4 +126,5 @@ showed on the first run.
    prefix (prompts of 2,000 to 5,000 tokens here). A client that truncates a reasoning model's output
    should drop the unfinished thinking before resending.
 4. **The generation tail is 0 to 4 tokens**, template by template: 0 on Qwen2.5 and Llama, 4 on Qwen3 with
-   thinking off, 2 on DeepSeek. The classifier's 16-token allowance covers all of them.
+   thinking off, 2 on DeepSeek. The template-alone diff allows 8, the live classification a block plus 8, and the classifier's
+   read slack a block plus 16: all of them cover it.
