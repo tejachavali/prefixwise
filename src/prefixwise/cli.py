@@ -693,7 +693,7 @@ def _print_explanation(label: str, e) -> None:
     if e.prompt_tokens is not None:
         print(f"  usage: {_fmt_int(e.cached_tokens)} of {_fmt_int(e.prompt_tokens)} prompt tokens cached")
     if e.diff:
-        print("  what changed (from your files; nothing is stored):")
+        print("  what changed (as fingerprinted, from your files; nothing is stored):")
         for line in e.diff.splitlines():
             print(f"    {line}")
 
@@ -930,8 +930,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--provider", default="auto", choices=["auto", "openai", "anthropic", "vllm"])
     p.add_argument("--json", action="store_true")
     p.add_argument("--diff", action="store_true",
-                   help="also print the first differing block before and after, from the files given (the hashes say "
-                        "where it changed; this says what). Read from your files only: nothing is stored or sent")
+                   help="also print the first differing block before and after, as fingerprinted (cache markers "
+                        "removed), from the files given: the hashes say where it changed, this says what. Read from "
+                        "your files only: nothing is stored or sent")
     p.add_argument("--fail-on-waste", action="store_true",
                    help="exit 2 if any turn is classified as waste (for CI gates on prompt changes)")
     p.set_defaults(func=cmd_explain)

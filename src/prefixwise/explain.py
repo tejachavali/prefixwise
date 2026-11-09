@@ -59,22 +59,48 @@ class Explanation:
 
 
 DIFF_LINES = 40
+DIFF_SIDE_LINES = 600  # lines of each side kept around the first difference before diffing
 
 
 def _block_text(value) -> str:
-    return value if isinstance(value, str) else json.dumps(value, indent=1, ensure_ascii=False, sort_keys=False)
+    """A block for reading: a string as is; a dict or list as indented JSON with the newlines inside
+    its strings made real, so a long system prompt or message diffs line by line instead of as one
+    multi-kilobyte JSON string literal. For eyes, not for parsing back."""
+    if isinstance(value, str):
+        return value
+    return json.dumps(value, indent=1, ensure_ascii=False).replace("\\n", "\n")
+
+
+def _lines(text: str) -> list[str]:
+    return text.split("\n")  # not splitlines(): a trailing newline or a CR is a difference too
 
 
 def block_diff(prev_body: dict, curr_body: dict, provider: str, index: int, limit: int = DIFF_LINES) -> str | None:
-    """A unified diff of block `index` (prefix order) between two request bodies the caller holds.
-    Hashes say where a request changed; this says what, from the user's own files, on their machine.
-    The proxy and the ledger never see it. Cut at `limit` lines."""
+    """A unified diff of block `index` (prefix order, as fingerprinted: cache markers removed) between
+    two request bodies the caller holds. Hashes say where a request changed; this says what, from the
+    user's own files, on their machine. The proxy and the ledger never see it. The common head and
+    tail of the two sides are dropped and each side is cut to DIFF_SIDE_LINES before diffing, so a
+    large block with scattered edits does not cost seconds; the output is cut at `limit` lines."""
     prev_blocks, curr_blocks = extract_blocks(prev_body, provider), extract_blocks(curr_body, provider)
-    before = _block_text(prev_blocks[index][1]).splitlines() if index < len(prev_blocks) else []
-    after = _block_text(curr_blocks[index][1]).splitlines() if index < len(curr_blocks) else []
-    lines = list(difflib.unified_diff(before, after, "previous request", "this request", lineterm="", n=1))
-    if not lines:
+    before_text = _block_text(prev_blocks[index][1]) if index < len(prev_blocks) else ""
+    after_text = _block_text(curr_blocks[index][1]) if index < len(curr_blocks) else ""
+    if before_text == after_text:
         return None
+    before, after = _lines(before_text), _lines(after_text)
+    head = 0
+    while head < len(before) and head < len(after) and before[head] == after[head]:
+        head += 1
+    tail = 0
+    while (tail < len(before) - head and tail < len(after) - head
+           and before[-1 - tail] == after[-1 - tail]):
+        tail += 1
+    start = max(0, head - 1)  # one line of context before the change
+    b = before[start:len(before) - tail + 1][:DIFF_SIDE_LINES]
+    a = after[start:len(after) - tail + 1][:DIFF_SIDE_LINES]
+    label = f" (from line {start + 1})" if start else ""
+    lines = list(difflib.unified_diff(b, a, "previous request" + label, "this request" + label, lineterm="", n=1))
+    if not lines:  # the same lines, different bytes: line endings or a trailing newline
+        return "(differs only in line endings or trailing whitespace: the text is the same line by line)"
     if len(lines) > limit:
         lines = lines[:limit] + [f"... {len(lines) - limit} more lines"]
     return "\n".join(lines)
