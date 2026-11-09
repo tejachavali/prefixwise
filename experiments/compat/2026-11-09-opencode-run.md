@@ -1,7 +1,9 @@
 # opencode through `prefixwise run`, 2026-11-09
 
-Run by Muse on prefixwise 0.10.5 (from PyPI), opencode 1.19.5, an Anthropic API key in the environment,
-no `opencode.json` setting a provider base URL. Transcribed by Claude from Muse's report. The question:
+Run by Muse on prefixwise 0.10.5, opencode 1.19.5. The runbook asked for an Anthropic API key in the
+environment and no `opencode.json` setting a provider base URL; Muse's report confirms that opencode "read
+the environment Prefixwise sets" and does not say otherwise about the setup. Transcribed by Claude from
+Muse's report. The question:
 does opencode read the `ANTHROPIC_BASE_URL` that `prefixwise run` sets, or bypass the proxy? Earlier runs
 ([dogfood 1](../dogfood/2026-11-06-opencode.md), [dogfood 2](../dogfood/2026-11-07-opencode-2.md)) went
 through `prefixwise serve` with the proxy's URL set in opencode's provider config, which left this open.
