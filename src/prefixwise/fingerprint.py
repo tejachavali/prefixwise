@@ -123,6 +123,26 @@ def mask_volatiles(text: str) -> str:
     return mask_volatiles_kinds(text)[0]
 
 
+# A token with both letters and digits (alice42, session-7f, build_2026b): an id, where a bare number is not.
+_ALNUM_ID_RE = re.compile(r"\b(?=\w*[A-Za-z])(?=\w*\d)\w+\b")
+_ONLY = {"date": ((_DATE_RE, "<DATE>"),), "time": ((_TIME_RE, "<TIME>"),),
+         "id": ((_UUID_RE, "<ID>"), (_HEX_ID_RE, "<ID>"), (_ALNUM_ID_RE, "<ID>")), "number": ((_NUMBER_RE, "<N>"),)}
+
+
+def mask_only(text: str, kinds: frozenset) -> str:
+    """The text with only the given kinds of volatile value masked (e.g. {"date", "time"}), so two
+    texts can be compared with one kind of difference allowed. For "id" a bare number is not an id
+    (the full masking turns numbers into <N> first; here they must stay apart)."""
+    for kind in ("date", "time", "id", "number"):
+        if kind not in kinds:
+            continue
+        for pattern, token in _ONLY[kind]:
+            if pattern is _DATE_RE and not _DATE_HINT_RE.search(text):
+                continue
+            text = pattern.sub(token, text)
+    return text
+
+
 def canonical_bytes(value: object) -> bytes:
     text = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     text = unicodedata.normalize("NFC", text)

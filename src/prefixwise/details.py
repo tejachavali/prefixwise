@@ -50,6 +50,18 @@ extended-thinking docs (Nov 2026), Claude Code / Codex / opencode / LiteLLM issu
                      request with the same model, credentials, tools and system prompt
                      that was still waiting for its response (a fan-out): the entry did
                      not exist yet.
+  volatile_prefix_at_start
+                     The first request of a session (first_write), reading nothing, within the
+                     cache window of another session's completed request with the same model,
+                     credential and tools (canonically) and a system prompt that differs only in
+                     volatile values (a timestamp set at session start, a per-user id): a restart,
+                     or another user of the same prompt, recomputed a prefix it could have
+                     shared. Says what differed (dates/times, ids, or mixed), from per-kind masked
+                     keys; no text is kept. Any provider; on Anthropic the other request must have
+                     written an entry ending inside tools+system. Judged after
+                     shared_prefix_not_reused (an exact match within reach wins). The prefix's
+                     size is not measured, so the cause stays first_write with no avoidable
+                     tokens; the report prints the fix.
   shared_prefix_not_reused
                      Anthropic: the first request of a session, within 5 minutes of
                      another session's request (same model, credentials, tools and
@@ -64,6 +76,11 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass, field
+
+import threading
+from collections import OrderedDict
+
+from .fingerprint import mask_only, mask_volatiles
 
 LOOKBACK_POSITIONS = 20  # Anthropic: positions checked per breakpoint, the breakpoint itself first
 LOOKBACK_CLAIM = LOOKBACK_POSITIONS + 2  # claim only this far out: block counting may differ slightly
@@ -86,6 +103,13 @@ class Facts:
     provider: str = ""
     model: str = ""
     prefix_key: str | None = None  # model, credentials, tools and system prompt as sent
+    # The same prefix in other forms, for the cross-session comparison: canonical (key order and markers
+    # aside), with every volatile value in the system prompt masked, with dates and times only, with
+    # ids only. Tools are compared canonically in all of them: a tool that changed is a catalog change.
+    prefix_key_canonical: str | None = None
+    prefix_key_masked: str | None = None
+    prefix_key_masked_time: str | None = None
+    prefix_key_masked_id: str | None = None
     sys_end: int = 0  # lookback positions taken by tools and system
     breakpoints: list[int] = field(default_factory=list)  # lookback positions carrying cache_control
     n_pos: int = 0
@@ -105,6 +129,10 @@ class Facts:
     fanout_age: float | None = None  # seconds since a same-prefix request still in flight was sent
     shared_age: float | None = None  # seconds since another session wrote an entry inside tools/system
     shared_write_pos: int | None = None  # where that entry ends
+    volatile_shared_age: float | None = None  # seconds since another session completed a request whose
+    #   tools+system equal this one's except for volatile values in the system prompt (a fresh timestamp)
+    volatile_shared_wrote: bool = False  # that request wrote a cache entry ending inside tools+system
+    volatile_shared_kind: str | None = None  # what differed: "date" (dates/times only), "id", or "mixed"
 
 
 def _h(obj) -> str:
@@ -132,6 +160,33 @@ def _cache_controls(value, out: list) -> None:
             _cache_controls(v, out)
 
 
+_PREFIX_KEYS: OrderedDict = OrderedDict()  # prefix_key -> the four comparison keys; an agent resends its prefix
+_PREFIX_KEYS_LOCK = threading.Lock()
+PREFIX_KEYS_CACHE = 4096
+_TIME_KINDS, _ID_KINDS = frozenset({"date", "time"}), frozenset({"id"})
+
+
+def _prefix_keys(prefix_key: str, provider: str, model: str, credential: str, tools, system) -> tuple:
+    """(canonical, masked, masked dates/times only, masked ids only) for tools+system, memoised by the
+    raw prefix key: masking a large system prompt costs milliseconds and the same prefix comes back
+    every turn. Tools are canonical in every key; only the system prompt is masked."""
+    with _PREFIX_KEYS_LOCK:
+        hit = _PREFIX_KEYS.get(prefix_key)
+        if hit is not None:
+            _PREFIX_KEYS.move_to_end(prefix_key)
+            return hit
+    tools_c = json.dumps(_strip_markers(tools), sort_keys=True, default=str)
+    system_c = json.dumps(_strip_markers(system), sort_keys=True, default=str)
+    head = [provider, model, credential, tools_c]
+    keys = (_h(head + [system_c]), _h(head + [mask_volatiles(system_c)]),
+            _h(head + [mask_only(system_c, _TIME_KINDS)]), _h(head + [mask_only(system_c, _ID_KINDS)]))
+    with _PREFIX_KEYS_LOCK:
+        _PREFIX_KEYS[prefix_key] = keys
+        if len(_PREFIX_KEYS) > PREFIX_KEYS_CACHE:
+            _PREFIX_KEYS.popitem(last=False)
+    return keys
+
+
 def body_facts(provider: str, body: dict, model: str = "", credential: str = "") -> Facts:
     """The request-side facts (the response fills in the rest)."""
     f = Facts(provider=provider, model=model or str(body.get("model") or ""))
@@ -147,6 +202,8 @@ def body_facts(provider: str, body: dict, model: str = "", credential: str = "")
                        if isinstance(m, dict) and m.get("role") in ("system", "developer")), None)
     if tools or system:
         f.prefix_key = _h([provider, f.model, credential, _strip_markers(tools), _strip_markers(system)])
+        (f.prefix_key_canonical, f.prefix_key_masked, f.prefix_key_masked_time,
+         f.prefix_key_masked_id) = _prefix_keys(f.prefix_key, provider, f.model, credential, tools, system)
     key = body.get("prompt_cache_key")  # only ever compared for equality: carried as a digest
     f.cache_key = hashlib.sha256(str(key).encode()).hexdigest()[:32] if key else None
     controls: list = []
@@ -204,6 +261,13 @@ def usage_facts(f: Facts, usage: dict, cache_write: int) -> Facts:
 
 
 MIN_RERENDERED_OUTPUT = 160  # above one 128-token read block plus a 16-token engine block: a reused output shows
+
+
+VOLATILE_START_WORDING = {
+    "date": ("a date or time", "set the timestamp once per day, or move it to the end of the prompt"),
+    "id": ("an id", "move the id out of the system prompt, to the end of the prompt or the first user message"),
+    "mixed": ("volatile values (dates, ids or numbers)", "move them out of the system prompt, to the end of the prompt"),
+}
 
 
 def detail_for(cause: str, prev: Facts | None, curr: Facts, *, prompt_tokens: int, cached_tokens: int,
@@ -282,6 +346,16 @@ def detail_for(cause: str, prev: Facts | None, curr: Facts, *, prompt_tokens: in
         return None, "shared_prefix_not_reused", (
             f"another session wrote a cache entry for the same model, tools and system prompt "
             f"{curr.shared_age:.0f} s earlier, within reach of a breakpoint here, yet this request {read}")
+
+    if cold and cause == "first_write" and curr.volatile_shared_age is not None \
+            and curr.volatile_shared_age <= SHARED_WINDOW and (curr.volatile_shared_wrote or not anthropic):
+        what, fix = VOLATILE_START_WORDING.get(curr.volatile_shared_kind or "mixed", VOLATILE_START_WORDING["mixed"])
+        return None, "volatile_prefix_at_start", (
+            f"the first request of this session: {curr.volatile_shared_age:.0f} s earlier another session (a restart "
+            f"of this agent, or another user of the same prompt) completed a request with the same model, tools and "
+            f"system prompt except for {what} in the system prompt, so a value that changes per session kept this "
+            f"one from sharing that prefix; this request {read}. The prefix's size is not measured, so nothing is "
+            f"counted as avoidable. Fix: {fix}")
 
     if cause in ("routing_miss", "unknown", "ttl_expired") and prev is not None \
             and prev.cache_key != curr.cache_key and (prev.cache_key or curr.cache_key):

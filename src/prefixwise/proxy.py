@@ -612,6 +612,10 @@ class PrefixwiseProxy:
         # flight by tools+system prefix, and when another session last finished one.
         self.prefix_inflight: dict[str, dict[str, float]] = _SessionMap(MAX_SESSIONS)
         self.prefix_done: dict[str, tuple[float, str]] = _SessionMap(MAX_SESSIONS)
+        # Completed requests by masked prefix key: (time, session, canonical key, dates-only key, ids-only
+        # key, wrote inside tools+system). A first request whose masked key is here under another
+        # canonical key differs from that session only in volatile values of the system prompt.
+        self.prefix_seen: dict[str, tuple] = _SessionMap(MAX_SESSIONS)
         if self._kv_auto and self.engine == "vllm" and not self.mock:
             self._discover_vllm()
         if self.engine == "sglang" and (self.engine_events is not None or self._kv_auto) and not self.mock:
@@ -938,6 +942,11 @@ class PrefixwiseProxy:
                 done = self.prefix_done.get(facts.prefix_key)
                 if done is not None and done[1] != session_id:
                     facts.shared_age, facts.shared_write_pos = sent - done[0], done[2]
+                seen = self.prefix_seen.get(facts.prefix_key_masked) if facts.prefix_key_masked else None
+                if seen is not None and seen[1] != session_id and seen[2] != facts.prefix_key_canonical:
+                    facts.volatile_shared_age, facts.volatile_shared_wrote = sent - seen[0], seen[5]
+                    facts.volatile_shared_kind = ("date" if seen[3] == facts.prefix_key_masked_time else
+                                                  "id" if seen[4] == facts.prefix_key_masked_id else "mixed")
         return {
             "provider": provider, "api": api, "body": body, "headers": headers,
             "facts": facts, "sent_at": sent,
@@ -1058,6 +1067,10 @@ class PrefixwiseProxy:
         inside = [b for b in facts.breakpoints if b < facts.sys_end]
         if done_session is not None and facts.cache_write > 0 and inside:
             self.prefix_done[facts.prefix_key] = (time.time(), done_session, max(inside))
+        if done_session is not None and facts.prefix_key_masked:
+            self.prefix_seen[facts.prefix_key_masked] = (
+                time.time(), done_session, facts.prefix_key_canonical, facts.prefix_key_masked_time,
+                facts.prefix_key_masked_id, bool(facts.cache_write > 0 and inside))
 
     def response_started(self, ctx: dict) -> None:
         """The upstream began answering: the request's prefill is done and its cache entry
