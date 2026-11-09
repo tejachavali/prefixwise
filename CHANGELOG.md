@@ -1,6 +1,11 @@
 # Changelog
 
-## Unreleased
+## 0.10.4: 2026-11-09
+
+The dollar line is always there, and the result fits in a message. Every current Claude model is priced,
+a point release the table does not list is priced at its family's nearest version and the report says so,
+and a model no rule prices is named instead of a dash. `prefixwise report --share` prints a block of counts
+and dollars for a chat or a thread.
 
 - **The dollar line is always there.** The table now holds every current Claude model on Anthropic's pricing page (added: Opus 5, 4.8, 4.7, 4.6, 4.5, 4.1; Sonnet 5, 4.5; Haiku 4.5; Fable 5; Mythos 5.1 and 5, next to the 5.5 models and Sonnet 4.6 already there), and a bare Claude id the table does not list (`claude-opus-4-9`) is priced at the nearest version of its family, the newest at or below it; the report says "Priced at a related model's rate: claude-opus-4-9 as claude-opus-4-8". A variant such as `-fast` stays unpriced, and a model no rule prices is now named: "Not priced: gpt-5.6" instead of a silent dash.
 - **`prefixwise report --share`**: a short block for a chat or a thread: requests, tokens, hit rate, dollars (with a note when partial or approximate), the top cause and its fix, the cache writes never read back. Counts and dollars only. `report --prices FILE` now reaches the report's pricing, as the flag said.
