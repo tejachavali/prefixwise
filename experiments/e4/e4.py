@@ -21,6 +21,17 @@ Arms are isolated so one cannot warm the other's cache: vLLM by a
 per-arm cache_salt; Anthropic by waiting out the 5-minute TTL between
 arms (--arm-gap).
 
+A second fix, `--fix auto_breakpoints` (Anthropic only), replays sessions from a client that
+sets no cache_control at all (sessions/no-markers.jsonl: the same tasks, no tool drift):
+  arm OFF: no marker anywhere, so Anthropic caches nothing
+  arm ON:  the proxy places the markers
+  predicted = avoidable tokens the OFF ledger attributes to breakpoint_misplaced
+  realised  = cached tokens ON - cached tokens OFF
+  It changes the bill (a write costs 1.25x), so Pass also needs the ON arm to cost less in
+  dollars than the OFF arm, write surcharge included, and no request rejected for its markers.
+  The OFF arm writes nothing, so no gap between arms is needed; each run's system prompt
+  carries the run's own tag so an earlier run's cache cannot serve this one.
+
 Modes:
   --record   write a fresh recorded-sessions file (deterministic, --seed)
   --mock     no network: a prefix-cache simulator (cached = longest
@@ -52,6 +63,9 @@ from prefixwise.proxy import PrefixwiseProxy  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
 DEFAULT_SESSIONS = HERE / "sessions" / "tool-order-drift.jsonl"
+NO_MARKER_SESSIONS = HERE / "sessions" / "no-markers.jsonl"  # for --fix auto_breakpoints: p_reload 0
+# fix -> the cause whose avoidable tokens are the prediction
+FIX_CAUSE = {"canonical_tools": "tool_reserialize", "auto_breakpoints": "breakpoint_misplaced"}
 UPSTREAMS = {"anthropic": "https://api.anthropic.com"}
 
 TOOLS = {
@@ -140,15 +154,17 @@ def render_tools(provider: str, order: list[str], key_seed: int | None) -> list[
     return out
 
 
-def render(provider: str, model: str, spec: dict, history: list[dict]) -> dict:
+def render(provider: str, model: str, spec: dict, history: list[dict], markers: bool = True,
+           tag: str = "") -> dict:
+    """`markers=False`: a client that sets no cache_control (the auto_breakpoints replay). `tag`:
+    text appended to the system prompt, the same in both arms of one run."""
     question = TASKS[spec["task"]][0]
     tools = render_tools(provider, spec["tool_order"], spec["key_seed"])
     if provider == "anthropic":
-        cc = {"type": "ephemeral"}
-        msgs = copy.deepcopy(history) + [{"role": "user", "content": [{"type": "text", "text": question,
-                                                                       "cache_control": cc}]}]
+        cc = {"cache_control": {"type": "ephemeral"}} if markers else {}
+        msgs = copy.deepcopy(history) + [{"role": "user", "content": [{"type": "text", "text": question, **cc}]}]
         return {"model": model, "max_tokens": 512, "tools": tools, "tool_choice": {"type": "auto"},
-                "system": [{"type": "text", "text": SYSTEM, "cache_control": cc}], "messages": msgs}
+                "system": [{"type": "text", "text": SYSTEM + tag, **cc}], "messages": msgs}
     msgs = [{"role": "system", "content": SYSTEM}] + copy.deepcopy(history) + [{"role": "user", "content": question}]
     body = {"model": model, "max_tokens": 256, "temperature": 0, "tools": tools, "tool_choice": "auto",
             "messages": msgs}
@@ -186,6 +202,14 @@ class MockCache:
     def __init__(self):
         self.seen: list[str] = []
 
+    def lookup_marked(self, text: str, marked: bool) -> tuple[int, int, int]:
+        """As Anthropic: (prompt, read, written). Without a marker nothing is read or written;
+        with one, the longest stored prefix is read and the rest of the prompt written."""
+        if not marked:
+            return len(text) // 4, 0, 0
+        prompt, cached = self.lookup(text)
+        return prompt, cached, prompt - cached
+
     def lookup(self, text: str) -> tuple[int, int]:
         best = 0
         for prev in self.seen:
@@ -201,14 +225,27 @@ class MockCache:
         return prompt, cached
 
 
-def mock_forward(provider: str, cache: MockCache, state: dict):
+def _without_markers(value):
+    if isinstance(value, dict):
+        return {k: _without_markers(v) for k, v in value.items() if k != "cache_control"}
+    return [_without_markers(v) for v in value] if isinstance(value, list) else value
+
+
+def mock_forward(provider: str, cache: MockCache, state: dict, by_marker: bool = False):
+    """`by_marker`: bill as Anthropic does, reading and writing only when the request carries a
+    cache_control marker (the auto_breakpoints replay); the cache compares prompts without them."""
     def forward(prov, body, request_id, session_id, client_headers, api="chat"):
-        prompt, cached = cache.lookup(_prompt_text(body))
+        written = 0
+        if by_marker:
+            prompt, cached, written = cache.lookup_marked(_prompt_text(_without_markers(body)),
+                                                          "cache_control" in json.dumps(body))
+        else:
+            prompt, cached = cache.lookup(_prompt_text(body))
         tool = state["expected"]
         if provider == "anthropic":
             return 200, {"id": f"msg_{request_id[:8]}", "content": [{"type": "tool_use", "name": tool, "input": {}}],
-                         "usage": {"input_tokens": prompt - cached, "cache_read_input_tokens": cached,
-                                   "cache_creation_input_tokens": 0, "output_tokens": 20}}
+                         "usage": {"input_tokens": prompt - cached - written, "cache_read_input_tokens": cached,
+                                   "cache_creation_input_tokens": written, "output_tokens": 20}}
         return 200, {"id": f"chatcmpl-{request_id[:8]}",
                      "choices": [{"message": {"role": "assistant", "content": None,
                                               "tool_calls": [{"type": "function",
@@ -221,12 +258,13 @@ def mock_forward(provider: str, cache: MockCache, state: dict):
 # -- runner ------------------------------------------------------------------------------
 
 def run_arm(arm: str, specs: list[dict], *, provider: str, model: str, base_url: str | None,
-            mock: bool, salt: str, budget: dict) -> list[dict]:
-    fixes = ("canonical_tools",) if arm == "on" else ()
+            mock: bool, salt: str, budget: dict, fix: str = "canonical_tools", tag: str = "") -> list[dict]:
+    fixes = (fix,) if arm == "on" else ()
+    markers = fix != "auto_breakpoints"  # that replay is a client that sets none
     if mock:
         proxy = PrefixwiseProxy(mock=True, fixes=fixes)
         state = {"expected": None}
-        proxy._forward = mock_forward(provider, MockCache(), state)  # type: ignore[method-assign]
+        proxy._forward = mock_forward(provider, MockCache(), state, by_marker=not markers)  # type: ignore[method-assign]
     else:
         url = base_url if provider == "vllm" else UPSTREAMS[provider]
         key = os.environ.get("ANTHROPIC_API_KEY") if provider == "anthropic" else None
@@ -235,7 +273,7 @@ def run_arm(arm: str, specs: list[dict], *, provider: str, model: str, base_url:
     rows, histories = [], {}
     for spec in specs:
         history = histories.setdefault(spec["session"], [])
-        body = render(provider, model, spec, history)
+        body = render(provider, model, spec, history, markers=markers, tag=tag)
         if provider == "vllm":
             body["cache_salt"] = salt  # isolates this arm's cache from the other arm's
         est = len(_prompt_text(body)) // 4
@@ -244,7 +282,7 @@ def run_arm(arm: str, specs: list[dict], *, provider: str, model: str, base_url:
             break
         state["expected"] = spec["expected_tool"]
         headers = {"X-Prefixwise-Session-Id": f"e4-{arm}-{salt}-s{spec['session']}"}
-        result, _ = proxy.handle(provider, body, headers)
+        result, entry = proxy.handle(provider, body, headers)
         if result["status"] >= 400:
             print(f"{arm} s{spec['session']} t{spec['turn']}: HTTP {result['status']}: "
                   f"{json.dumps(result['response'])[:300]}")
@@ -257,7 +295,11 @@ def run_arm(arm: str, specs: list[dict], *, provider: str, model: str, base_url:
         rows.append({"arm": arm, **spec, "cause": result["cause"], "prompt_tokens": result["prompt_tokens"],
                      "cached_tokens": result["cached_tokens"], "avoidable_tokens": result["avoidable_tokens"],
                      "fixes_applied": result.get("fixes_applied") or [], "tool_called": called,
-                     "success": called == spec["expected_tool"]})
+                     "success": called == spec["expected_tool"],
+                     "cost": entry.cost if entry is not None else None,
+                     "cache_write_tokens": (entry.cache_write_tokens or 0) if entry is not None else 0,
+                     # the provider refused the markers and the client's request went as it was
+                     "markers_rejected": (provider, "auto_breakpoints") in proxy.rejected_fields})
         # Grow the conversation the way the agent did: question, then its answer.
         q = TASKS[spec["task"]][0]
         history += ([{"role": "user", "content": [{"type": "text", "text": q}]}] if provider == "anthropic"
@@ -266,19 +308,29 @@ def run_arm(arm: str, specs: list[dict], *, provider: str, model: str, base_url:
     return rows
 
 
-def score(off: list[dict], on: list[dict]) -> dict:
+def score(off: list[dict], on: list[dict], fix: str = "canonical_tools") -> dict:
     ok_off = [r for r in off if "error" not in r]
     ok_on = [r for r in on if "error" not in r]
     keys_on = {(r["session"], r["turn"]): r for r in ok_on}
     paired = [(r, keys_on[(r["session"], r["turn"])]) for r in ok_off if (r["session"], r["turn"]) in keys_on]
-    predicted = sum(r["avoidable_tokens"] for r, _ in paired if r["cause"] == "tool_reserialize")
+    predicted = sum(r["avoidable_tokens"] for r, _ in paired if r["cause"] == FIX_CAUSE[fix])
     realised = sum(b["cached_tokens"] for _, b in paired) - sum(a["cached_tokens"] for a, _ in paired)
     succ = lambda rows: (sum(r["success"] for r in rows) / len(rows)) if rows else None  # noqa: E731
     s_off, s_on = succ([a for a, _ in paired]), succ([b for _, b in paired])
     causes = lambda rows: {c: sum(1 for r in rows if r["cause"] == c) for c in sorted({r["cause"] for r in rows})}  # noqa: E731
     ratio = (realised / predicted) if predicted else None
     flat = s_off is not None and s_on is not None and s_on >= s_off - 0.05
-    return {"paired_requests": len(paired), "errors": {"off": len(off) - len(ok_off), "on": len(on) - len(ok_on)},
+    # Dollars, for a fix that changes the bill: every paired request priced, or no verdict on cost.
+    costs = [(a.get("cost"), b.get("cost")) for a, b in paired]
+    priced = bool(costs) and all(x is not None and y is not None for x, y in costs)
+    cost = {"off": sum(x for x, _ in costs), "on": sum(y for _, y in costs)} if priced else None
+    bill = {"cost_usd": cost, "saved_usd": (cost["off"] - cost["on"]) if cost else None,
+            "cache_write_tokens": {"off": sum(a.get("cache_write_tokens") or 0 for a, _ in paired),
+                                   "on": sum(b.get("cache_write_tokens") or 0 for _, b in paired)},
+            "requests_rewritten": sum(1 for _, b in paired if fix in (b.get("fixes_applied") or [])),
+            "markers_rejected": any(b.get("markers_rejected") for _, b in paired)}
+    pays = fix != "auto_breakpoints" or bool(cost and cost["on"] < cost["off"] and not bill["markers_rejected"])
+    return {"fix": fix, **bill, "paired_requests": len(paired), "errors": {"off": len(off) - len(ok_off), "on": len(on) - len(ok_on)},
             "predicted_savings_tokens": predicted, "realised_savings_tokens": realised,
             "realised_over_predicted": ratio,
             "prompt_tokens": {"off": sum(a["prompt_tokens"] for a, _ in paired),
@@ -288,7 +340,8 @@ def score(off: list[dict], on: list[dict]) -> dict:
             "task_success": {"off": s_off, "on": s_on}, "success_flat": flat,
             "causes": {"off": causes([a for a, _ in paired]), "on": causes([b for _, b in paired])},
             "reloaded_turns": sum(1 for a, _ in paired if a["reloaded"]),
-            "pass": bool(len(paired) >= 50 and predicted > 0 and ratio is not None and ratio >= 0.5 and flat)}
+            "pass": bool(len(paired) >= 50 and predicted > 0 and ratio is not None and ratio >= 0.5 and flat
+                         and pays)}
 
 
 def write_report(rep: dict, off: list[dict], on: list[dict], out_dir: Path, label: str) -> Path:
@@ -296,18 +349,28 @@ def write_report(rep: dict, off: list[dict], on: list[dict], out_dir: Path, labe
     path = out_dir / f"e4_{label}_{time.strftime('%Y%m%d-%H%M%S')}.json"
     path.write_text(json.dumps({"report": rep, "off": off, "on": on}, indent=2))
     pct = lambda x: "-" if x is None else f"{x:.1%}"  # noqa: E731
-    md = [f"# E4 ({label}): canonical_tools", "",
+    fix = rep.get("fix", "canonical_tools")
+    md = [f"# E4 ({label}): {fix}", "",
           f"Paired requests {rep['paired_requests']} (errors off {rep['errors']['off']}, on {rep['errors']['on']}), "
           f"{rep['reloaded_turns']} with tool-order drift  |  Pass: {'YES' if rep['pass'] else 'NO'}", "",
-          "| | OFF (as recorded) | ON (canonical_tools) |", "|---|---:|---:|",
+          f"| | OFF (as recorded) | ON ({fix}) |", "|---|---:|---:|",
           f"| Prompt tokens | {rep['prompt_tokens']['off']:,} | {rep['prompt_tokens']['on']:,} |",
           f"| Cached tokens | {rep['cached_tokens']['off']:,} | {rep['cached_tokens']['on']:,} |",
           f"| Task success | {pct(rep['task_success']['off'])} | {pct(rep['task_success']['on'])} |",
           f"| Causes | {rep['causes']['off']} | {rep['causes']['on']} |", "",
-          f"Predicted savings (OFF tool_reserialize avoidable): {rep['predicted_savings_tokens']:,} tokens",
+          f"Predicted savings (OFF {FIX_CAUSE[fix]} avoidable): {rep['predicted_savings_tokens']:,} tokens",
           f"Realised savings (cached ON - cached OFF): {rep['realised_savings_tokens']:,} tokens "
           f"({pct(rep['realised_over_predicted'])} of predicted; pass needs >= 50%)",
           f"Task success flat (ON >= OFF - 5 points): {'yes' if rep['success_flat'] else 'NO'}", ""]
+    if fix == "auto_breakpoints":
+        c = rep.get("cost_usd")
+        md += [f"Requests rewritten (markers placed): {rep['requests_rewritten']} of {rep['paired_requests']}",
+               f"Cache writes: OFF {rep['cache_write_tokens']['off']:,} tokens, ON {rep['cache_write_tokens']['on']:,} "
+               "(OFF must be 0: no marker, nothing written)",
+               (f"Cost: OFF ${c['off']:.4f}, ON ${c['on']:.4f}, saved ${rep['saved_usd']:.4f} "
+                f"({rep['saved_usd'] / c['off']:.1%}), write surcharge included; pass needs ON below OFF"
+                if c else "Cost: not every request was priced, so no verdict on dollars (pass needs one)"),
+               f"Markers rejected by the provider: {'YES' if rep['markers_rejected'] else 'no'}", ""]
     path.with_suffix(".md").write_text("\n".join(md) + "\n")
     return path
 
@@ -317,7 +380,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--provider", default="vllm", choices=["vllm", "anthropic"])
     ap.add_argument("--model", default="Qwen/Qwen3-4B")
     ap.add_argument("--base-url", default="http://127.0.0.1:8000", help="vLLM server")
-    ap.add_argument("--sessions-file", default=str(DEFAULT_SESSIONS))
+    ap.add_argument("--fix", default="canonical_tools", choices=sorted(FIX_CAUSE),
+                    help="the proxy fix under test (auto_breakpoints: Anthropic only, a client without markers)")
+    ap.add_argument("--sessions-file", default=None,
+                    help="recorded sessions (default: tool-order-drift.jsonl; no-markers.jsonl for auto_breakpoints)")
     ap.add_argument("--record", action="store_true", help="write a fresh recording and exit")
     ap.add_argument("--sessions", type=int, default=6)
     ap.add_argument("--turns", type=int, default=10)
@@ -329,7 +395,15 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--max-input-tokens", type=int, default=None)
     ap.add_argument("--output-dir", default=str(HERE / "results"))
     args = ap.parse_args(argv)
-    path = Path(args.sessions_file)
+    if args.fix == "auto_breakpoints":
+        if not args.mock and args.provider != "anthropic":
+            ap.error("--fix auto_breakpoints is for --provider anthropic")
+        args.provider = "anthropic"
+        if not args.mock and args.model == "Qwen/Qwen3-4B":
+            ap.error("--fix auto_breakpoints needs --model (e.g. claude-haiku-5-5)")
+        if args.mock and args.model == "Qwen/Qwen3-4B":
+            args.model = "claude-haiku-5-5"  # a priced model, so the mock run has dollars to compare
+    path = Path(args.sessions_file or (NO_MARKER_SESSIONS if args.fix == "auto_breakpoints" else DEFAULT_SESSIONS))
     if args.record:
         specs = record(path, args.sessions, args.turns, args.p_reload, args.seed)
         print(f"recorded {len(specs)} turns ({sum(s['reloaded'] for s in specs)} with tool reloads) -> {path}")
@@ -337,16 +411,21 @@ def main(argv: list[str] | None = None) -> int:
     specs = load(path)
     stamp = time.strftime("%H%M%S")
     budget = {"spent": 0, "max": args.max_input_tokens}
-    gap = args.arm_gap if args.arm_gap is not None else (330.0 if args.provider == "anthropic" and not args.mock else 0.0)
-    kw = dict(provider=args.provider, model=args.model, base_url=args.base_url, mock=args.mock, budget=budget)
-    print(f"E4 {'mock' if args.mock else 'live'}: {args.provider} {args.model}, {len(specs)} recorded turns per arm")
+    # auto_breakpoints: the OFF arm carries no marker and so writes nothing; no cache to wait out
+    gap = args.arm_gap if args.arm_gap is not None else (
+        330.0 if args.provider == "anthropic" and not args.mock and args.fix != "auto_breakpoints" else 0.0)
+    tag = f" Run tag {time.strftime('%Y%m%d')}-{stamp}." if args.fix == "auto_breakpoints" else ""
+    kw = dict(provider=args.provider, model=args.model, base_url=args.base_url, mock=args.mock, budget=budget,
+              fix=args.fix, tag=tag)
+    print(f"E4 {'mock' if args.mock else 'live'}: {args.fix}, {args.provider} {args.model}, "
+          f"{len(specs)} recorded turns per arm")
     off = run_arm("off", specs, salt=f"e4-off-{stamp}", **kw)
     if gap:
         print(f"waiting {gap:.0f}s between arms so the OFF arm's cache expires")
         time.sleep(gap)
     on = run_arm("on", specs, salt=f"e4-on-{stamp}", **kw)
-    rep = score(off, on)
-    label = "mock" if args.mock else f"{args.provider}"
+    rep = score(off, on, args.fix)
+    label = ("mock" if args.mock else f"{args.provider}") + ("" if args.fix == "canonical_tools" else f"_{args.fix}")
     path = write_report(rep, off, on, Path(args.output_dir), label)
     print(path.with_suffix(".md").read_text())
     print(f"Report: {path}")
