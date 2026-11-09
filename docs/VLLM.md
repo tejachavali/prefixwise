@@ -71,7 +71,7 @@ KV events need no endpoint: on the first inference request the middleware reads 
 per-rank publisher configs (`app.state.engine_client`, what `GET /kv_event_sources` serves) and
 subscribes, so data-parallel ranks are covered. Configuration is by environment variable, since
 vLLM passes the class only `app`: `PREFIXWISE_LEDGER` (default `prefixwise.db` in the working
-directory), `PREFIXWISE_FIX=canonical_tools`, `PREFIXWISE_KV_EVENTS` (an endpoint, or `auto`, the
+directory), `PREFIXWISE_FIX=canonical_tools` (or `optimize`; `PREFIXWISE_OPTIMIZE=1` is the same: every proven fix), `PREFIXWISE_KV_EVENTS` (an endpoint, or `auto`, the
 default), `PREFIXWISE_COLLECTOR`. Read the ledger with `prefixwise report --ledger prefixwise.db`,
 or run `prefixwise collect` and point `PREFIXWISE_COLLECTOR` at it; vLLM's port serves no
 Prefixwise endpoints.
