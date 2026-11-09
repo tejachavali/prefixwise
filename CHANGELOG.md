@@ -1,6 +1,11 @@
 # Changelog
 
-## Unreleased
+## 0.10.2: 2026-11-09
+
+Two more from this week's feedback, both about costs that were hidden. An agent that trims its history
+every turn while its system prompt still hits now sees the cache writes that are never read back; before,
+any partial hit zeroed that count. And a session restarted with a fresh timestamp in its system prompt is
+told that another session had the same prefix moments earlier, with the fix, on any provider.
 
 - **Unread cache writes are counted on partial hits.** The previous turn's write sits after what that turn read, so a turn that replaces history while its system prompt and tools still hit leaves the whole write unread; before, any read at all zeroed `unread_write_tokens`, so an agent that trims history every turn (Reddit, Specialist-Can2889: 535k tokens written and 334k read in one 32-turn Claude Agent SDK session) showed no unread-write cost. Now the unread share is the write minus what this turn read beyond the previous turn's read, the 1-hour part of a mixed write counted as read first (it comes first in the prompt). The collector (behind the proxy and the middleware) and the Claude Code importer pass the previous read.
 - **A restart that recomputes a shareable prefix is named.** The first request of a session that reads nothing, within the cache window of another session's request with the same model, credential and tools and a system prompt that differs only in a date, time or id (a timestamp set at session start, a per-user id), carries the detail `volatile_prefix_at_start`, says which kind differed, and the report prints its fix under the expected misses. Before, the proxy compared prefixes across sessions as sent, so a fresh timestamp hid the match, and only on Anthropic. The comparison uses masked prefix keys (no text kept), memoised per prefix. From Reddit (Character_Fix_5317, r/DeepSeek). Turn facts gain the keys: a 0.10.1 collector refuses such records as malformed, so upgrade the collector first.
