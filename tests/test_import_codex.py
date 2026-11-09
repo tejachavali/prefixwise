@@ -104,3 +104,32 @@ def test_reimport_and_cli(tmp_path):
                           "--ledger", str(tmp_path / "c.db")], capture_output=True, text=True, env=env)
     assert out.returncode == 0, out.stderr
     assert "Imported 9 requests from 3 Codex logs" in out.stdout
+
+
+def test_reordered_tools_are_waste_and_a_changed_catalog_is_not(tmp_path):
+    """Reddit (kantorcodes1): Codex rebuilds its dynamic tool list between runs. The same tools in another
+    order are `tool_reserialize` (waste, priced); a tool added or a schema edited is `tool_catalog_change`."""
+    a = {"name": "read_file", "parameters": {"type": "object", "properties": {"path": {"type": "string"}}}}
+    b = {"name": "write_file", "parameters": {"type": "object", "properties": {"path": {"type": "string"}}}}
+    b2 = {**b, "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "mode": {"type": "string"}}}}
+    log = [line(0, "session_meta", {"id": "th9", "timestamp": ts(0)}), line(1, "turn_context", {"model": "gpt-5.6-luna"}),
+           line(2, "dynamic_tools_updated", {"thread_id": "th9", "tools": [a, b]}),
+           record(5, "r1", 12000, 0, 12000),
+           line(8, "dynamic_tools_updated", {"thread_id": "th9", "tools": [b, a]}),   # same tools, reordered
+           record(10, "r2", 12400, 0),
+           line(12, "dynamic_tools_updated", {"thread_id": "th9", "tools": [a, b2]}),  # a schema edited
+           record(15, "r3", 12800, 0),
+           line(17, "dynamic_tools_updated", {"thread_id": "th9", "tools": [a, b2, {"name": "grep"}]}),  # one added
+           record(20, "r4", 13200, 0)]
+    write_log(tmp_path / "sessions" / "rollout-2026-11-09T09-00-00-th9.jsonl", log)
+    led = Ledger()
+    import_codex(tmp_path, ledger=led)
+    with led.reader() as c:
+        got = c.execute("SELECT request_id, cause, legit, avoidable_tokens, avoidable_cost FROM entries "
+                        "ORDER BY recorded_at, id").fetchall()
+    by = {r[0]: r for r in got}
+    assert by["r1"][1] == "first_write"
+    assert by["r2"][1] == "tool_reserialize" and by["r2"][2] == 0 and by["r2"][3] == 12000  # the previous prompt, unread
+    assert by["r2"][4] is not None and by["r2"][4] > 0  # priced: gpt-5.6-luna is in the price table
+    assert by["r3"][1] == "tool_catalog_change" and by["r3"][2] == 1 and by["r3"][3] == 0
+    assert by["r4"][1] == "tool_catalog_change" and by["r4"][2] == 1 and by["r4"][3] == 0
