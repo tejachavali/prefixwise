@@ -12,6 +12,7 @@ expiry, eviction, and routing need real usage or engine events.
 
 from __future__ import annotations
 
+import difflib
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -51,9 +52,32 @@ class Explanation:
     prompt_tokens: int | None = None
     cached_tokens: int | None = None
     secondary: list[str] = field(default_factory=list)
+    diff: str | None = None  # --diff: the first differing block, before and after, from the files given
 
     def to_dict(self) -> dict:
         return dict(self.__dict__)
+
+
+DIFF_LINES = 40
+
+
+def _block_text(value) -> str:
+    return value if isinstance(value, str) else json.dumps(value, indent=1, ensure_ascii=False, sort_keys=False)
+
+
+def block_diff(prev_body: dict, curr_body: dict, provider: str, index: int, limit: int = DIFF_LINES) -> str | None:
+    """A unified diff of block `index` (prefix order) between two request bodies the caller holds.
+    Hashes say where a request changed; this says what, from the user's own files, on their machine.
+    The proxy and the ledger never see it. Cut at `limit` lines."""
+    prev_blocks, curr_blocks = extract_blocks(prev_body, provider), extract_blocks(curr_body, provider)
+    before = _block_text(prev_blocks[index][1]).splitlines() if index < len(prev_blocks) else []
+    after = _block_text(curr_blocks[index][1]).splitlines() if index < len(curr_blocks) else []
+    lines = list(difflib.unified_diff(before, after, "previous request", "this request", lineterm="", n=1))
+    if not lines:
+        return None
+    if len(lines) > limit:
+        lines = lines[:limit] + [f"... {len(lines) - limit} more lines"]
+    return "\n".join(lines)
 
 
 def _snapshot(turn: Turn, provider: str, fp: Fingerprinter) -> RequestSnapshot:
@@ -79,7 +103,7 @@ def _snapshot(turn: Turn, provider: str, fp: Fingerprinter) -> RequestSnapshot:
 
 
 def explain_pair(prev: Turn | None, curr: Turn, provider: str | None = None,
-                 fingerprinter: Fingerprinter | None = None) -> Explanation:
+                 fingerprinter: Fingerprinter | None = None, diff: bool = False) -> Explanation:
     provider = provider or detect_provider(curr.body)
     fp = fingerprinter or Fingerprinter()
     curr_snap = _snapshot(curr, provider, fp)
@@ -88,11 +112,14 @@ def explain_pair(prev: Turn | None, curr: Turn, provider: str | None = None,
     div = first_divergence(prev_snap.blocks, curr_snap.blocks) if prev_snap else None
     if div and result.cause.value == "tool_reserialize" and div["kind"] == "content changed":
         div["kind"] = "tools reordered (same tool set, different order)"
+    text = None
+    if diff and div and prev is not None and "appended after" not in div["kind"]:
+        text = block_diff(prev.body, curr.body, provider, div["index"])
     return Explanation(cause=result.cause.value, legit=result.legit, evidence=result.evidence,
                        divergence=div, provider=provider, offline=curr.usage is None,
                        prompt_tokens=curr_snap.prompt_tokens if curr.usage is not None else None,
                        cached_tokens=curr_snap.cached_tokens if curr.usage is not None else None,
-                       secondary=[c.value for c in result.secondary])
+                       secondary=[c.value for c in result.secondary], diff=text)
 
 
 def _turn_from_record(rec: dict) -> Turn:
@@ -123,7 +150,7 @@ def load_turns(path: str | Path) -> list[Turn]:
     return [_turn_from_record(r) for r in records]
 
 
-def explain_session(turns: list[Turn], provider: str | None = None) -> list[Explanation]:
+def explain_session(turns: list[Turn], provider: str | None = None, diff: bool = False) -> list[Explanation]:
     """Explain every turn against the previous turn in the same session."""
     fp = Fingerprinter()
     last: dict[str, Turn] = {}
@@ -132,7 +159,7 @@ def explain_session(turns: list[Turn], provider: str | None = None) -> list[Expl
     for t in turns:
         lane = (t.session_id, str(t.body.get("model", "unknown")))
         prev = lanes.get(lane) or last.get(t.session_id)
-        out.append(explain_pair(prev, t, provider, fp))
+        out.append(explain_pair(prev, t, provider, fp, diff=diff))
         last[t.session_id] = t
         lanes[lane] = t
     return out

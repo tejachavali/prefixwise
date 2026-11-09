@@ -692,6 +692,10 @@ def _print_explanation(label: str, e) -> None:
     print(f"  why: {e.evidence}")
     if e.prompt_tokens is not None:
         print(f"  usage: {_fmt_int(e.cached_tokens)} of {_fmt_int(e.prompt_tokens)} prompt tokens cached")
+    if e.diff:
+        print("  what changed (from your files; nothing is stored):")
+        for line in e.diff.splitlines():
+            print(f"    {line}")
 
 
 def cmd_explain(args) -> int:
@@ -703,11 +707,11 @@ def cmd_explain(args) -> int:
             prev, curr = (load_turns(f) for f in args.files)
             if len(prev) != 1 or len(curr) != 1:
                 sys.exit("prefixwise: with two files, each must hold exactly one request")
-            results = [explain_pair(prev[0], curr[0], provider)]
+            results = [explain_pair(prev[0], curr[0], provider, diff=args.diff)]
             labels = [f"{args.files[0]} -> {args.files[1]}"]
         elif len(args.files) == 1:
             turns = load_turns(args.files[0])
-            results = explain_session(turns, provider)
+            results = explain_session(turns, provider, diff=args.diff)
             labels = [f"turn {i + 1} ({t.session_id})" for i, t in enumerate(turns)]
         else:
             sys.exit("prefixwise: give one session file (JSON / JSONL) or two request files")
@@ -925,6 +929,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("files", nargs="+")
     p.add_argument("--provider", default="auto", choices=["auto", "openai", "anthropic", "vllm"])
     p.add_argument("--json", action="store_true")
+    p.add_argument("--diff", action="store_true",
+                   help="also print the first differing block before and after, from the files given (the hashes say "
+                        "where it changed; this says what). Read from your files only: nothing is stored or sent")
     p.add_argument("--fail-on-waste", action="store_true",
                    help="exit 2 if any turn is classified as waste (for CI gates on prompt changes)")
     p.set_defaults(func=cmd_explain)
