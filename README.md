@@ -235,7 +235,7 @@ One cause per request: the first thing, in prefix order, that broke reuse. Each 
 | `history_edit` | Earlier messages were rewritten without a compaction | **yes** | Append, do not rewrite history |
 | `tool_result_mutation` | An earlier tool result was re-rendered or removed | **yes** | Freeze tool output once sent |
 | `compaction_rewrite` | Context was compacted (send `X-Prefixwise-Compaction-Event: 1`) | no | Compact at task boundaries, not per turn |
-| `param_rendered` | Blocks equal, but tool_choice / thinking / reasoning / format changed | depends | Keep those params stable within a session |
+| `param_rendered` | Blocks equal, but tool_choice / thinking / reasoning / format / chat_template_kwargs changed | depends | Keep those params stable within a session |
 | `model_switch` | First call to a different model in the session | no | - |
 | `retry_replay` | Identical request within 60 s with nothing cached | **yes** | Check retry logic |
 | `breakpoint_misplaced` | Anthropic: no `cache_control` breakpoint, or one that stays early while the stable prompt grows past it (the tail after it is paid uncached every turn) | **yes** | Add `cache_control` after the stable prefix |
