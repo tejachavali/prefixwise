@@ -152,3 +152,18 @@ def test_report_session_shows_each_requests_cost_and_the_total(tmp_path, capsys)
     lines = [ln for ln in out.splitlines() if ln[:1].isdigit()]
     assert lines[0].split()[-3:] == ["$0.0120", "0", "$0.0000"]
     assert lines[2].split()[-3:] == ["-", "0", "-"]
+
+
+def test_first_changed_is_a_position_in_the_whole_prompt_and_blank_on_a_model_switch(tmp_path, capsys):
+    """tools come first in the prompt, so with two tools the first message is messages[2]; and a
+    model switch compares with another model's request, which names nothing useful."""
+    path = str(tmp_path / "l.db")
+    p = PrefixwiseProxy(ledger_path=path, mock=True)
+    p.handle("openai", {"model": "small", "session_id": "s", "messages": Q1})
+    p.handle("openai", {"model": "m", "session_id": "s", "tools": [A, B], "messages": Q1})
+    p.handle("openai", {"model": "m", "session_id": "s", "tools": [A, B], "messages": [{"role": "user", "content": "other"}]})
+    turns = p.ledger.turns("s")
+    assert turns[1]["cause"] == "model_switch" and turns[1]["first_changed"] is None
+    assert turns[2]["first_changed"] == "messages[2]"  # block 2 of the prompt: after the two tools
+    main(["report", "--ledger", path, "--session", "s"])
+    assert "position in the whole prompt" in capsys.readouterr().out

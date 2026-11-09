@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **`report --session`: what the number in `messages[8]` means, said correctly.** It is the block's position in the whole prompt, from 0, in cache order (tools, then system, then messages), not the message's own index as the footer, the API doc and the 0.10.5 notes said. The footer and docs now say so, and say that on a hit it marks where the new turn was appended. A `model_switch` row no longer shows a first-changed block: it was a comparison with another model's request.
+
 ## 0.10.6: 2026-11-09
 
 Three small ones from the first day of the session view. `prefixwise fixes` says whether the markers
