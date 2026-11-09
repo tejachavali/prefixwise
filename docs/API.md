@@ -61,8 +61,10 @@ One row, by the `X-Prefixwise-Request-Id` the proxy returned.
 ### `GET /api/v1/sessions/{session_id}/turns`
 One session in order, numbered from 1 (`latest` for the most recent session): each row as
 `/requests` gives it, plus `turn`, `hit_rate` (cached over prompt tokens, null without usage) and
-`first_changed`, the block where this request's prompt first differs from the previous one
-(`system[0]`, `tools[2]`, `messages[5]`; null when nothing diverged). 404 for an unknown session.
+`first_changed`, the block where this request's prompt first differs from the request it was compared
+with, the session's previous one on the same model and conversation (`system[0]`, `tools[2]`,
+`messages[5]`; null when nothing diverged). Rows are in time order, numbered over the whole session.
+404 for an unknown session.
 ```json
 {"session_id": "s1", "turns": [{"turn": 3, "cause": "tool_reserialize", "first_changed": "tools[0]",
                                 "prompt_tokens": 15400, "cached_tokens": 0, "hit_rate": 0.0, "...": "..."}]}

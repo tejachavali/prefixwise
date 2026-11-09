@@ -101,3 +101,33 @@ def test_api_session_turns(tmp_path):
     status, body = get(p, "/api/v1/sessions/latest/turns", "")
     assert status == 200 and body["session_id"] == "s"
     assert get(p, "/api/v1/sessions/nope/turns", "")[0] == 404
+
+
+def test_turns_are_in_time_order_and_since_keeps_the_numbering(tmp_path, capsys):
+    """Imported logs are recorded out of time order (a Claude Code main log, then its subagents'):
+    the view orders by time and names the agent when a session has more than one."""
+    from prefixwise.ledger import Ledger, LedgerEntry
+
+    path = str(tmp_path / "l.db")
+    led = Ledger(path)
+
+    def row(rid, agent, at, cause="none"):
+        return LedgerEntry(session_id="s", agent_id=agent, provider="anthropic", model="m", cause=cause,
+                           prompt_tokens=1000, cached_tokens=500, avoidable_tokens=0, avoidable_cost=None, request_id=rid)
+
+    led.record(row("m1", "main", 100.0, "first_write"), at=100.0)
+    led.record(row("m2", "main", 300.0), at=300.0)
+    led.record(row("s1", "sub", 200.0, "first_write"), at=200.0)  # recorded last, happened in between
+    turns = led.turns("s")
+    assert [(t["turn"], t["request_id"]) for t in turns] == [(1, "m1"), (2, "s1"), (3, "m2")]
+    assert [(t["turn"], t["request_id"]) for t in led.turns("s", since=250.0)] == [(3, "m2")]
+    assert led.latest_session() == "s"
+    main(["report", "--ledger", path, "--session", "s"])
+    out = capsys.readouterr().out
+    header = [ln for ln in out.splitlines() if ln.startswith("turn")][0].split()
+    assert header[:2] == ["turn", "agent"]
+    assert main(["report", "--ledger", path, "--session", "s", "--since", "250"]) == 0
+    lines = [ln for ln in capsys.readouterr().out.splitlines() if ln[:1].isdigit()]
+    assert len(lines) == 1 and lines[0].split()[0] == "3"
+    assert main(["report", "--ledger", path, "--session", "s", "--since", "1000"]) == 1
+    assert "in that window" in capsys.readouterr().err

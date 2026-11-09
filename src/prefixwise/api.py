@@ -108,7 +108,7 @@ def get(proxy, path: str, query: str) -> tuple[int, dict]:
             sid = sub[len("/sessions/"):-len("/turns")]
             if sid == "latest":
                 sid = led.latest_session()
-            turns = led.turns(sid) if sid else []
+            turns = led.turns(sid, since=_time(p.get("since"), "since")) if sid else []
             if not turns:
                 return 404, _err("no such session (or nothing recorded yet)")
             return 200, {"session_id": sid, "turns": turns}
