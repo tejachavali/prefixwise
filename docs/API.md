@@ -63,9 +63,12 @@ One session in order, numbered from 1 (`latest` for the most recent session): ea
 `/requests` gives it, plus `turn`, `hit_rate` (cached over prompt tokens, null without usage) and
 `first_changed`, the block where this request's prompt first differs from the request it was compared
 with, the session's previous one on the same model and conversation, as `role[position]`: the position
-is counted from 0 over the whole prompt in cache order (tools, then system, then messages), so `tools[0]`
-is the first tool and, with six tools and one system block, `messages[7]` is the first message. On a hit
-it is where the new turn was appended; null when nothing diverged and on a `model_switch`. Rows are in time order, numbered over the whole session.
+is counted from 0 over the whole prompt in Prefixwise's prefix order: tools, then system, then the
+conversation (`messages[n]`, or `tool_results[n]` for a tool result), one position per tool, per system
+prompt and per message, not per content block. So `tools[0]` is the first tool and, with six tools and
+one system prompt, `messages[7]` is the first message; `a -> b[n]` means the block at n changed kind. On
+an append-only hit it is the first block of the new turn; null when nothing diverged and on a
+`first_write` or `model_switch`. Rows are in time order, numbered over the whole session.
 404 for an unknown session.
 ```json
 {"session_id": "s1", "turns": [{"turn": 3, "cause": "tool_reserialize", "first_changed": "tools[0]",

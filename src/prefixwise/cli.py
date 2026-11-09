@@ -218,9 +218,10 @@ def _report_session(led, session: str, as_json: bool, since: float | None = None
     print(_table(rows, ["turn", *extra, "prompt", "cached", "hit", "cause", "first changed", "cost", "avoidable",
                         "avoidable $"]))
     print("\nfirst changed: the block where this request's prompt first differs from this session's previous request "
-          "on the same model and conversation. The number is the block's position in the whole prompt, from 0, in "
-          "cache order: tools, then system, then messages (tools[0] is the first tool). On a hit it is where the "
-          "new turn was appended. One request: prefixwise request <id>")
+          "on the same model and conversation. The number is the block's position in the whole prompt, from 0: "
+          "tools, then system, then the conversation (one position per tool, system prompt and message; "
+          "tool_results[n] is a tool result). On an append-only hit it is the first block of the new turn. "
+          "One request: prefixwise request <id>")
     return 0
 
 

@@ -362,11 +362,14 @@ class Ledger:
         when `since` cuts the list. Hashes, counts and verdicts only. `first_changed` names the
         block where the prompt first diverged from the turn it was compared with (the session's
         previous request on the same model and conversation) as role[position], the position
-        counted from 0 over the whole prompt in cache order (tools, then system, then messages):
-        `tools[0]` is the first tool; with six tools and one system block `messages[7]` is the
-        first message. On a hit it is where the new turn was appended. None when nothing diverged,
-        there was no verdict, or the turn is a model switch (the other model's request is not a
-        prompt this one could have shared a cache with)."""
+        counted from 0 over the whole prompt in Prefixwise's prefix order: tools, then system,
+        then the conversation (`messages[n]`, or `tool_results[n]` for a tool result). One
+        position per tool, per system prompt and per message, not per content block: `tools[0]`
+        is the first tool; with six tools and one system prompt `messages[7]` is the first
+        message. `a -> b[n]` means the block at n changed kind. On an append-only hit it is the
+        first block of the new turn. None when nothing diverged, there was no verdict, or the
+        turn is a first write or a model switch (what it was compared with, if anything, is
+        another conversation's or another model's request)."""
         with self._lock:
             cur = self.conn.execute("SELECT * FROM entries WHERE session_id = ? "
                                     "ORDER BY recorded_at IS NULL, recorded_at, id", (session_id,))
@@ -375,7 +378,7 @@ class Ledger:
         for n, r in enumerate(rows, 1):
             r["turn"] = n
             role, idx = r.get("divergence_role"), r.get("divergence_index")
-            r["first_changed"] = (None if r.get("cause") == "model_switch" else
+            r["first_changed"] = (None if r.get("cause") in ("model_switch", "first_write") else
                                   f"{role}[{idx}]" if role and idx is not None else (role or None))
             p = r.get("prompt_tokens") or 0
             r["hit_rate"] = (r.get("cached_tokens") or 0) / p if p else None
