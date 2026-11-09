@@ -59,42 +59,59 @@ DEFAULT_SHORT_BLOCK_CHARS = 256
 # was ~80% of the proxy's per-request CPU on long prompts. Bounded LRU.
 MASK_CACHE_ENTRIES = 32768
 
-# Volatile values, masked for the `masked` hash. Dates in any common form (ISO, slash, dotted, "Nov 9,
-# 2026", "09 Nov 2026", RFC 2822 with a weekday), with or without a time and a zone, all become one
-# <DATE>, so a timestamp whose *format* or precision changes between turns still reads as the same
-# prompt with a volatile value in it (volatile_system, which has a fix) and not as an edit (reported on
-# Reddit, Nov 2026: a timestamp normalised to another format was `system_edit`, with no fix shown).
-_MONTH = r"(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)[a-z]*\.?"
-_WEEKDAY = r"(?:Mon|Tue|Tues|Wed|Thu|Thur|Thurs|Fri|Sat|Sun)[a-z]*,?\s+"
+# Volatile values, masked for the `masked` hash. Dates in any common form (ISO, slash, "Nov 9, 2026",
+# "09 Nov 2026", RFC 2822 with a weekday, the `date` command's "Sun Nov  9 04:10:00 UTC 2026"), with or
+# without a time and a zone, all become one <DATE>, so a timestamp whose *format* or precision changes
+# between turns still reads as the same prompt with a volatile value in it (volatile_system, which has a
+# fix) and not as an edit (reported on Reddit, Nov 2026: a timestamp normalised to another format was
+# `system_edit`, with no fix shown). Month and weekday names are whole words, so "Marker 10 2026" and
+# "Monitor" are not dates; dotted numbers ("3.11.12", "192.168.1.10") are numbers, not dates.
+_MONTH = (r"\b(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|June?|July?|Aug(?:ust)?|Sep(?:t(?:ember)?)?"
+          r"|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\.?(?![A-Za-z])")
+_WEEKDAY = (r"\b(?:Mon(?:day)?|Tue(?:s(?:day)?)?|Wed(?:nesday)?|Thu(?:rs(?:day)?)?|Fri(?:day)?|Sat(?:urday)?"
+            r"|Sun(?:day)?)\b,?\s+")
 _CLOCK = r"\d{1,2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:\s*[AP]M)?"
-_TZ = r"(?:\s*(?-i:Z|UTC|GMT|[ECMP][SD]T|[+-]\d{2}:?\d{2}))?(?![A-Za-z])"
+_ZONE = r"(?-i:Z|z|UTC|GMT|[ECMP][SD]T|[+-]\d{2}:?\d{2})"
+_TZ = rf"(?:\s*{_ZONE})?(?![A-Za-z])"
+_DAY = r"\d{1,2}(?:st|nd|rd|th)?"
 _DATE_RE = re.compile(
-    rf"(?:{_WEEKDAY})?(?:"
-    rf"\d{{4}}[-/.]\d{{1,2}}[-/.]\d{{1,2}}"                     # 2026-11-09, 2026/11/09, 2026.11.09
-    rf"|\d{{1,2}}[-/.]\d{{1,2}}[-/.]\d{{2,4}}"                  # 09/11/2026, 11-09-26
-    rf"|{_MONTH}\s+\d{{1,2}}(?:st|nd|rd|th)?,?\s+\d{{4}}"       # Nov 9, 2026
-    rf"|\d{{1,2}}(?:st|nd|rd|th)?\s+{_MONTH},?\s+\d{{4}}"       # 09 Nov 2026
+    rf"(?<!\d)(?:{_WEEKDAY})?(?:"
+    rf"\d{{4}}[-/]\d{{1,2}}[-/]\d{{1,2}}"                       # 2026-11-09, 2026/11/09
+    rf"|\d{{1,2}}[-/]\d{{1,2}}[-/]\d{{4}}"                      # 09/11/2026, 11-09-2026
+    rf"|{_MONTH}\s+{_DAY}\s+{_CLOCK}(?:\s+{_ZONE})?\s+\d{{4}}"  # Sun Nov  9 04:10:00 UTC 2026 (`date`)
+    rf"|{_MONTH}\s+{_DAY},?\s+\d{{4}}"                          # Nov 9, 2026
+    rf"|{_DAY}\.?\s+{_MONTH},?\s+\d{{4}}"                      # 09 Nov 2026, 9. November 2026
     rf")(?:(?:[T ]|,\s*|\s+at\s+)?{_CLOCK})?{_TZ}", re.IGNORECASE)
+_DATE_HINT_RE = re.compile(r"\d{4}|\d{1,2}[-/]\d{1,2}")  # cheap test before the date pattern runs
 _TIME_RE = re.compile(rf"\b{_CLOCK}{_TZ}", re.IGNORECASE)
 _UUID_RE = re.compile(r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b")
 _HEX_ID_RE = re.compile(r"\b[0-9a-fA-F]{16,}\b")
-# Absolute paths (two or more segments; a URL's path is not one, since it follows a letter or a slash):
-# the working directory an agent writes into its system prompt changes per checkout and per machine.
-_PATH_RE = re.compile(r"(?<![\w.:/\\])(?:~|/)[\w.@+%-]+(?:/[\w.@+%-]*)+|\b[A-Za-z]:\\[^\s\"'<>|,;]+")
+# Absolute paths (two or more segments; a URL's path is not one, since it follows a letter or a slash).
+# Recognised and named, not masked: a path in a system prompt is as often an instruction ("never write
+# to /etc/passwd") as an injected working directory, and an edit to the former must stay an edit. The
+# kind lets the verdict say the prompt carries a path, which blocks reuse across sessions and machines.
+_PATH_RE = re.compile(r"(?<![\w.:/\\])~?/[\w.@+%-]+(?:/[\w.@+%-]*)+|\b[A-Za-z]:\\[^\s\"'<>|,;]+")
 _NUMBER_RE = re.compile(r"\b\d+(?:\.\d+)?\b")
 _TOKEN_WITH_DIGIT_RE = re.compile(r"\b\w*\d\w*\b")
 
-# (pattern, placeholder, kind): applied in this order. The kind is what the classifier names.
+# (pattern, placeholder or None to only note the kind, kind): applied in this order.
 _MASKS = ((_DATE_RE, "<DATE>", "date"), (_TIME_RE, "<TIME>", "time"), (_UUID_RE, "<ID>", "id"),
-          (_HEX_ID_RE, "<ID>", "id"), (_PATH_RE, "<PATH>", "path"), (_NUMBER_RE, "<N>", "number"),
+          (_HEX_ID_RE, "<ID>", "id"), (_PATH_RE, None, "path"), (_NUMBER_RE, "<N>", "number"),
           (_TOKEN_WITH_DIGIT_RE, "<ID>", "id"))  # abc123 / session-42 are ids, not stable words
 
 
 def mask_volatiles_kinds(text: str) -> tuple[str, tuple[str, ...]]:
     """(the text with volatile values replaced by placeholders, the kinds of value found, in order:
-    date, time, id, path, number). The kinds are the only thing kept about the values."""
+    date, time, id, path, number). The kinds are the only thing kept about the values; `path` is
+    noted but not masked."""
     kinds: list[str] = []
     for pattern, token, kind in _MASKS:
+        if pattern is _DATE_RE and not _DATE_HINT_RE.search(text):
+            continue
+        if token is None:
+            if pattern.search(text):
+                kinds.append(kind)
+            continue
         text, n = pattern.subn(token, text)
         if n and kind not in kinds:
             kinds.append(kind)
@@ -102,7 +119,7 @@ def mask_volatiles_kinds(text: str) -> tuple[str, tuple[str, ...]]:
 
 
 def mask_volatiles(text: str) -> str:
-    """Replace volatile values (dates, times, ids, paths, numbers) with placeholders."""
+    """Replace volatile values (dates, times, ids, numbers) with placeholders."""
     return mask_volatiles_kinds(text)[0]
 
 
@@ -137,7 +154,8 @@ class BlockFingerprint:
     byte_length: int
     hmac: bool = False
     # Kinds of volatile value the block carries ("date", "time", "id", "path", "number"), from the
-    # masking; never the values. Lets a volatile_system verdict say what to move or drop.
+    # masking (path: recognised, not masked); never the values. Lets a volatile_system verdict say
+    # what to move or drop.
     volatile: list[str] = field(default_factory=list)
     # First-divergence position in tokens is filled by the caller when a
     # tokenizer is available; None means "not measured", never a guess.

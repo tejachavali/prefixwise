@@ -121,6 +121,8 @@ class TurnRecord:
         except TypeError as exc:
             raise RecordError(f"malformed record: {exc}") from None
         for b in blocks:
+            if not isinstance(b.volatile, list) or not all(isinstance(k, str) for k in b.volatile):
+                raise RecordError("a block's volatile kinds must be a list of strings")
             if not all(isinstance(getattr(b, h), str) and len(getattr(b, h)) == 64 for h in ("raw", "canonical", "masked")):
                 raise RecordError("a block hash is not a 64-character digest")
         rest = {k: v for k, v in d.items() if k not in ("blocks", "facts")}

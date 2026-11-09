@@ -264,23 +264,35 @@ def _stable_uncached_tail(prev: RequestSnapshot, curr: RequestSnapshot, secondar
     return held, shared, tail
 
 
-_VOLATILE_NAMES = {"date": "a date or timestamp", "time": "a time", "id": "an id", "path": "a file path",
-                   "number": "a number"}
+_VOLATILE_NAMES = {"date": "a date or timestamp", "time": "a time", "id": "an id"}
 
 
 def _volatile_kinds(prev_blocks: list, curr_blocks: list) -> str:
-    """What the changed system blocks carry (dates, ids, paths...), from the fingerprints' kinds: the
-    candidates for what changed, since the values themselves are never kept. '' on older records."""
+    """What the changed system blocks carry (dates, times, ids), from the fingerprints' kinds: the
+    candidates for what changed, since the values themselves are never kept. Numbers are left out
+    (nearly every prompt has one) and a time is implied by a date. A path is named apart: it is not
+    masked, so it did not change here, but it blocks reuse across sessions and machines. '' on older
+    records or malformed kinds."""
     kinds: list[str] = []
+    path = False
     for b in list(prev_blocks) + list(curr_blocks):
-        for k in getattr(b, "volatile", ()) or ():
-            if k in _VOLATILE_NAMES and k not in kinds:
+        found = getattr(b, "volatile", None)
+        if not isinstance(found, (list, tuple)):
+            continue
+        for k in found:
+            if k == "path":
+                path = True
+            elif isinstance(k, str) and k in _VOLATILE_NAMES and k not in kinds:
                 kinds.append(k)
+    if "date" in kinds and "time" in kinds:
+        kinds.remove("time")
     if not kinds:
         return ""
     names = [_VOLATILE_NAMES[k] for k in kinds]
-    joined = names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]
-    return f" (the system prompt carries {joined}: move it to the end of the prompt, or drop it)"
+    joined = names[0] if len(names) == 1 else " and ".join(names)
+    note = (f" (the system prompt carries {joined}: move it to the end of the prompt, or drop it"
+            + ("; it also carries a file path, which other sessions and machines cannot share" if path else "") + ")")
+    return note
 
 
 def _first_change(prev: RequestSnapshot, curr: RequestSnapshot, secondary: list,
