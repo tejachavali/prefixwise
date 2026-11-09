@@ -2,11 +2,14 @@
 
 ## 0.10.5: 2026-11-09
 
-Three additions. `--optimize` turns on every proven fix in one flag, so a fix that passes its replay later
+Four additions. `--optimize` turns on every proven fix in one flag, so a fix that passes its replay later
 joins without a flag change. `--fix auto_breakpoints` places `cache_control` markers on an Anthropic request
 that carries none, only once the same prefix was seen within the cache window, so a one-shot request never
-pays for a write nobody reads; it stays opt-in until a replay shows the writes pay. And a changed
-`response_format` is named as the cause it is.
+pays for a write nobody reads; it stays opt-in until a replay shows the writes pay. A changed `response_format`
+is named as the cause it is. And `prefixwise report --session latest` shows one session turn by turn: which
+turn stopped reading the cache, why, and the block where the prompt first changed.
+
+- **`prefixwise report --session ID|latest`**: one session turn by turn: prompt and cached tokens, hit rate, cause and detail, the block where the prompt first differs from the previous request (`system[0]`, `tools[2]`, `messages[5]`), avoidable tokens and dollars; failed requests in their place. A compaction or a tool change shows as the turn it broke the cache on. The same as data: `GET /api/v1/sessions/{id}/turns` (`latest` works there too). Hashes and counts only, as everywhere. From r/opencodeCLI (Individual-Quote-958): "the first point where two consecutive requests stop sharing a prefix, plus which part changed".
 
 - **`--fix auto_breakpoints`** (opt-in, Anthropic): `cache_control` markers for a request that carries none, on the last system block (covering the tools), the last message, and the previous user turn when more than 20 blocks follow it. Placed only once this proxy saw the same tools and system prompt within the cache window, from this session or another, so a one-shot request never pays for a write nobody reads; never when the client set a marker; never below the model's minimum. A provider 400 that names `cache_control` resends the client's request as it was and, on the second, stops. Rows it rewrote carry `auto_breakpoints` in `fixes`, and the record says what the provider received, markers included. Not in `--optimize`: it changes the bill, and no E4 run has shown the writes pay yet.
 - **The first turn that carries a `cache_control` marker after turns without one is `first_write`**, not `routing_miss`: Anthropic writes only at a breakpoint, so the unmarked turn before it left nothing to read. Seen with `auto_breakpoints` on, and true of a client that adds markers mid-session.

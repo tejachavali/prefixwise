@@ -10,6 +10,7 @@ the proxy. Responses are JSON; errors are {"error": {"message": ...}} with a 4xx
     GET  /api/v1/timeseries?bucket=day         metrics per day or hour
     GET  /api/v1/requests                      request rows, newest first, paginated
     GET  /api/v1/requests/{request_id}         one request
+    GET  /api/v1/sessions/{session_id}/turns   one session, turn by turn (latest: the most recent)
     GET  /api/v1/fixes                         fixes ranked by what they would save
     GET  /api/v1/findings                      the plain-English report, as data
     GET  /api/v1/prices                        the price table behind the dollars
@@ -103,6 +104,14 @@ def get(proxy, path: str, query: str) -> tuple[int, dict]:
             if row is None:
                 return 404, _err("unknown request id (or not recorded yet)")
             return 200, {"request": row}
+        if sub.startswith("/sessions/") and sub.endswith("/turns"):
+            sid = sub[len("/sessions/"):-len("/turns")]
+            if sid == "latest":
+                sid = led.latest_session()
+            turns = led.turns(sid, since=_time(p.get("since"), "since")) if sid else []
+            if not turns:
+                return 404, _err("no such session (or nothing recorded yet)")
+            return 200, {"session_id": sid, "turns": turns}
         if sub == "/fixes":
             return 200, recommend(led)
         if sub == "/findings":

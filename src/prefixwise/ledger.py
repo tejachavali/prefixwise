@@ -348,6 +348,36 @@ class Ledger:
             names = [d[0] for d in cur.description]
         return dict(zip(names, row)) if row else None
 
+    def latest_session(self) -> str | None:
+        """The session of the most recent row, for `report --session latest`."""
+        with self._lock:
+            row = self.conn.execute(  # by time where known (imported logs arrive out of order), else by row
+                "SELECT session_id FROM entries WHERE session_id IS NOT NULL "
+                "ORDER BY recorded_at IS NULL, recorded_at DESC, id DESC LIMIT 1").fetchone()
+        return row[0] if row else None
+
+    def turns(self, session_id: str, since: float | None = None) -> list[dict]:
+        """One session's requests in time order (imported logs are recorded out of order; rows
+        without a time, from before 0.3.1, come last), numbered from 1 over the whole session even
+        when `since` cuts the list. Hashes, counts and verdicts only. `first_changed` names the
+        block where the prompt first diverged from the turn it was compared with (the session's
+        previous request on the same model and conversation): `system[0]`, `tools[2]`,
+        `messages[5]`; None when nothing diverged or there was no verdict."""
+        with self._lock:
+            cur = self.conn.execute("SELECT * FROM entries WHERE session_id = ? "
+                                    "ORDER BY recorded_at IS NULL, recorded_at, id", (session_id,))
+            names = [d[0] for d in cur.description]
+            rows = [dict(zip(names, r)) for r in cur.fetchall()]
+        for n, r in enumerate(rows, 1):
+            r["turn"] = n
+            role, idx = r.get("divergence_role"), r.get("divergence_index")
+            r["first_changed"] = f"{role}[{idx}]" if role and idx is not None else (role or None)
+            p = r.get("prompt_tokens") or 0
+            r["hit_rate"] = (r.get("cached_tokens") or 0) / p if p else None
+        if since is not None:
+            rows = [r for r in rows if r.get("recorded_at") is not None and r["recorded_at"] >= since]
+        return rows
+
     def summary(self, since: float | None = None) -> dict:
         """Totals across the whole ledger (or since a time), for reports. Defined in prefixwise.metrics."""
         from . import metrics

@@ -164,6 +164,51 @@ def cmd_fixes(args) -> int:
     return 0
 
 
+def _report_session(led, session: str, as_json: bool, since: float | None = None) -> int:
+    """`report --session ID`: the session turn by turn. Which turn stopped reading the cache, why, and
+    the block where the prompt first changed, so a compaction or a tool change shows as the turn it
+    broke the cache on. Hashes and counts only: the ledger holds no prompt text."""
+    sid = led.latest_session() if session == "latest" else session
+    turns = led.turns(sid, since=since) if sid else []
+    if not turns:
+        print(f"prefixwise: no requests recorded for session {session!r}" + (" in that window" if since else "")
+              if sid else "prefixwise: the ledger has no sessions yet", file=sys.stderr)
+        return 1
+    if as_json:
+        print(json.dumps({"session_id": sid, "turns": turns}, indent=2, default=str))
+        return 0
+    prompt = sum(t["prompt_tokens"] or 0 for t in turns)
+    cached = sum(t["cached_tokens"] or 0 for t in turns)
+    avoidable = sum(t["avoidable_tokens"] or 0 for t in turns)
+    models = sorted({t["model"] for t in turns if t.get("model")})
+    agents = sorted({t["agent_id"] for t in turns if t.get("agent_id")})
+    print(f"Session {sid}: {len(turns)} requests, {_fmt_int(prompt)} prompt tokens, "
+          f"cache hit rate {_fmt_pct(cached / prompt) if prompt else '-'}, "
+          f"{_fmt_int(avoidable)} avoidable" + (f"   ({', '.join(models)})" if len(models) == 1 else ""))
+    print()
+    # Each model has its own cache and each agent (a subagent) its own conversation: when a session
+    # mixes them, say which row is which, since "first changed" compares within a model and conversation.
+    extra = (["model"] if len(models) > 1 else []) + (["agent"] if len(agents) > 1 else [])
+    rows = []
+    for t in turns:
+        tag = ([t.get("model") or "-"] if len(models) > 1 else []) + ([t.get("agent_id") or "-"] if len(agents) > 1 else [])
+        if t.get("status") and t["status"] >= 400:
+            rows.append([t["turn"], *tag, "-", "-", "-", f"failed: {t.get('error') or t['status']}", "-", "-", "-"])
+            continue
+        cause = t.get("cause") or "-"
+        if t.get("detail"):
+            cause += f" ({t['detail']})"
+        rows.append([t["turn"], *tag, _fmt_int(t["prompt_tokens"] or 0), _fmt_int(t["cached_tokens"] or 0),
+                     _fmt_pct(t["hit_rate"]) if t["hit_rate"] is not None else "-", cause,
+                     t["first_changed"] or "-", _fmt_int(t["avoidable_tokens"] or 0),
+                     _fmt_usd(t["avoidable_cost"]) if t.get("avoidable_cost") is not None else "-"])
+    print(_table(rows, ["turn", *extra, "prompt", "cached", "hit", "cause", "first changed", "avoidable", "$"]))
+    print("\nfirst changed: the block where this request's prompt first differs from the request it was compared "
+          "with, this session's previous one on the same model and conversation (system[0]: the first system "
+          "block; tools[2]: the third tool; messages[5]: the sixth message). One request: prefixwise request <id>")
+    return 0
+
+
 def cmd_report(args) -> int:
     from . import api
     from .findings import findings, render, render_share
@@ -179,6 +224,8 @@ def cmd_report(args) -> int:
         table = PriceTable.load(getattr(args, "prices", None))
     except (OSError, ValueError) as exc:
         sys.exit(f"prefixwise: {exc}")
+    if getattr(args, "session", None):
+        return _report_session(led, args.session, args.json, since)
     found = findings(led, since=since, prices=table)
     detail = args.detail or args.by is not None
     args.by = args.by or "cause"
@@ -835,6 +882,9 @@ def build_parser() -> argparse.ArgumentParser:
     ledger_opt(p)
     p.add_argument("--since", metavar="WHEN", help="only requests since then: unix seconds or 24h, 7d, ...")
     p.add_argument("--detail", action="store_true", help="also print totals and the per-group table")
+    p.add_argument("--session", metavar="ID",
+                   help="one session turn by turn: hit rate per turn, the cause, and the block where the prompt "
+                        "first changed (system[0], tools[2], messages[5]); `latest` for the most recent session")
     p.add_argument("--share", action="store_true",
                    help="a short block to paste into a chat or a thread: counts, dollars, the top cause and its fix; no text")
     p.add_argument("--prices", metavar="FILE", help="also load this rates file (default: $PREFIXWISE_PRICES)")
