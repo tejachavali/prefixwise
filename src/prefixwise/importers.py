@@ -328,7 +328,8 @@ def import_claude_code(root: str | os.PathLike | None = None, ledger: Ledger | N
 # `session_meta` the thread id, its parent (subagents) and what it was forked from.
 #
 # Causes, from what changes OpenAI's cached prefix: model_switch, compaction_rewrite,
-# tool_catalog_change (tools come first in the prefix). OpenAI's in-memory cache lifetime
+# tool_catalog_change and tool_reserialize (the same tools in another order; tools come first in
+# the prefix). OpenAI's in-memory cache lifetime
 # is not a fixed number, so expiry is never claimed: an unexplained miss is unknown.
 
 
@@ -462,7 +463,11 @@ def import_codex(root: str | os.PathLike | None = None, ledger: Ledger | None = 
             gap = (r.sent or r.done) - prev.done if prev is not None else None
             # Waste (legit False, e.g. a reordered tool list) is priced as the proxy and the Claude Code
             # importer price it: the previous prompt that could have been read but was not.
-            avoidable = avoidable_for_turn(legit, r.prompt, r.cached, prev_prompt)
+            held = None  # what the previous request left in the cache, when the log says (OpenAI rarely does)
+            if prev is not None:
+                write = _int((prev.usage.get("input_tokens_details") or {}).get("cache_write_tokens"))
+                held = prev.cached + write if write else None
+            avoidable = avoidable_for_turn(legit, r.prompt, r.cached, prev_prompt, held)
             prev, prev_prompt = r, r.prompt
             if since is not None and r.done < since:
                 continue
