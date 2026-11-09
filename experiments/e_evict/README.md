@@ -46,7 +46,7 @@ so run SGLang in a Python 3.12 environment:
 
 ```bash
 pip install -q uv && uv venv -p 3.12 /content/sg312 && source /content/sg312/bin/activate
-uv pip install --prerelease=allow --only-binary outlines_core "sglang==0.5.23" -e ".[engines]"
+uv pip install --python /content/sg312/bin/python --prerelease=allow --only-binary outlines_core "sglang==0.5.23" -e ".[engines]"
 # 3. SGLang alone
 MODEL=Qwen/Qwen3-4B MAX_TOTAL_TOKENS=32768 ./experiments/e1_open/sglang_server.sh &
 python experiments/e1_open/e1_open.py --engine sglang --vllm-url http://127.0.0.1:30000 --model Qwen/Qwen3-4B
