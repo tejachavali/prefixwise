@@ -24,7 +24,7 @@ from dataclasses import asdict, dataclass, field, fields
 from .details import Facts
 from .fingerprint import BlockFingerprint
 
-RECORD_VERSION = 2  # 2: engine_block (0.10.0)
+RECORD_VERSION = 1
 
 # Prompt-affecting request parameters the classifier compares (RequestSnapshot.params). A change
 # in one of these re-renders the prompt without changing any block.

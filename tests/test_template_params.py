@@ -74,15 +74,32 @@ def test_rounded_read_with_a_param_change_is_a_hit():
 def test_a_known_block_size_tightens_the_slack():
     """With the engine's block size on the record (from its KV events), the slack is that block plus
     the generation tail, not the 128-token ceiling: a divergence 112 tokens before the end of a
-    2,000-token prompt is caught on vLLM (16-token blocks), while the live 560-of-579 read, a block
-    and a thinking stub short, stays a hit. On SGLang (page size 1) a 597-of-600 read is a hit."""
+    2,000-token prompt is caught on vLLM (16-token blocks), while the live reads, up to 25 tokens
+    short (a block and a stub), stay hits. On SGLang (page size 1) a 597-of-600 read is a hit."""
     def esnap(prompt, cached, block, **params):
         s = snap(prompt, cached, **params)
         s.block_size = block
         return s
     assert classify(esnap(579, 0, 16), esnap(616, 560, 16)).cause is MissCause.NONE
+    assert classify(esnap(617, 0, 16), esnap(683, 592, 16)).cause is MissCause.NONE
     assert classify(esnap(600, 0, 1), esnap(640, 597, 1)).cause is MissCause.NONE
     far = classify(esnap(2000, 0, 16, thinking="a"), esnap(2200, 1888, 16, thinking="b"))
     assert far.cause is MissCause.PARAM_RENDERED
     # the same read with the block size unknown falls back to the 128-token ceiling: a hit
     assert classify(snap(2000, 0, thinking="a"), snap(2200, 1888, thinking="b")).cause is MissCause.NONE
+
+
+def test_the_watcher_remembers_the_block_size_until_a_restart():
+    from prefixwise.engines import EngineEvents, EngineFleet
+    w = EngineEvents()
+    assert w.block_size is None
+    w._store({"block_hashes": [1, 2], "block_size": 16, "session_id": None})
+    assert w.block_size == 16
+    w._clear()  # the engine restarted: it may come back with another block size
+    assert w.block_size is None
+    fleet = EngineFleet([("tcp://a:1", "a"), ("tcp://b:2", "b")], make=lambda *a, **k: EngineEvents())
+    assert fleet.block_size is None
+    fleet.sources[0]._store({"block_hashes": [1], "block_size": 16, "session_id": None})
+    assert fleet.block_size == 16  # a rank that has not stored yet does not count
+    fleet.sources[1]._store({"block_hashes": [2], "block_size": 32, "session_id": None})
+    assert fleet.block_size is None  # they differ: nothing is claimed
