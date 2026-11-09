@@ -1,6 +1,12 @@
 # Changelog
 
-## Unreleased
+## 0.10.1: 2026-11-09
+
+Two fixes from the first week's feedback. A timestamp in the system prompt is a volatile value whatever
+its format, so a format change between turns is `volatile_system` with its fix, not an unexplained edit,
+and the verdict now says what the prompt carries (a date, an id, a path). The Codex importer tells the
+same tools sent in another order (`tool_reserialize`, priced as waste) from a changed catalog. Also: the
+PyPI page's links work, and the template experiment ran on three more models.
 
 - **Codex import tells a reordered tool list from a changed catalog.** On a `dynamic_tools_updated` event the importer also hashes the tools as a set; when only the order changed the miss is `tool_reserialize` (waste, with avoidable tokens and cost, as the proxy and the Claude Code importer price it) instead of `tool_catalog_change` (a legitimate change). From Reddit (kantorcodes1, r/LLMDevs). Codex rows now carry `classifier_version` `codex-log-2`.
 - **A timestamp in any format is a volatile value, and the verdict says what the system prompt carries.** From Reddit feedback (r/DeepSeek, r/LLMDevs): a timestamp whose format or precision changed between turns (`2026-11-09T04:10:00Z` one turn, `Nov 9, 2026 04:10:05` the next) read as `system_edit`, an expected miss with no fix, because only ISO dates were masked. Every common date form (ISO, slash, `Nov 9, 2026`, `09 Nov 2026`, RFC 2822 with a weekday, the `date` command's `Sun Nov  9 04:10:00 UTC 2026`, with or without a time and a zone) now masks to one `<DATE>`, so the miss is `volatile_system` with its fix and its avoidable tokens; month and weekday names are whole words and dotted numbers (`3.11.12`, `192.168.1.10`) are numbers, so no edit turns volatile. Each block fingerprint now carries the *kinds* of volatile value it holds (`date`, `time`, `id`, `path`, `number`; never the values), and the `volatile_system` evidence names them: "the system prompt carries a date or timestamp: move it to the end of the prompt, or drop it; it also carries a file path, which other sessions and machines cannot share". Paths are recognised, not masked (an edited instruction naming a path stays an edit); `prefixwise check` warns about a path in the system prompt as it does about a date. A 0.10.0 collector refuses records with the new field; upgrade the collector first.
