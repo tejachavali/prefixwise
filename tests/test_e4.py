@@ -76,19 +76,34 @@ def test_mock_replay_of_auto_breakpoints_passes_and_reports_dollars(tmp_path, ca
     assert rep["causes"]["off"]["breakpoint_misplaced"] == 54 and "breakpoint_misplaced" not in rep["causes"]["on"]
     assert rep["cached_tokens"]["off"] == 0 and rep["cache_write_tokens"]["off"] == 0  # no marker: nothing cached
     assert rep["requests_rewritten"] == 59  # every request but the very first: nothing had been seen yet
-    assert rep["cost_usd"]["on"] < rep["cost_usd"]["off"] and rep["saved_usd"] > 0 and not rep["markers_rejected"]
+    assert rep["not_rewritten"] == [[0, 1]]
+    assert rep["input_cost_usd"]["on"] < rep["input_cost_usd"]["off"] and rep["saved_input_usd"] > 0
+    assert rep["cost_usd"]["on"] < rep["cost_usd"]["off"] and not rep["markers_rejected"]
     out = capsys.readouterr().out
     assert "write surcharge included" in out and "Pass: YES" in out
 
 
-def test_auto_breakpoints_fails_when_it_costs_more_or_the_markers_are_rejected():
-    def rows(n, cached, cost, cause="none", avoid=0, **extra):
+def test_auto_breakpoints_pass_rules():
+    def rows(n, cached, input_cost, cause="none", avoid=0, fixed=True, success=True, **extra):
         return [{"session": 0, "turn": i, "reloaded": False, "cause": cause, "cached_tokens": cached,
-                 "prompt_tokens": 1000, "avoidable_tokens": avoid, "success": True, "cost": cost,
-                 "cache_write_tokens": 0, "fixes_applied": [], **extra} for i in range(n)]
-    off = rows(60, 0, 0.001, "breakpoint_misplaced", 900)
-    assert score(off, rows(60, 900, 0.0002), "auto_breakpoints")["pass"]
-    assert not score(off, rows(60, 900, 0.002), "auto_breakpoints")["pass"]  # tokens saved, dollars not
-    assert not score(off, rows(60, 900, 0.0002, markers_rejected=True), "auto_breakpoints")["pass"]
-    assert not score(off, rows(60, 900, None), "auto_breakpoints")["pass"]  # unpriced: no verdict on dollars
-    assert score(rows(60, 0, None, "tool_reserialize", 900), rows(60, 900, None))["pass"]  # canonical_tools: as before
+                 "prompt_tokens": 1000, "avoidable_tokens": avoid, "success": success, "cost": input_cost,
+                 "input_cost": input_cost, "cache_write_tokens": 0,
+                 "fixes_applied": ["auto_breakpoints"] if fixed and i else [], **extra} for i in range(n)]
+    ok = lambda off, on: score(off, on, "auto_breakpoints")["pass"]  # noqa: E731
+    off = rows(60, 0, 0.001, "breakpoint_misplaced", 900, fixed=False)
+    assert ok(off, rows(60, 900, 0.0002))
+    assert not ok(off, rows(60, 900, 0.002))  # tokens saved, dollars not
+    assert not ok(off, rows(60, 900, 0.0002, markers_rejected=True))
+    assert not ok(off, rows(60, 900, None))  # unpriced: no verdict on dollars
+    assert not ok(off, rows(60, 400, 0.0002))  # under half of the prediction
+    assert not ok(off, rows(60, 900, 0.0002, success=False))  # savings never excuse broken tasks
+    assert not ok(rows(40, 0, 0.001, "breakpoint_misplaced", 900, fixed=False), rows(40, 900, 0.0002))  # too few
+    # one request rejected for its markers goes out as the client sent it: not rewritten, so no pass
+    once = rows(60, 900, 0.0002)
+    once[30]["fixes_applied"] = []
+    rep = score(off, once, "auto_breakpoints")
+    assert not rep["pass"] and rep["not_rewritten"] == [[0, 0], [0, 30]]
+    # an OFF arm that cached something was not the client this experiment is about
+    assert not ok(rows(60, 100, 0.001, "breakpoint_misplaced", 900, fixed=False), rows(60, 900, 0.0002))
+    # canonical_tools: as before, no dollar rule
+    assert score(rows(60, 0, None, "tool_reserialize", 900, fixed=False), rows(60, 900, None))["pass"]

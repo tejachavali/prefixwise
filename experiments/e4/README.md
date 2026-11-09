@@ -43,8 +43,9 @@ Mock result (2026-11-06): predicted 91,399 tokens, realised 91,184 (99.8%), Pass
 
 This fix changes the bill (a 5-minute cache write costs 1.25x input), so **Pass** needs everything above (at least 50 paired requests, realised savings at least 50% of what the OFF ledger attributes to `breakpoint_misplaced`, task success flat) and two more:
 
-3. **The ON arm costs less in dollars than the OFF arm**, write surcharge included, with every request priced.
-4. **No request rejected for its markers** (a 400 naming `cache_control` would have been resent as the client sent it).
+3. **The ON arm's prompt side costs less in dollars than the OFF arm's**, write surcharge included, with every request priced. The model's answers differ between arms by chance, so output tokens and the whole-request cost are reported and left out of the rule.
+4. **Every request but the arm's first is rewritten, and none is rejected for its markers.** A 400 naming `cache_control` is resent as the client sent it, which shows as a request that was not rewritten; the report lists them.
+5. **The OFF arm read and wrote nothing**: it is the client this experiment is about only if Anthropic cached nothing for it.
 
 The OFF arm writes nothing, so no gap between arms is needed. Each run's system prompt carries the run's own tag, the same in both arms, so an earlier run's cache cannot serve this one.
 
@@ -54,6 +55,6 @@ python experiments/e4/e4.py --mock --fix auto_breakpoints      # free
 python experiments/e4/e4.py --fix auto_breakpoints --provider anthropic --model claude-haiku-5-5 --max-input-tokens 900000
 ```
 
-Mock result (2026-11-09): 59 of 60 requests rewritten, predicted 171,409 tokens, realised 182,912 (106.7%: the prediction does not count the first turns of later sessions, which read the prefix an earlier session wrote), cost $0.0198 against $0.0035, Pass. The mock bills as Anthropic does (nothing read or written without a marker) and always calls the right tool, so it shows the accounting, not the model's behaviour. **Live: not run yet.** Until it passes, `auto_breakpoints` stays opt-in and out of `--optimize`.
+Mock result (2026-11-09): 59 of 60 requests rewritten, predicted 171,409 tokens, realised 182,912 (106.7%: the prediction does not count the first turns of later sessions, which read the prefix an earlier session wrote), prompt-side cost $0.0192 against $0.0029 (85.1% saved), Pass. The mock bills as Anthropic does (nothing read or written without a marker) and always calls the right tool, so it shows the accounting, not the model's behaviour. **Live: not run yet.** Until it passes, `auto_breakpoints` stays opt-in and out of `--optimize`.
 
 What E4 does not cover, by design: the guards that keep markers off a one-shot request, a prompt rewritten every turn, a client with its own markers, and a prompt below the model's minimum. Those are decided before any request is sent and are pinned by unit tests (`tests/test_auto_breakpoints.py`).

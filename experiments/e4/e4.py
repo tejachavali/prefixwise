@@ -27,8 +27,11 @@ sets no cache_control at all (sessions/no-markers.jsonl: the same tasks, no tool
   arm ON:  the proxy places the markers
   predicted = avoidable tokens the OFF ledger attributes to breakpoint_misplaced
   realised  = cached tokens ON - cached tokens OFF
-  It changes the bill (a write costs 1.25x), so Pass also needs the ON arm to cost less in
-  dollars than the OFF arm, write surcharge included, and no request rejected for its markers.
+  It changes the bill (a write costs 1.25x), so Pass also needs: the ON arm's prompt side to
+  cost less in dollars than the OFF arm's, write surcharge included (output tokens vary by
+  chance between arms, so they are reported and left out of the rule); every request but the
+  arm's first rewritten (a request sent without markers was rejected for them, or the guard
+  held it back); and an OFF arm that read and wrote nothing.
   The OFF arm writes nothing, so no gap between arms is needed; each run's system prompt
   carries the run's own tag so an earlier run's cache cannot serve this one.
 
@@ -297,15 +300,30 @@ def run_arm(arm: str, specs: list[dict], *, provider: str, model: str, base_url:
                      "fixes_applied": result.get("fixes_applied") or [], "tool_called": called,
                      "success": called == spec["expected_tool"],
                      "cost": entry.cost if entry is not None else None,
+                     "input_cost": _input_cost(proxy, model, entry),
+                     "output_tokens": (entry.completion_tokens or 0) if entry is not None else 0,
                      "cache_write_tokens": (entry.cache_write_tokens or 0) if entry is not None else 0,
-                     # the provider refused the markers and the client's request went as it was
-                     "markers_rejected": (provider, "auto_breakpoints") in proxy.rejected_fields})
+                     # the provider refused the markers at least once (the request went as the client sent it)
+                     "markers_rejected": proxy._rejections.get((provider, "auto_breakpoints"), 0) > 0})
         # Grow the conversation the way the agent did: question, then its answer.
         q = TASKS[spec["task"]][0]
         history += ([{"role": "user", "content": [{"type": "text", "text": q}]}] if provider == "anthropic"
                     else [{"role": "user", "content": q}])
         history.append({"role": "assistant", "content": f"Called {called or 'no tool'}; result noted."})
     return rows
+
+
+def _input_cost(proxy, model: str, entry) -> float | None:
+    """The prompt side of one request in dollars: uncached, read and written tokens at their own
+    rates (a 5-minute write: the only kind auto_breakpoints places). None when the model is unpriced."""
+    if entry is None:
+        return None
+    _, rates, _ = proxy.prices.resolve(model)
+    if not rates or any(rates.get(k) is None for k in ("input", "cache_read", "cache_write_5m")):
+        return None
+    read, written = entry.cached_tokens or 0, entry.cache_write_tokens or 0
+    plain = max(0, (entry.prompt_tokens or 0) - read - written)
+    return (plain * rates["input"] + read * rates["cache_read"] + written * rates["cache_write_5m"]) / 1e6
 
 
 def score(off: list[dict], on: list[dict], fix: str = "canonical_tools") -> dict:
@@ -321,15 +339,27 @@ def score(off: list[dict], on: list[dict], fix: str = "canonical_tools") -> dict
     ratio = (realised / predicted) if predicted else None
     flat = s_off is not None and s_on is not None and s_on >= s_off - 0.05
     # Dollars, for a fix that changes the bill: every paired request priced, or no verdict on cost.
-    costs = [(a.get("cost"), b.get("cost")) for a, b in paired]
-    priced = bool(costs) and all(x is not None and y is not None for x, y in costs)
-    cost = {"off": sum(x for x, _ in costs), "on": sum(y for _, y in costs)} if priced else None
-    bill = {"cost_usd": cost, "saved_usd": (cost["off"] - cost["on"]) if cost else None,
-            "cache_write_tokens": {"off": sum(a.get("cache_write_tokens") or 0 for a, _ in paired),
-                                   "on": sum(b.get("cache_write_tokens") or 0 for _, b in paired)},
-            "requests_rewritten": sum(1 for _, b in paired if fix in (b.get("fixes_applied") or [])),
-            "markers_rejected": any(b.get("markers_rejected") for _, b in paired)}
-    pays = fix != "auto_breakpoints" or bool(cost and cost["on"] < cost["off"] and not bill["markers_rejected"])
+    # The rule is on the prompt side: the model's answers differ between arms by chance, and on a
+    # cheap model their cost is the size of what is left of the prompt's once it is cached.
+    def both(key):
+        pairs = [(a.get(key), b.get(key)) for a, b in paired]
+        if not pairs or any(x is None or y is None for x, y in pairs):
+            return None
+        return {"off": sum(x for x, _ in pairs), "on": sum(y for _, y in pairs)}
+    cost, input_cost = both("cost"), both("input_cost")
+    unmarked = [[b["session"], b["turn"]] for _, b in paired if fix not in (b.get("fixes_applied") or [])]
+    writes = {"off": sum(a.get("cache_write_tokens") or 0 for a, _ in paired),
+              "on": sum(b.get("cache_write_tokens") or 0 for _, b in paired)}
+    bill = {"cost_usd": cost, "input_cost_usd": input_cost,
+            "saved_input_usd": (input_cost["off"] - input_cost["on"]) if input_cost else None,
+            "output_tokens": {"off": sum(a.get("output_tokens") or 0 for a, _ in paired),
+                              "on": sum(b.get("output_tokens") or 0 for _, b in paired)},
+            "cache_write_tokens": writes, "requests_rewritten": len(paired) - len(unmarked),
+            "not_rewritten": unmarked, "markers_rejected": any(b.get("markers_rejected") for _, b in paired)}
+    pays = fix != "auto_breakpoints" or bool(
+        input_cost and input_cost["on"] < input_cost["off"] and not bill["markers_rejected"]
+        and len(unmarked) <= 1  # only the arm's first request: nothing had been seen yet
+        and writes["off"] == 0 and sum(a["cached_tokens"] for a, _ in paired) == 0)  # OFF cached nothing
     return {"fix": fix, **bill, "paired_requests": len(paired), "errors": {"off": len(off) - len(ok_off), "on": len(on) - len(ok_on)},
             "predicted_savings_tokens": predicted, "realised_savings_tokens": realised,
             "realised_over_predicted": ratio,
@@ -363,13 +393,18 @@ def write_report(rep: dict, off: list[dict], on: list[dict], out_dir: Path, labe
           f"({pct(rep['realised_over_predicted'])} of predicted; pass needs >= 50%)",
           f"Task success flat (ON >= OFF - 5 points): {'yes' if rep['success_flat'] else 'NO'}", ""]
     if fix == "auto_breakpoints":
-        c = rep.get("cost_usd")
-        md += [f"Requests rewritten (markers placed): {rep['requests_rewritten']} of {rep['paired_requests']}",
+        c, ic = rep.get("cost_usd"), rep.get("input_cost_usd")
+        md += [f"Requests rewritten (markers placed): {rep['requests_rewritten']} of {rep['paired_requests']}; "
+               f"not rewritten [session, turn]: {rep['not_rewritten']} (pass allows one: the arm's first request)",
                f"Cache writes: OFF {rep['cache_write_tokens']['off']:,} tokens, ON {rep['cache_write_tokens']['on']:,} "
-               "(OFF must be 0: no marker, nothing written)",
-               (f"Cost: OFF ${c['off']:.4f}, ON ${c['on']:.4f}, saved ${rep['saved_usd']:.4f} "
-                f"({rep['saved_usd'] / c['off']:.1%}), write surcharge included; pass needs ON below OFF"
-                if c else "Cost: not every request was priced, so no verdict on dollars (pass needs one)"),
+               "(pass needs OFF 0: no marker, nothing written; ON 0 means the provider ignored the markers, "
+               "e.g. a prompt below the model's minimum)",
+               (f"Prompt-side cost: OFF ${ic['off']:.4f}, ON ${ic['on']:.4f}, saved ${rep['saved_input_usd']:.4f} "
+                f"({rep['saved_input_usd'] / ic['off']:.1%}), write surcharge included; pass needs ON below OFF"
+                if ic else "Prompt-side cost: not every request was priced, so no verdict on dollars (pass needs one)"),
+               (f"Whole-request cost: OFF ${c['off']:.4f}, ON ${c['on']:.4f} (output tokens OFF "
+                f"{rep['output_tokens']['off']:,}, ON {rep['output_tokens']['on']:,}: they vary by chance, so they "
+                "are not in the rule)" if c else "Whole-request cost: not every request was priced"),
                f"Markers rejected by the provider: {'YES' if rep['markers_rejected'] else 'no'}", ""]
     path.with_suffix(".md").write_text("\n".join(md) + "\n")
     return path
