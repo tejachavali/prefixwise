@@ -72,7 +72,11 @@ global: the second session read the first's prefix). Claude Code: 1 request per 
 0% then 100% cached. The `unknown` is an opencode request that read nothing: the proxy `run` started
 had no engine join (it did not probe vLLM as `serve` does), so the KV events that would have named
 it as an eviction or ruled one out were not read. Fixed after this run (`prefixwise run` now
-detects the engine behind the agent's base URL); the row's evidence is requested from Muse.
+detects the engine behind the agent's base URL). The row's own evidence line was not retrieved: the
+Colab runtime, and the ledger with it, was gone before the export could be read. 7,222 prompt tokens
+read at 0% in a session whose first request had just written: most likely opencode's second request
+in that run (a different lane, or a prompt that no longer began with the first one's), which the next
+run will name, since `run` now reads the engine's events.
 
 ## 3. SGLang 0.5.23 + KV events (page size 1, `--full-attention`)
 
