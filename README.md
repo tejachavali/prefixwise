@@ -1,15 +1,39 @@
 # Prefixwise
 
-**Find out why your LLM prompt cache missed, what the miss cost, and how to fix it.**
+**Your agent's cache hit rate looks fine. You are still paying full price for most of every turn. Prefixwise tells you why, in one line, and what to change.**
 
-Prompt caching is what makes long agent sessions affordable: a request that starts with the
-same tokens as the last one reads them from cache, at a fraction of the price, and skips
-recomputing them. One changed byte early in the prompt (a timestamp in the system prompt, tools
-sent in a new order, an edited earlier message) and everything after it is paid for again.
-Providers and engines report *how many* tokens missed, not *why*. Prefixwise is a local proxy
-between your agent and the model (Claude, OpenAI, or a self-hosted vLLM or SGLang) that names
-the cause of every miss, says whether it was waste or a legitimate change, prices it, and tells
-you the fix.
+```bash
+pip install prefixwise
+prefixwise import claude-code        # Claude Code on a subscription: reads ~/.claude, nothing leaves your machine
+prefixwise run -- claude             # or any agent with an API key: claude, codex, opencode, your own
+prefixwise report --share            # a block you can paste
+```
+
+```
+8 requests, 16,000 prompt tokens, 0% served from cache. Cost $0.1002.
+Avoidable: 14,000 tokens ($0.0805), 87.5% of prompt tokens. Fix these, biggest first:
+  1. The same tools were sent in a different order or format (7 requests, 14,000 tokens, $0.0805).
+     Fix: Send tools in a fixed order with deterministic serialization (or let the proxy do it: prefixwise serve --fix canonical_tools).
+     Prefixwise can do it for you: prefixwise run --fix canonical_tools (proven)
+Expected misses (not waste): 1 x first request of a session: nothing to reuse yet.
+Cache writes never read: 14,000 tokens were written to the cache, and the next turn of the same conversation replaced the prefix before reading them (7 requests); the write surcharge on them cost $0.0175 above sending them uncached.
+```
+
+That is the real output of `prefixwise run --mock` on an eight-turn agent that rebuilds its tool list
+from a set each turn (the mock provider answers with synthetic usage, so the counts are illustrative;
+your run prints your own). On real traffic the same report also prices each cause in dollars and,
+per Anthropic model, says whether the 1-hour cache would have paid.
+
+Every turn of an agent resends the conversation. The provider charges a tenth for the part it
+cached and full price for the rest, and one changed byte early in the prompt (a timestamp in the
+system prompt, tools in a new order, an edited earlier message) means everything after it is paid
+for again. Providers and engines report *how many* tokens missed, not *why*. Prefixwise names the
+cause of every miss, says whether it was waste or a legitimate change, prices it, and tells you the
+fix. It stores hashes and counts, never your prompts.
+
+It runs in front of Claude, OpenAI, or your own vLLM or SGLang, inside vLLM as middleware, inside
+your Python, under LiteLLM, or over the logs Claude Code and Codex already keep. On vLLM and SGLang
+it reads the engine's own KV events to tell an eviction from everything else.
 
 ## Results
 

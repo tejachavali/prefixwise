@@ -172,6 +172,17 @@ def findings(ledger, since: float | None = None, until: float | None = None,
             expected.append(item)
     waste.sort(key=lambda x: -x["avoidable_tokens"])
     expected.sort(key=lambda x: -x["requests"])
+    table = prices or PriceTable.load(None)
+    unpriced, approximate = [], []
+    for row in metrics.query(ledger, ["requests"], by="model", **window):
+        model = row["model"]
+        if not model or not row["requests"]:
+            continue
+        key, rates, approx = table.resolve(model)
+        if rates is None:
+            unpriced.append(model)
+        elif approx:
+            approximate.append((model, key))
     errors = metrics.query(ledger, ["requests_failed"], by="error", **window)
     statuses = metrics.query(ledger, ["requests_failed"], by="status", **window)
     return {"summary": {k: s[k] for k in ("requests", "requests_failed", "prompt_tokens", "cached_tokens",
@@ -183,7 +194,8 @@ def findings(ledger, since: float | None = None, until: float | None = None,
             "failures": [{"error": e["error"], "requests": e["requests_failed"]}
                          for e in errors if e["error"] and e["requests_failed"]],
             "ttl": ttl_advice(ledger, prices=prices, **window),
-            "unread_writes": unread_writes(ledger, **window)}
+            "unread_writes": unread_writes(ledger, **window),
+            "unpriced_models": sorted(unpriced), "approximate_prices": sorted(approximate)}
 
 
 def _usd(x) -> str:
@@ -221,6 +233,12 @@ def render(f: dict, command: str = "serve") -> str:
             if partial:
                 head += f" ({s['requests_priced']} of {s['requests']} requests priced)"
         lines.append(head + ".")
+        if f.get("approximate_prices"):
+            lines.append("Priced at a related model's rate: " + "; ".join(f"{m} as {k}" for m, k in f["approximate_prices"])
+                         + " (add the exact rates with --prices FILE).")
+        if f.get("unpriced_models"):
+            lines.append("Not priced: " + ", ".join(f["unpriced_models"])
+                         + " (not in the price table; `prefixwise prices` lists it, --prices FILE adds rates).")
         if f["waste"]:
             waste_usd = ""
             if s["requests_priced"]:
@@ -286,4 +304,36 @@ def render(f: dict, command: str = "serve") -> str:
                      "with a ChatGPT login) cannot be routed through a proxy.")
     if s["tasks_successful"]:
         lines.append(f"Tokens per successful task: {_n(s['tokens_per_successful_task'])}.")
+    return "\n".join(lines)
+
+
+def render_share(f: dict, since_label: str | None = None) -> str:
+    """A short block for pasting into a chat or a thread: the headline numbers, the top cause and
+    its fix, the unread writes. Counts and dollars only; no prompt text exists to leak."""
+    s = f["summary"]
+    if not s["requests"]:
+        return "prefixwise: no requests recorded yet."
+    lines = ["prefixwise" + (f" ({since_label})" if since_label else "")]
+    hit = f"{s['cache_hit_rate']:.0%} from cache" if s["cache_hit_rate"] is not None else "cache hit rate unknown"
+    head = f"{_req(s['requests'])}, {_n(s['prompt_tokens'])} prompt tokens, {hit}"
+    if s["requests_priced"]:
+        head += f", {_usd(s['cost_usd'])}"
+    lines.append(head)
+    if f["waste"]:
+        w = f["waste"][0]
+        cost = f" ({_usd(s['avoidable_cost_usd'])})" if s["requests_priced"] else ""
+        lines.append(f"avoidable: {_n(s['avoidable_tokens'])} tokens{cost}, {(s['avoidable_share'] or 0):.0%} of the prompt")
+        lines.append(f"top cause: {w['what']} ({_req(w['requests'])})")
+        if w.get("fix"):
+            lines.append(f"fix: {w['fix']}")
+    elif f["unexplained"]:
+        lines.append("no avoidable waste among the misses whose cause is known")
+    else:
+        lines.append("no avoidable waste: every miss had a legitimate cause")
+    unread = f.get("unread_writes") or []
+    if unread:
+        tok = sum(u["tokens"] or 0 for u in unread)
+        usd = sum(u["surcharge_usd"] or 0 for u in unread)
+        lines.append(f"cache writes never read back: {_n(tok)} tokens" + (f" ({_usd(usd)} write surcharge)" if usd else ""))
+    lines.append("pip install prefixwise  ·  github.com/tejachavali/prefixwise")
     return "\n".join(lines)
