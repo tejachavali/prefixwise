@@ -105,6 +105,7 @@ def assistant_message(payload: dict, variant: str) -> dict:
 
 
 THINK_STUB = 4  # tokens the generation prompt carries only while thinking is off (Qwen3)
+GENERATION_TAIL_MAX = 8  # the template-alone diff: a shortfall this small is the generation prompt, not a break
 
 
 def classify_reuse(cached: int, prev_prompt: int | None, prev_full: int | None, block: int) -> str:
@@ -221,7 +222,9 @@ def cpu_template(model: str) -> dict:
         k = first_diff(t1 + out1, t2)
         out[name] = {"turn1_prompt": len(t1), "turn1_output": len(out1), "turn2_prompt": len(t2),
                      "shared_with_prompt_plus_output": k, "diverges_at": tok.decode(t2[k:k + 12]),
-                     "reuse": "full" if k >= len(t1) + len(out1) else "prompt" if k >= len(t1) else "break"}
+                     "generation_tail": max(0, len(t1) - k),  # generation-prompt tokens the history never repeats
+                     "reuse": ("full" if k >= len(t1) + len(out1) else
+                               "prompt" if k >= len(t1) - GENERATION_TAIL_MAX else "break")}
     try:
         a = ids([sys_, u1], enable_thinking=True)
         b = ids([sys_, u1], enable_thinking=False)

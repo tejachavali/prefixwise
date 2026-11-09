@@ -357,7 +357,10 @@ skew, failed requests), fixed above. The rules above answer all of them.
   vLLM, 36% on SGLang): a stable prefix and a tail Prefixwise never expected back: `none`, now with the
   detail `output_rerendered` where the previous answer was at least 160 tokens (29 of the 47; added
   from this run, engines only). SGLang's page size of 1 gives the exact shortfall
-  of a full read: 0 tokens, or the 4-token `<think>` stub when thinking is off. The one template
+  of a full read: 0 tokens, or the 4-token `<think>` stub when thinking is off. On three more templates
+  ([record](../experiments/e_template/runs/2026-11-09-colab-l4-models.md)): a DeepSeek-R1 distill
+  recomputes the previous answer on 25 of 25 turns (57% of prompt tokens, all named `output_rerendered`);
+  Qwen2.5 and Llama 3.2 keep history as generated and reuse it in full (no detail). The one template
   clause found that divides a prefix is Llama 3.x's date line in the system header: every session's
   prefix is recomputed once a day at the server's midnight, with no change in the request. Open: a
   run across that midnight.
