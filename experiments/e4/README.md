@@ -55,6 +55,8 @@ python experiments/e4/e4.py --mock --fix auto_breakpoints      # free
 python experiments/e4/e4.py --fix auto_breakpoints --provider anthropic --model claude-haiku-5-5 --max-input-tokens 900000
 ```
 
-Mock result (2026-11-09): 59 of 60 requests rewritten, predicted 171,409 tokens, realised 182,912 (106.7%: the prediction does not count the first turns of later sessions, which read the prefix an earlier session wrote), prompt-side cost $0.0192 against $0.0029 (85.1% saved), Pass. The mock bills as Anthropic does (nothing read or written without a marker) and always calls the right tool, so it shows the accounting, not the model's behaviour. **Live: not run yet.** Until it passes, `auto_breakpoints` stays opt-in and out of `--optimize`.
+Mock result (2026-11-09): 59 of 60 requests rewritten, predicted 171,409 tokens, realised 182,912 (106.7%: the prediction does not count the first turns of later sessions, which read the prefix an earlier session wrote), prompt-side cost $0.0192 against $0.0029 (85.1% saved), Pass. The mock bills as Anthropic does (nothing read or written without a marker) and always calls the right tool, so it shows the accounting, not the model's behaviour. 
+
+**Live result (2026-11-09): Pass.** Anthropic Haiku 5.5: 106.8% of predicted savings realised (216,533 of 202,680 tokens), prompt-side cost $0.0226 against $0.0033 (85.6% saved, surcharge included), tool choices 59 of 60 right without the fix and 60 of 60 with it, 59 of 60 requests rewritten, none rejected. See [`runs/2026-11-09-auto-breakpoints-live.md`](runs/2026-11-09-auto-breakpoints-live.md). `auto_breakpoints` is in `--optimize` since.
 
 What E4 does not cover, by design: the guards that keep markers off a one-shot request, a prompt rewritten every turn, a client with its own markers, and a prompt below the model's minimum. Those are decided before any request is sent and are pinned by unit tests (`tests/test_auto_breakpoints.py`).

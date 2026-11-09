@@ -1,6 +1,6 @@
 # Specs: `prefixwise check` and `prefixwise serve --optimize`
 
-Status: `prefixwise check` **built** (0.9, 2026-11-08, as amended below); `--optimize` **built** (0.10.5: the flag and the proven set, and `--fix auto_breakpoints` as opt-in; section 2.3 still proposed). Both keep the core guarantee: the prompt itself is
+Status: `prefixwise check` **built** (0.9, 2026-11-08, as amended below); `--optimize` **built** (0.10.5: the flag and the proven set, and `auto_breakpoints`, proven by E4 live on 2026-11-09 and in the set since 0.10.8; section 2.3 still proposed). Both keep the core guarantee: the prompt itself is
 never stored or sent anywhere; only block hashes, counts and Prefixwise's verdicts are.
 
 ## 1. `prefixwise check`: a CI gate for cache regressions
@@ -162,7 +162,12 @@ them. `prefixwise fixes` lists the rows it rewrote under "Already active" and sa
 paid: over those rows, the writes the placed markers caused against the reads they enabled (Anthropic
 serves no read without a marker), the reads' saving (0.9 per token) against the writes' surcharge (0.25
 per token; the placed markers are 5-minute ones), a model from Anthropic's multipliers, not a bill. Reads
-of entries another client's own markers wrote count, and reads of these writes by such a client do not. Not in `--optimize`: no E4 run.
+of entries another client's own markers wrote count, and reads of these writes by such a client do not.
+
+**Proven 2026-11-09** ([run](../../experiments/e4/runs/2026-11-09-auto-breakpoints-live.md)): on Anthropic Haiku 5.5,
+a client with no `cache_control`, 60 paired requests: 106.8% of predicted savings realised, prompt-side cost
+down 85.6% with the write surcharge included, task success flat, no marker rejected. It is in `PROVEN_FIXES`,
+so `--optimize` turns it on. The limits are the run's: one model, multi-turn sessions seconds apart.
 
 ### 2.3 Volatile values in the system prompt: warn by default
 

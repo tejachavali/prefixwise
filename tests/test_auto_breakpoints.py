@@ -62,9 +62,13 @@ def test_third_marker_on_the_previous_user_turn_only_past_the_lookback():
 
 
 def test_status_and_advice():
-    assert FIX_STATUS["auto_breakpoints"]["status"] == "opt-in"
+    from pathlib import Path
+
+    status = FIX_STATUS["auto_breakpoints"]
+    assert status["status"] == "proven"  # E4 live 2026-11-09; the status must cite the committed run
+    assert (Path(__file__).resolve().parents[1] / status["evidence"].split()[-1]).exists()
     assert FIX_ADVICE["breakpoint_misplaced"]["toggle"] == "auto_breakpoints"
-    assert "auto_breakpoints" not in parse_fixes("optimize")  # not proven: never in --optimize
+    assert "auto_breakpoints" in parse_fixes("optimize")  # proven: --optimize turns it on
     assert set(parse_fixes("optimize,auto_breakpoints")) == {"canonical_tools", "auto_breakpoints"}
 
 

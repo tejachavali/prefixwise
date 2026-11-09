@@ -10,18 +10,18 @@ MSGS2 = MSGS + [{"role": "assistant", "content": "a"}, {"role": "user", "content
 
 
 def test_optimize_stands_for_the_proven_fixes_plus_what_the_user_names():
-    assert PROVEN_FIXES == ("canonical_tools",)
+    assert PROVEN_FIXES == ("canonical_tools", "auto_breakpoints")
     assert all(FIX_STATUS[f]["status"] == "proven" for f in PROVEN_FIXES)
     assert set(PROVEN_FIXES) <= set(AVAILABLE_FIXES)
-    assert parse_fixes("optimize") == ("canonical_tools",)
-    assert parse_fixes(["optimize", "canonical_tools"]) == ("canonical_tools",)
-    assert parse_fixes("canonical_tools,optimize") == ("canonical_tools",)
+    assert parse_fixes("optimize") == PROVEN_FIXES
+    assert parse_fixes(["optimize", "canonical_tools"]) == PROVEN_FIXES
+    assert parse_fixes("canonical_tools,optimize") == PROVEN_FIXES
     assert parse_fixes(None) == () and parse_fixes("") == ()
 
 
 def test_optimize_through_the_proxy_records_the_fix_it_applied_not_the_word():
     p = PrefixwiseProxy(mock=True, fixes=["optimize"])
-    assert p.fixes == ("canonical_tools",)
+    assert p.fixes == PROVEN_FIXES
     p.handle("openai", {"model": "m", "session_id": "s", "tools": [A, B], "messages": MSGS})
     result, entry = p.handle("openai", {"model": "m", "session_id": "s", "tools": [B, A], "messages": MSGS2})
     assert result["cause"] == "none" and entry.fixes == "canonical_tools"
@@ -42,11 +42,11 @@ def test_cli_flags_and_middleware_env_expand_optimize(monkeypatch):
         monkeypatch.delenv(name, raising=False)
     assert mw().proxy.fixes == ()
     monkeypatch.setenv("PREFIXWISE_OPTIMIZE", "1")
-    assert mw().proxy.fixes == ("canonical_tools",)
+    assert mw().proxy.fixes == PROVEN_FIXES
     monkeypatch.setenv("PREFIXWISE_OPTIMIZE", "0")
     assert mw().proxy.fixes == ()
     monkeypatch.setenv("PREFIXWISE_FIX", "optimize")
-    assert mw().proxy.fixes == ("canonical_tools",)
+    assert mw().proxy.fixes == PROVEN_FIXES
 
 
 def test_response_format_is_a_prompt_affecting_param():

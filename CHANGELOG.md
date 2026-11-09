@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- **`auto_breakpoints` is proven, and `--optimize` turns it on.** E4 live on Anthropic (Haiku 5.5), a client that sets no `cache_control`, 60 paired requests: 106.8% of the predicted savings realised, prompt-side cost down 85.6% with the write surcharge included, tool choices 59 of 60 right without the fix and 60 of 60 with it, no marker rejected ([record](experiments/e4/runs/2026-11-09-auto-breakpoints-live.md)). **What changes for you:** with `--optimize` (or `PREFIXWISE_OPTIMIZE=1`, or `optimize` in `PREFIXWISE_FIXES`), an Anthropic request that carries no marker now gets them once its tools and system prompt were seen within the cache window; requests with their own markers, one-shot requests and other providers are untouched. To keep the old behaviour, name the fix you want: `--fix canonical_tools`. The limits are the run's: one model, multi-turn sessions seconds apart.
+- **E4 covers a second fix**: `experiments/e4/e4.py --fix auto_breakpoints` replays a client without markers and scores it in tokens and in dollars (prompt side, surcharge included); one request sent without its markers fails the run.
+
 ## 0.10.7: 2026-11-09
 
 One correction to the session view from 0.10.5: what the number under "first changed" means.
