@@ -70,7 +70,16 @@ def test_unread_write_only_after_a_cold_miss_that_replaced_the_prefix():
     assert unread_write("volatile_system", 0, 8_000, 0, 0) == (8_000, 0, 0)
     assert unread_write("ttl_expired", 0, 0, 8_000, 0) == (0, 8_000, 0)
     assert unread_write("history_edit", 0, 0, 0, 8_000) == (0, 0, 8_000)  # single-rate provider
-    assert unread_write("volatile_system", 100, 8_000, 0, 0) == (0, 0, 0)  # something was read
+    # a read that stops short of the write leaves the rest unread: the previous turn wrote after what
+    # it read, so only the part of this read beyond that counts as read back
+    assert unread_write("volatile_system", 100, 8_000, 0, 0) == (7_900, 0, 0)
+    assert unread_write("history_edit", 10_000, 4_000, 0, 0, prev_cached_tokens=10_000) == (4_000, 0, 0)
+    assert unread_write("history_edit", 12_000, 4_000, 0, 0, prev_cached_tokens=10_000) == (2_000, 0, 0)
+    assert unread_write("history_edit", 14_000, 4_000, 0, 0, prev_cached_tokens=10_000) == (0, 0, 0)
+    assert unread_write("history_edit", 9_000, 4_000, 0, 0, prev_cached_tokens=10_000) == (4_000, 0, 0)
+    assert unread_write("history_edit", 10_000, 3_000, 1_000, 0, prev_cached_tokens=10_000) == (3_000, 1_000, 0)
+    assert unread_write("history_edit", 12_000, 3_000, 1_000, 0, prev_cached_tokens=10_000) == (1_500, 500, 0)
+    assert unread_write("history_edit", 10_000, 0, 0, 4_000, prev_cached_tokens=10_000) == (0, 0, 4_000)
     # The entry was not replaced: a later turn may still read it (review: a retry, then a hit).
     for kept in ("none", "first_write", "fork_boundary", "model_switch", "retry_replay", "routing_miss",
                  "evicted", "unknown", "breakpoint_misplaced"):
@@ -190,3 +199,19 @@ def test_compaction_while_another_conversation_is_interleaved_claims_nothing():
     summary = dated([{"role": "user", "content": "Summary of the conversation so far: ..."}], "2026-11-07")
     e = p.handle("anthropic", summary, {"x-prefixwise-session-id": "s", "x-prefixwise-compaction-event": "1"})[1]
     assert e.cause == "compaction_rewrite" and e.unread_write_tokens is None
+
+
+def test_a_trimmed_history_with_a_hit_on_the_system_prompt_leaves_the_write_unread():
+    """Reddit (Specialist-Can2889): an agent that trims older messages every turn while its system
+    prompt and tools still hit. Turn 1 reads 10,000 and writes 4,000 of messages; turn 2 rewrites
+    history, reads the 10,000 again and nothing of the write: 4,000 unread tokens, priced."""
+    from test_details import a_usage, body, proxy
+    p = proxy([a_usage(read=10_000, write5=4_000, fresh=0), a_usage(read=10_000, write5=4_200, fresh=0)])
+    msgs = [{"role": "user", "content": "q1"}, {"role": "assistant", "content": "a long answer " * 50},
+            {"role": "user", "content": "q2"}]
+    p.handle("anthropic", body(msgs, last_marker=True), {"x-prefixwise-session-id": "s"})
+    trimmed = [msgs[0], {"role": "assistant", "content": "trimmed to the question"}, msgs[2],
+               {"role": "assistant", "content": "a2"}, {"role": "user", "content": "q3"}]
+    res, entry = p.handle("anthropic", body(trimmed, last_marker=True), {"x-prefixwise-session-id": "s"})
+    assert res["cause"] == "history_edit"
+    assert entry.unread_write_tokens == 4_000 and entry.unread_write_cost is not None and entry.unread_write_cost > 0

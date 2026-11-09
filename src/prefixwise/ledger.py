@@ -91,14 +91,31 @@ _WRITE_REPLACED = frozenset({"volatile_system", "system_edit", "tool_reserialize
 
 
 def unread_write(cause: str, cached_tokens: int, prev_write_5m: int, prev_write_1h: int,
-                 prev_cache_write: int) -> tuple[int, int, int]:
-    """(5-minute, 1-hour, single-rate) tokens the previous turn wrote that this turn, a miss
-    reading nothing that replaced the prefix, left unread; all zero when not applicable."""
-    if cause not in _WRITE_REPLACED or cached_tokens > 0:
+                 prev_cache_write: int, prev_cached_tokens: int = 0) -> tuple[int, int, int]:
+    """(5-minute, 1-hour, single-rate) tokens the previous turn wrote that this turn, a miss that
+    replaced the prefix, left unread; all zero when not applicable.
+
+    The previous turn wrote after what it read: its new entry spans [prev_cached_tokens,
+    prev_cached_tokens + write). This turn's read, from the front of the prompt, covers the first
+    `cached_tokens` of it; whatever it reads beyond `prev_cached_tokens` came from that write, and
+    the rest of the write was paid for and never read. A read that stops inside the stable
+    system+tools prefix (an agent that trims history every turn while its system prompt still
+    hits) leaves the whole write unread: before, any read at all zeroed this (Reddit,
+    Specialist-Can2889: 535k tokens written, 334k read, in one session that trims history).
+    Where the two cache lifetimes both wrote, the unread share is apportioned to them."""
+    if cause not in _WRITE_REPLACED:
+        return 0, 0, 0
+    total = (prev_write_5m + prev_write_1h) or prev_cache_write
+    if total <= 0:
+        return 0, 0, 0
+    read_from_write = max(0, cached_tokens - max(0, prev_cached_tokens))
+    unread = max(0, total - read_from_write)
+    if unread == 0:
         return 0, 0, 0
     if prev_write_5m or prev_write_1h:
-        return prev_write_5m, prev_write_1h, 0
-    return 0, 0, prev_cache_write
+        unread_5m = round(unread * prev_write_5m / total)
+        return unread_5m, unread - unread_5m, 0
+    return 0, 0, unread
 
 
 def avoidable_tokens(prompt_tokens: int, cached_tokens: int, *,

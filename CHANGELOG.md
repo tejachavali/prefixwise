@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- **Unread cache writes are counted on partial hits.** The previous turn's write sits after what that turn read, so a turn that replaces history while its system prompt and tools still hit leaves the whole write unread; before, any read at all zeroed `unread_write_tokens`, so an agent that trims history every turn (Reddit, Specialist-Can2889: 535k tokens written and 334k read in one 32-turn Claude Agent SDK session) showed no unread-write cost. Now the unread share is the write minus what this turn read beyond the previous turn's read, apportioned across the two cache lifetimes. The proxy, the collector and the Claude Code importer all pass the previous read.
 - **A restart that recomputes a shareable prefix is named.** The first request of a session that reads nothing, within the cache window of another session's request with the same model, credential and tools and a system prompt that differs only in a date, time or id (a timestamp set at session start, a per-user id), carries the detail `volatile_prefix_at_start`, says which kind differed, and the report prints its fix under the expected misses. Before, the proxy compared prefixes across sessions as sent, so a fresh timestamp hid the match, and only on Anthropic. The comparison uses masked prefix keys (no text kept), memoised per prefix. From Reddit (Character_Fix_5317, r/DeepSeek). Turn facts gain the keys: a 0.10.1 collector refuses such records as malformed, so upgrade the collector first.
 
 ## 0.10.1: 2026-11-09

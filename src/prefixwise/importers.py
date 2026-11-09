@@ -302,7 +302,8 @@ def import_claude_code(root: str | os.PathLike | None = None, ledger: Ledger | N
                 entry.avoidable_cost = prices.avoidable_cost(r.model, avoidable, prompt, "anthropic", u)
                 if prev_u is not None and prompt > 0:
                     pw = breakdown("anthropic", prev_u)
-                    w5, w1, _ = unread_write(cause, read, pw.cache_write_5m, pw.cache_write_1h, 0)
+                    w5, w1, _ = unread_write(cause, read, pw.cache_write_5m, pw.cache_write_1h, 0,
+                                             _int(prev_u.get("cache_read_input_tokens")))
                     if w5 or w1:
                         entry.unread_write_tokens = w5 + w1
                         entry.unread_write_cost = prices.write_surcharge(r.model, prev_prompt_before or 0, w5, w1)
