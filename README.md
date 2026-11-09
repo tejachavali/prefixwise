@@ -230,7 +230,7 @@ One cause per request: the first thing, in prefix order, that broke reuse. Each 
 |---|---|---|---|
 | `none` | Prefix reused; only new content was uncached | no | - |
 | `first_write` | First request of a session | no | - |
-| `volatile_system` | Only dates, times, ids or numbers changed in the system prompt | **yes** | Move volatile values to the end of the prompt |
+| `volatile_system` | Only dates, times, ids or numbers changed in the system prompt (a timestamp in any common format, whatever its format last turn) | **yes** | Move volatile values to the end of the prompt, in one fixed format; the evidence names which kinds the prompt carries, and whether it also carries a file path, which other sessions cannot share |
 | `system_edit` | The system prompt's wording changed | depends | Batch prompt edits; avoid per-turn rewording |
 | `tool_reserialize` | Same tools, different order or bytes | **yes** | Sort tools; serialize deterministically |
 | `tool_catalog_change` | A tool was added or removed | no | Mask tools instead of removing them, if frequent |

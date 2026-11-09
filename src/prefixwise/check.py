@@ -46,7 +46,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from .classifier import MissCause
-from .fingerprint import _DATE_RE, _TIME_RE
+from .fingerprint import mask_volatiles_kinds
 from .fixes import FIX_ADVICE, FIX_STATUS
 
 DEFAULT_FAIL_ON = ("tool_reserialize", "volatile_system", "breakpoint_misplaced", "tool_result_mutation")
@@ -292,7 +292,7 @@ def project(rep: Report, baseline: dict | None, prices=None) -> None:
 
 class VolatileWatch:
     """Installed as the proxy's request observer: notes, per scenario, whether a system block holds
-    a date or time (the masks the fingerprinter applies). The text is looked at and dropped."""
+    a date, a time or a file path (the fingerprinter's kinds). The text is looked at and dropped."""
 
     def __init__(self):
         self.seen: dict[str, set[str]] = {}
@@ -303,10 +303,7 @@ class VolatileWatch:
             if role not in ("system", "system_dynamic"):
                 continue
             text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
-            if _DATE_RE.search(text):
-                kinds.add("date")
-            if _TIME_RE.search(text):
-                kinds.add("time")
+            kinds.update(k for k in mask_volatiles_kinds(text)[1] if k in ("date", "time", "path"))
         if kinds:
             self.seen.setdefault(str(session_id), set()).update(kinds)
 

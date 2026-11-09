@@ -264,6 +264,37 @@ def _stable_uncached_tail(prev: RequestSnapshot, curr: RequestSnapshot, secondar
     return held, shared, tail
 
 
+_VOLATILE_NAMES = {"date": "a date or timestamp", "time": "a time", "id": "an id"}
+
+
+def _volatile_kinds(prev_blocks: list, curr_blocks: list) -> str:
+    """What the changed system blocks carry (dates, times, ids), from the fingerprints' kinds: the
+    candidates for what changed, since the values themselves are never kept. Numbers are left out
+    (nearly every prompt has one) and a time is implied by a date. A path is named apart: it is not
+    masked, so it did not change here, but it blocks reuse across sessions and machines. '' on older
+    records or malformed kinds."""
+    kinds: list[str] = []
+    path = False
+    for b in list(prev_blocks) + list(curr_blocks):
+        found = getattr(b, "volatile", None)
+        if not isinstance(found, (list, tuple)):
+            continue
+        for k in found:
+            if k == "path":
+                path = True
+            elif isinstance(k, str) and k in _VOLATILE_NAMES and k not in kinds:
+                kinds.append(k)
+    if "date" in kinds and "time" in kinds:
+        kinds.remove("time")
+    if not kinds:
+        return ""
+    names = [_VOLATILE_NAMES[k] for k in kinds]
+    joined = names[0] if len(names) == 1 else " and ".join(names)
+    note = (f" (the system prompt carries {joined}: move it to the end of the prompt, or drop it"
+            + ("; it also carries a file path, which other sessions and machines cannot share" if path else "") + ")")
+    return note
+
+
 def _first_change(prev: RequestSnapshot, curr: RequestSnapshot, secondary: list,
                   native_reason: str | None) -> Classification | None:
     """The cause named by the first part of the prompt that changed, or None if none did
@@ -281,8 +312,8 @@ def _first_change(prev: RequestSnapshot, curr: RequestSnapshot, secondary: list,
         if role in ("system", "system_dynamic"):
             if [b.masked for b in p] == [b.masked for b in c]:
                 return Classification(MissCause.VOLATILE_SYSTEM, False,
-                                      "system raw hash changed, masked hash equal (dates/ids/numbers only)",
-                                      secondary, native_reason)
+                                      "system raw hash changed, masked hash equal: only volatile values differ"
+                                      + _volatile_kinds(p, c), secondary, native_reason)
             return Classification(MissCause.SYSTEM_EDIT, None,
                                   "system masked hash changed", secondary, native_reason)
         if role == "tools":
