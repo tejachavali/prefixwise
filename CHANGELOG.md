@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **`prefixwise fixes` says whether `auto_breakpoints` paid.** Over the requests it rewrote: the cache writes the placed markers caused, the reads they enabled, and the reads' saving against the writes' surcharge in input-token equivalents, from Anthropic's multipliers (5-minute write 1.25x, read 0.1x). A model, not a bill: a read of an entry another client's own markers wrote counts, and a read of these writes by such a client does not. Also in `GET /api/v1/fixes` as `auto_breakpoints`.
+
 - **`report --session` shows each request's cost**, and names the dollar column it had as avoidable dollars. The column read as the request's cost and showed $0.0000 on legitimate misses next to a run total of $0.034 (Muse, opencode run). The header now carries the session's total cost and how many requests were priced.
 - **opencode through `prefixwise run` is verified**: it reads `ANTHROPIC_BASE_URL`, so `prefixwise run -- opencode run "..."` routes every request ([record](experiments/compat/2026-11-09-opencode-run.md)). The README says so again, with the record.
 

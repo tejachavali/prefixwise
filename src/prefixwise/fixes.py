@@ -202,6 +202,36 @@ FIX_ADVICE: dict[str, dict] = {
 }
 
 
+# Anthropic's multipliers on the input rate: a 5-minute cache write 1.25x, a read 0.1x (docs.anthropic.com
+# prompt caching pricing, Nov 2026). auto_breakpoints places 5-minute markers only. Against a placed marker
+# counts the surcharge above sending the tokens uncached, 0.25 per token written; a read saves 0.9.
+_WRITE_SURCHARGE = 0.25
+_READ_SAVING = 0.9
+
+
+def breakpoints_paid(ledger) -> dict | None:
+    """Did the markers auto_breakpoints placed pay for themselves? Over the rows it rewrote: the cache
+    writes those markers caused, the reads they enabled (Anthropic serves no read without a marker; a
+    few may be of entries another client's own markers wrote, whose write is not counted here), and
+    the reads' saving against the writes' surcharge, in input-token equivalents. Reads of these writes
+    by a client with its own markers are not credited. None when it rewrote nothing. A model from
+    the multipliers above, not a bill."""
+    with ledger._lock:
+        rows = ledger.conn.execute(
+            "SELECT cache_write_tokens, cached_tokens FROM entries "
+            "WHERE fixes IS NOT NULL AND (',' || fixes || ',') LIKE '%,auto_breakpoints,%' AND error IS NULL").fetchall()
+    if not rows:
+        return None
+    written = sum(w or 0 for w, _ in rows)
+    read = sum(r or 0 for _, r in rows)
+    surcharge = written * _WRITE_SURCHARGE
+    saving = read * _READ_SAVING
+    return {"requests": len(rows), "written_tokens": written, "read_tokens": read,
+            "write_surcharge_token_equivalents": round(surcharge), "read_saving_token_equivalents": round(saving),
+            "net_token_equivalents": round(saving - surcharge),
+            "paid": (saving > surcharge) if (written or read) else None}
+
+
 def recommend(ledger) -> dict:
     """Fixes ranked by the avoidable tokens this ledger attributes to their cause
     (the data behind `prefixwise fixes` and GET /api/v1/fixes)."""
@@ -228,4 +258,4 @@ def recommend(ledger) -> dict:
                      "status": status.get("status") or "recommended (predicted; prove it with experiments/e4)",
                      "evidence": status.get("evidence")})
     recs.sort(key=lambda x: -x["predicted_savings_tokens"])
-    return {"recommendations": recs, "requests_rewritten_by_fixes": fixed}
+    return {"recommendations": recs, "requests_rewritten_by_fixes": fixed, "auto_breakpoints": breakpoints_paid(ledger)}
