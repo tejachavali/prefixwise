@@ -32,7 +32,10 @@ PARAM_KEYS = ("tool_choice", "thinking", "reasoning", "output_format",
               # SGLang leaves extra_key out of its KV-event hashes, so a change must be seen here
               # (cache_salt is in them)
               "extra_key",
-              "text_format", "text", "verbosity")
+              "text_format", "text", "verbosity",
+              # self-hosted engines render the prompt through a chat template: its arguments
+              # (enable_thinking on Qwen3) and a per-request template change the rendered prefix
+              "chat_template_kwargs", "chat_template")
 
 
 def param_fingerprint(value) -> str:
