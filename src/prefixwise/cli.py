@@ -111,7 +111,7 @@ def cmd_serve(args) -> int:
     try:
         serve(host=args.host, port=args.port, ledger_path=ledger,
               upstream_url=args.upstream, mock=True if args.mock else None,
-              fixes=args.fix or None, allow_unauthenticated=args.allow_unauthenticated,
+              fixes=_fixes(args), allow_unauthenticated=args.allow_unauthenticated,
               prices=args.prices, engine=engine, kv_events=kv_events,
               full_attention=args.full_attention, otel=args.otel, collector_url=args.collector, sinks=args.sink)
     except (ValueError, OSError) as exc:  # unknown --fix, --engine, --otel or --sink value
@@ -294,6 +294,14 @@ def _show_url(url: str) -> str:
     return f"{u.scheme}://{u.hostname}{':' + str(u.port) if u.port else ''}" if u.hostname else "?"
 
 
+def _fixes(args) -> list[str] | None:
+    """--fix NAME... plus 'optimize' for --optimize; None when neither was given (the env decides)."""
+    names = list(args.fix or [])
+    if getattr(args, "optimize", False):
+        names.append("optimize")
+    return names or None
+
+
 def _host_of(url: str) -> str:
     from urllib.parse import urlsplit
     u = urlsplit(url)
@@ -367,7 +375,7 @@ def cmd_run(args) -> int:
                 served = {n for n, u in (("openai", openai), ("anthropic", anthropic)) if _host_of(u) == _host_of(url)}
                 break
     try:
-        proxy = PrefixwiseProxy(ledger_path=ledger, mock=True if args.mock else None, fixes=args.fix or None,
+        proxy = PrefixwiseProxy(ledger_path=ledger, mock=True if args.mock else None, fixes=_fixes(args),
                                 upstreams=None if args.mock else {"anthropic": anthropic, "openai": openai},
                                 otel=args.otel, engine=engine, kv_events=kv_events, full_attention=args.full_attention)
     except ValueError as exc:
@@ -786,7 +794,9 @@ def build_parser() -> argparse.ArgumentParser:
                         "(anyone who reaches the port can spend the key)")
     p.add_argument("--fix", action="append", metavar="NAME",
                    help="apply a fix to every request before forwarding (repeatable). "
-                        "Available: canonical_tools. Default: $PREFIXWISE_FIXES or none")
+                        "Available: canonical_tools (proven). Default: $PREFIXWISE_FIXES or none")
+    p.add_argument("--optimize", action="store_true",
+                   help="apply every proven fix (today: canonical_tools), plus any --fix named")
     p.add_argument("--collector", metavar="URL",
                    help="send turn records to a `prefixwise collect` server (http://...) or to the record log it "
                         "reads (redis://...) instead of keeping a ledger here (default: $PREFIXWISE_COLLECTOR; "
@@ -858,7 +868,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="what is behind the agent's base URL (default: detected; none: a hosted API or a router)")
     p.add_argument("--full-attention", action="store_true", default=None,
                    help="SGLang: the model has no sliding-window or Mamba layers (lets its KV events rule an eviction out)")
-    p.add_argument("--fix", action="append", metavar="NAME", help="apply a fix (repeatable): canonical_tools")
+    p.add_argument("--fix", action="append", metavar="NAME",
+                   help="apply a fix (repeatable): canonical_tools (proven)")
+    p.add_argument("--optimize", action="store_true", help="apply every proven fix (today: canonical_tools)")
     ledger_opt(p)
     p.add_argument("--otel", action="store_const", const="genai", default=None,
                    help="export a span per request over OpenTelemetry (OTLP, configured by OTEL_* variables; "

@@ -11,6 +11,9 @@ Only rewrites that cannot change what the prompt means are toggles:
   rebuilding definitions) misses the whole cache. Sorting is stable:
   same tool set, same bytes, every turn.
 
+`--optimize` turns on PROVEN_FIXES, the set with an E4 run behind it, and
+any --fix the user names on top.
+
 Everything else is advice: changes only the application can make safely
 (moving a timestamp out of the system prompt changes the text the model
 reads). FIX_ADVICE maps each wasteful cause to its fix, and says whether
@@ -27,6 +30,8 @@ from __future__ import annotations
 import json
 
 AVAILABLE_FIXES = ("canonical_tools",)
+PROVEN_FIXES = ("canonical_tools",)  # what --optimize turns on; a fix joins after an E4 run (FIX_STATUS)
+OPTIMIZE = "optimize"  # the name --optimize stands for in a fix list
 
 # Evidence per fix. Change only with a committed E4 run behind it.
 FIX_STATUS = {
@@ -74,10 +79,13 @@ def apply_fixes(body: dict, fixes: tuple[str, ...] | list[str]) -> tuple[dict, l
 
 
 def parse_fixes(spec: str | list[str] | tuple[str, ...] | None) -> tuple[str, ...]:
-    """'canonical_tools,other' or a list -> validated tuple. Unknown names raise."""
+    """'canonical_tools,other' or a list -> validated tuple. 'optimize' stands for PROVEN_FIXES.
+    Unknown names raise."""
     if not spec:
         return ()
     names = [s.strip() for s in (spec.split(",") if isinstance(spec, str) else spec) if s and s.strip()]
+    if OPTIMIZE in names:
+        names = [n for n in names if n != OPTIMIZE] + list(PROVEN_FIXES)
     unknown = [n for n in names if n not in AVAILABLE_FIXES]
     if unknown:
         raise ValueError(f"unknown fix {unknown}; available: {', '.join(AVAILABLE_FIXES)}")

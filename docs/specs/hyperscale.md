@@ -21,7 +21,7 @@ The rule throughout: a guess is worse than no answer.
 | 2.4 | `SessionStateStore` (Redis), `LedgerSink` (ClickHouse...) | **Redesigned and built** (section 2.4): edges emit turn records; collectors own state and the ledger; HTTP or a session-partitioned Redis Stream between them; JSONL and ClickHouse sinks. |
 | 2.5 | KV-event watermark | **Already built.** See below. |
 | 3 | Flowchart items | **Already done** in 0.7.0 (#52): the import route, the arrowhead, the gap, the label mask, hero fills, slate decisions, blue verdicts, emerald hit, `unknown` in the verdict column. `tests/test_figures.py` checks the drawings against the classifier's rule order, so the 1.2 change needed no change to the drawing: its first decision already reads "too short to cache?". |
-| 4 | `check` and `--optimize` specs | **Exist** (not built): [check-and-optimize.md](check-and-optimize.md). The spec's cost projection now specifies the rate paid. |
+| 4 | `check` and `--optimize` specs | **Built** (`prefixwise check` 0.9; `--optimize` with the proven set 0.10.5; auto breakpoints and volatile relocation still proposed): [check-and-optimize.md](check-and-optimize.md). The spec's cost projection now specifies the rate paid. |
 
 ## 2.2 Why there is no `unamortized_write_waste`
 
