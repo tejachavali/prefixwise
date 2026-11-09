@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "prefixwise"
-version = "0.10.5"
+version = "0.10.6"
 description = "Name why your LLM prompt cache missed, price the miss, and measure tokens per successful task. A local proxy and CLI for OpenAI, Anthropic and vLLM."
 dynamic = ["readme"]  # README.md with its relative links made absolute for PyPI (below)
 requires-python = ">=3.10"

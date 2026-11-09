@@ -1,6 +1,11 @@
 # Changelog
 
-## Unreleased
+## 0.10.6: 2026-11-09
+
+Three small ones from the first day of the session view. `prefixwise fixes` says whether the markers
+`auto_breakpoints` placed have paid for themselves on your traffic. `report --session` shows each request's
+cost, with the dollar column it had named as avoidable dollars. And opencode through `prefixwise run` is
+verified, with the record.
 
 - **`prefixwise fixes` says whether `auto_breakpoints` paid.** Over the requests it rewrote: the cache writes the placed markers caused, the reads they enabled, and the reads' saving against the writes' surcharge in input-token equivalents, from Anthropic's multipliers (5-minute write 1.25x, read 0.1x). A model, not a bill: a read of an entry another client's own markers wrote counts, and a read of these writes by such a client does not. Also in `GET /api/v1/fixes` as `auto_breakpoints`.
 
