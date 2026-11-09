@@ -131,3 +131,24 @@ def test_turns_are_in_time_order_and_since_keeps_the_numbering(tmp_path, capsys)
     assert len(lines) == 1 and lines[0].split()[0] == "3"
     assert main(["report", "--ledger", path, "--session", "s", "--since", "1000"]) == 1
     assert "in that window" in capsys.readouterr().err
+
+
+def test_report_session_shows_each_requests_cost_and_the_total(tmp_path, capsys):
+    """Muse's opencode run: the dollar column read $0.0000 on every turn next to a $0.034 total,
+    because it was avoidable dollars. Each request's cost has its own column; the header totals it."""
+    from prefixwise.ledger import Ledger, LedgerEntry
+
+    path = str(tmp_path / "l.db")
+    led = Ledger(path)
+    for rid, cause, cost in (("r1", "first_write", 0.012), ("r2", "model_switch", 0.022), ("r3", "none", None)):
+        led.record(LedgerEntry(session_id="s", agent_id="a", provider="anthropic", model="m", cause=cause,
+                               prompt_tokens=1000, cached_tokens=0, avoidable_tokens=0, avoidable_cost=0.0 if cost else None,
+                               request_id=rid, cost=cost))
+    assert main(["report", "--ledger", path, "--session", "s"]) == 0
+    out = capsys.readouterr().out
+    assert "cost $0.0340 (2 of 3 priced)" in out.splitlines()[0]
+    header = [ln for ln in out.splitlines() if ln.startswith("turn")][0]
+    assert header.split()[-4:] == ["cost", "avoidable", "avoidable", "$"]
+    lines = [ln for ln in out.splitlines() if ln[:1].isdigit()]
+    assert lines[0].split()[-3:] == ["$0.0120", "0", "$0.0000"]
+    assert lines[2].split()[-3:] == ["-", "0", "-"]
