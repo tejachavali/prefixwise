@@ -192,12 +192,40 @@ def _reusable(prev: RequestSnapshot, curr: RequestSnapshot) -> int:
     return reusable  # nothing known to be held (or no write counts): the whole prompt stands
 
 
+# Cache reads are reported in whole blocks on every provider but Anthropic: OpenAI in increments
+# of 128 tokens, vLLM and SGLang in their block (page) size, 1 to 128. A full read of a prefix is
+# reported rounded down, so a count less than one block short of the prefix is a full read; one
+# that is a whole block or more short is not (a 2,048-token prefix read in full says 2,048, not
+# 1,920). The engine's own block size is not on the record, so the slack is the largest block any
+# provider uses, capped at an eighth of the prefix so that a short prefix read only in part is not
+# rounded up to a hit. Live: 400 of a 403-token prefix, 560 of 579 (the previous prompt's tail
+# was its generation prompt, never reusable) on vLLM with 16-token blocks, experiments/e_template.
+READ_GRANULARITY = 128
+
+
+def _read_slack(curr: RequestSnapshot, target: int) -> int:
+    if curr.provider == "anthropic":  # exact counts
+        return 0
+    return min(READ_GRANULARITY, target // 8)
+
+
 def _served_all(prev: RequestSnapshot, curr: RequestSnapshot) -> bool:
-    """The cache served everything the previous turn left in it that this turn could reuse."""
+    """The cache served everything the previous turn left in it that this turn could reuse, to
+    within the provider's reporting granularity (`_read_slack`)."""
     if not curr.usage_known or curr.prompt_tokens <= 0:
         return False
     target = _reusable(prev, curr)
-    return target > 0 and curr.cached_tokens >= target
+    if target <= 0 or curr.cached_tokens <= 0:
+        return False
+    slack = _read_slack(curr, target)
+    return curr.cached_tokens >= target or curr.cached_tokens + slack > target
+
+
+def _served(prev: RequestSnapshot, curr: RequestSnapshot) -> str:
+    """'N of M tokens', with the rounding named when the count is short of the prefix."""
+    target = _reusable(prev, curr)
+    note = "" if curr.cached_tokens >= target else "; reads are reported in whole cache blocks"
+    return f"{curr.cached_tokens} of {target} tokens{note}"
 
 
 def _stable_uncached_tail(prev: RequestSnapshot, curr: RequestSnapshot, secondary: list) -> tuple[int, int, int]:
@@ -337,7 +365,7 @@ def classify(prev: RequestSnapshot | None, curr: RequestSnapshot,
             # was after it (or did not reach the rendered prompt) and cost nothing.
             return Classification(MissCause.NONE, None,
                                   f"{changed.cause.value} seen, but the cache served all of the reusable "
-                                  f"prefix ({curr.cached_tokens} of {_reusable(prev, curr)} tokens): it cost nothing",
+                                  f"prefix ({_served(prev, curr)}): it cost nothing",
                                   secondary + [changed.cause], native_reason, score=False)
         return changed
 
@@ -358,8 +386,7 @@ def classify(prev: RequestSnapshot | None, curr: RequestSnapshot,
         if prev.params != curr.params:
             secondary.append(MissCause.PARAM_RENDERED)
         return Classification(MissCause.NONE, None,
-                              f"the cache served all of the reusable prefix ({curr.cached_tokens} of "
-                              f"{_reusable(prev, curr)} tokens)",
+                              f"the cache served all of the reusable prefix ({_served(prev, curr)})",
                               secondary, native_reason)
     if prev.params != curr.params:
         changed = sorted(set(prev.params) ^ set(curr.params) |

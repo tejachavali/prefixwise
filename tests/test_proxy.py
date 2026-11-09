@@ -329,11 +329,14 @@ def test_mock_stream_then_task_outcome_metric():
     try:
         hdr = {"X-Prefixwise-Task-Id": "fix-bug-1"}
         _, raw1, h1 = stream(port, "/v1/chat/completions", {**BODY, "stream": True}, hdr)
-        _, raw2, _ = stream(port, "/v1/messages", {"model": "c", "session_id": "m", "stream": True,
-                                                    "messages": [{"role": "user", "content": "hi"}]}, hdr)
+        _, raw2, h2 = stream(port, "/v1/messages", {"model": "c", "session_id": "m", "stream": True,
+                                                     "messages": [{"role": "user", "content": "hi"}]}, hdr)
         assert b"[prefixwise mock]" in raw1 and b"[DONE]" in raw1 and b"usage" not in raw1
         assert b"event: message_stop" in raw2
         assert recorded(port, h1['X-Prefixwise-Request-Id'])[1]["cause"] == "first_write"
+        # a stream is recorded after it ends for the client: wait for the second row too, or the
+        # ledger below may hold one request (seen on CI, Python 3.10)
+        assert recorded(port, h2['X-Prefixwise-Request-Id'])[0] == 200
         assert post(port, "/tasks", {"task_id": "fix-bug-1"})[0] == 400  # success required
         assert post(port, "/tasks", {"task_id": "fix-bug-1", "success": True})[0] == 200
         _, ledger = get(port, "/ledger")

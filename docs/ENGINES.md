@@ -349,5 +349,11 @@ skew, failed requests), fixed above. The rules above answer all of them.
   alternates, 5/5 hits when it is sticky, no false claim
   (`experiments/e_route/runs/2026-11-08-colab-l4.md`). Not yet run live: data-parallel ranks
   inside one server (`auto`), real routers.
-- Open: a live test of token-level divergence (a template that re-renders history), to
-  measure how often "not an eviction" occurs in real agent traffic.
+- Token-level divergence, live (`experiments/e_template`, Colab L4, Qwen3-4B, vLLM 0.33.0 with KV
+  events, [record](../experiments/e_template/runs/2026-11-09-colab-l4.md)): 0 of 25 turns were
+  "not an eviction". Qwen3's template drops reasoning from history, so every turn reuses the
+  previous *prompt* and recomputes the previous *output* (a stable prefix, a tail Prefixwise never
+  expected back: `none` is right). The one true prefix divergence found is in Llama 3.x templates,
+  which render the date into the system header: every session's prefix is recomputed once a day
+  at the server's midnight, with no change in the request. Open: the same on SGLang (page size 1),
+  and real agent traffic (opencode, Claude Code) against vLLM.
