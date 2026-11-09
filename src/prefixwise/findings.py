@@ -174,14 +174,15 @@ def findings(ledger, since: float | None = None, until: float | None = None,
     expected.sort(key=lambda x: -x["requests"])
     table = prices or PriceTable.load(None)
     unpriced, approximate = [], []
-    for row in metrics.query(ledger, ["requests"], by="model", **window):
+    for row in metrics.query(ledger, ["requests", "requests_priced"], by="model", **window):
         model = row["model"]
         if not model or not row["requests"]:
             continue
-        key, rates, approx = table.resolve(model)
-        if rates is None:
+        if not row["requests_priced"]:  # from the rows, as they were priced: not from today's table
             unpriced.append(model)
-        elif approx:
+            continue
+        key, rates, approx = table.resolve(model)
+        if approx:
             approximate.append((model, key))
     errors = metrics.query(ledger, ["requests_failed"], by="error", **window)
     statuses = metrics.query(ledger, ["requests_failed"], by="status", **window)
@@ -193,7 +194,7 @@ def findings(ledger, since: float | None = None, until: float | None = None,
             "rejected_credentials": sum(x["requests_failed"] or 0 for x in statuses if x["status"] in (401, 403)),
             "failures": [{"error": e["error"], "requests": e["requests_failed"]}
                          for e in errors if e["error"] and e["requests_failed"]],
-            "ttl": ttl_advice(ledger, prices=prices, **window),
+            "ttl": ttl_advice(ledger, prices=table, **window),
             "unread_writes": unread_writes(ledger, **window),
             "unpriced_models": sorted(unpriced), "approximate_prices": sorted(approximate)}
 
@@ -308,8 +309,9 @@ def render(f: dict, command: str = "serve") -> str:
 
 
 def render_share(f: dict, since_label: str | None = None) -> str:
-    """A short block for pasting into a chat or a thread: the headline numbers, the top cause and
-    its fix, the unread writes. Counts and dollars only; no prompt text exists to leak."""
+    """A short block for pasting into a chat or a thread: the headline numbers, a pricing note when
+    the dollars are partial or approximate, the top cause and its fix, the unread writes. Counts and
+    dollars only; no prompt text exists to leak. At most eight lines."""
     s = f["summary"]
     if not s["requests"]:
         return "prefixwise: no requests recorded yet."
@@ -319,6 +321,15 @@ def render_share(f: dict, since_label: str | None = None) -> str:
     if s["requests_priced"]:
         head += f", {_usd(s['cost_usd'])}"
     lines.append(head)
+    notes = []
+    if s["requests_priced"] and s["requests_priced"] < s["requests"]:
+        notes.append(f"{s['requests_priced']} of {s['requests']} requests priced")
+    if f.get("approximate_prices"):
+        notes.append("priced at a related model's rate: " + ", ".join(f"{m} as {k}" for m, k in f["approximate_prices"]))
+    if f.get("unpriced_models"):
+        notes.append("not priced: " + ", ".join(f["unpriced_models"]))
+    if notes:
+        lines.append("pricing: " + "; ".join(notes))
     if f["waste"]:
         w = f["waste"][0]
         cost = f" ({_usd(s['avoidable_cost_usd'])})" if s["requests_priced"] else ""

@@ -174,7 +174,12 @@ def cmd_report(args) -> int:
     except api.ApiError as exc:
         print(f"prefixwise: {exc}", file=sys.stderr)
         return 2
-    found = findings(led, since=since)
+    from .pricing import PriceTable
+    try:
+        table = PriceTable.load(getattr(args, "prices", None))
+    except (OSError, ValueError) as exc:
+        sys.exit(f"prefixwise: {exc}")
+    found = findings(led, since=since, prices=table)
     detail = args.detail or args.by is not None
     args.by = args.by or "cause"
     summary = led.summary(since=since)
@@ -822,6 +827,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--detail", action="store_true", help="also print totals and the per-group table")
     p.add_argument("--share", action="store_true",
                    help="a short block to paste into a chat or a thread: counts, dollars, the top cause and its fix; no text")
+    p.add_argument("--prices", metavar="FILE", help="also load this rates file (default: $PREFIXWISE_PRICES)")
     p.set_defaults(func=cmd_report)
 
     p = sub.add_parser("prices", help="the dated price table used for dollar costs")

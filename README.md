@@ -1,10 +1,10 @@
 # Prefixwise
 
-**Your agent's cache hit rate looks fine. You are still paying full price for most of every turn. Prefixwise tells you why, in one line, and what to change.**
+**Your agent resends its whole conversation every turn, and one changed byte near the top means the provider charges full price for everything after it. Prefixwise tells you which byte, what it cost, and what to change.**
 
 ```bash
 pip install prefixwise
-prefixwise import claude-code        # Claude Code on a subscription: reads ~/.claude, nothing leaves your machine
+prefixwise import claude-code        # Claude Code on a subscription: reads ~/.claude/projects, nothing leaves your machine
 prefixwise run -- claude             # or any agent with an API key: claude, codex, opencode, your own
 prefixwise report --share            # a block you can paste
 ```
@@ -16,7 +16,7 @@ Avoidable: 14,000 tokens ($0.0805), 87.5% of prompt tokens. Fix these, biggest f
      Fix: Send tools in a fixed order with deterministic serialization (or let the proxy do it: prefixwise serve --fix canonical_tools).
      Prefixwise can do it for you: prefixwise run --fix canonical_tools (proven)
 Expected misses (not waste): 1 x first request of a session: nothing to reuse yet.
-Cache writes never read: 14,000 tokens were written to the cache, and the next turn of the same conversation replaced the prefix before reading them (7 requests); the write surcharge on them cost $0.0175 above sending them uncached.
+Cache writes never read: 14,000 tokens were written to the cache, and the next turn of the same conversation replaced the prefix before reading them (7 requests); the write surcharge on them cost $0.0175 above sending them uncached. Fixing the misses above saves this too; it is not counted twice.
 ```
 
 That is the real output of `prefixwise run --mock` on an eight-turn agent that rebuilds its tool list

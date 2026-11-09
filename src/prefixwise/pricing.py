@@ -115,6 +115,8 @@ class PriceTable:
     models: dict = field(default_factory=dict)
     as_of: str | None = None
     sources: list[str] = field(default_factory=list)  # files the table was built from
+    # `as_of` is the table's revision date (the newest read of any provider's page), stamped on
+    # priced ledger rows as price_as_of; each row of the table names its own source and read date.
 
     @classmethod
     def load(cls, extra_path: str | None = None) -> "PriceTable":
@@ -165,8 +167,9 @@ class PriceTable:
     def _nearest_in_family(self, model: str) -> str | None:
         # A bare family id only (a cloud prefix, a dated snapshot or a version suffix allowed): a variant
         # such as -fast or -pro is another product at another price, and stays unpriced.
-        m = re.fullmatch(r"(?:.*[./:])?claude-(opus|sonnet|haiku|fable|mythos)-(\d+)(?:-(\d+))?(?:-\d{8})?(?:-v\d+(?::\d+)?)?",
-                         model)
+        # The minor is at most three digits: a dated snapshot (claude-opus-4-20250514) is not a minor.
+        m = re.fullmatch(r"(?:.*[./:])?claude-(opus|sonnet|haiku|fable|mythos)-(\d+)(?:-(\d{1,3}))?(?:-\d{8})?"
+                         r"(?:-v\d+(?::\d+)?)?", model)
         if not m:
             return None
         family, want = m.group(1), (int(m.group(2)), int(m.group(3) or 0))
@@ -177,7 +180,7 @@ class PriceTable:
                 continue
             have = (int(mk.group(1)), int(mk.group(2) or 0))
             # the newest at or below the asked version first; else the nearest above
-            rank = (0, -(have[0] * 100 + have[1])) if have <= want else (1, have[0] * 100 + have[1])
+            rank = (0, (-have[0], -have[1])) if have <= want else (1, have)
             if best is None or rank < best[0]:
                 best = (rank, k)
         return best[1] if best else None
