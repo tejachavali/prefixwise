@@ -50,6 +50,15 @@ extended-thinking docs (Nov 2026), Claude Code / Codex / opencode / LiteLLM issu
                      request with the same model, credentials, tools and system prompt
                      that was still waiting for its response (a fan-out): the entry did
                      not exist yet.
+  volatile_prefix_at_start
+                     The first request of a session (first_write), reading nothing, within the
+                     cache window of another session's completed request whose tools and
+                     system prompt are the same except for volatile values (a timestamp set at
+                     session start, an id, the working directory): the restart recomputed a
+                     prefix it could have shared. Any provider; on Anthropic the other request
+                     must have written a cache entry. Named from the masked prefix key, which
+                     carries no text. The prefix's size is not measured, so the cause stays
+                     first_write with no avoidable tokens; the report prints the fix.
   shared_prefix_not_reused
                      Anthropic: the first request of a session, within 5 minutes of
                      another session's request (same model, credentials, tools and
@@ -64,6 +73,8 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass, field
+
+from .fingerprint import mask_volatiles_kinds
 
 LOOKBACK_POSITIONS = 20  # Anthropic: positions checked per breakpoint, the breakpoint itself first
 LOOKBACK_CLAIM = LOOKBACK_POSITIONS + 2  # claim only this far out: block counting may differ slightly
@@ -86,6 +97,8 @@ class Facts:
     provider: str = ""
     model: str = ""
     prefix_key: str | None = None  # model, credentials, tools and system prompt as sent
+    prefix_key_masked: str | None = None  # the same with volatile values masked: equal keys, different raw
+    prefix_volatile: list[str] = field(default_factory=list)  # kinds of volatile value in tools+system
     sys_end: int = 0  # lookback positions taken by tools and system
     breakpoints: list[int] = field(default_factory=list)  # lookback positions carrying cache_control
     n_pos: int = 0
@@ -105,6 +118,9 @@ class Facts:
     fanout_age: float | None = None  # seconds since a same-prefix request still in flight was sent
     shared_age: float | None = None  # seconds since another session wrote an entry inside tools/system
     shared_write_pos: int | None = None  # where that entry ends
+    volatile_shared_age: float | None = None  # seconds since another session completed a request whose
+    #   tools+system equal this one's except for volatile values (a restart with a fresh timestamp)
+    volatile_shared_wrote: bool = False  # that request wrote a cache entry (Anthropic; implicit elsewhere)
 
 
 def _h(obj) -> str:
@@ -147,6 +163,10 @@ def body_facts(provider: str, body: dict, model: str = "", credential: str = "")
                        if isinstance(m, dict) and m.get("role") in ("system", "developer")), None)
     if tools or system:
         f.prefix_key = _h([provider, f.model, credential, _strip_markers(tools), _strip_markers(system)])
+        masked, kinds = mask_volatiles_kinds(json.dumps([_strip_markers(tools), _strip_markers(system)],
+                                                        sort_keys=True, default=str))
+        f.prefix_key_masked = _h([provider, f.model, credential, masked])
+        f.prefix_volatile = [k for k in kinds if k in ("date", "time", "id", "path")]
     key = body.get("prompt_cache_key")  # only ever compared for equality: carried as a digest
     f.cache_key = hashlib.sha256(str(key).encode()).hexdigest()[:32] if key else None
     controls: list = []
@@ -275,6 +295,17 @@ def detail_for(cause: str, prev: Facts | None, curr: Facts, *, prompt_tokens: in
             f"sent {curr.fanout_age:.2f} s after another request with the same model, tools and system prompt "
             f"that was still waiting for its response, so its cache entry did not exist yet; this request {read}. "
             "Stagger parallel requests, or warm the prefix first")
+
+    if cold and cause == "first_write" and curr.volatile_shared_age is not None \
+            and curr.volatile_shared_age <= SHARED_WINDOW and (curr.volatile_shared_wrote or not anthropic):
+        names = {"date": "a date or timestamp", "time": "a time", "id": "an id", "path": "a file path"}
+        kinds = [k for k in curr.prefix_volatile if k in names and not (k == "time" and "date" in curr.prefix_volatile)]
+        what = " and ".join(names[k] for k in kinds) or "a volatile value"
+        return None, "volatile_prefix_at_start", (
+            f"the first request of this session: {curr.volatile_shared_age:.0f} s earlier another session completed "
+            f"a request with the same model, tools and system prompt except for {what} in it, so a value that "
+            f"changes between sessions kept this one from sharing that prefix (a restart recomputes it); this "
+            f"request {read}. The prefix's size is not measured, so nothing is counted as avoidable")
 
     if anthropic and cold and cause == "first_write" and curr.shared_age is not None \
             and curr.shared_age <= SHARED_WINDOW and curr.shared_write_pos is not None \

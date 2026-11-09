@@ -49,8 +49,18 @@ DETAIL_PLAIN = {
                                  "or warm the prefix first",
     "shared_prefix_not_reused": "another session had just cached the same tools and system prompt, yet nothing "
                                 "was read",
+    "volatile_prefix_at_start": "another session had the same tools and system prompt moments earlier except "
+                                "for a date, time or id in it, so the restart recomputed a prefix it could have "
+                                "shared",
     "thinking_stripped": "thinking blocks were removed from earlier messages",
     "cache_key_changed": "prompt_cache_key changed between turns",
+}
+
+
+# Details under an expected cause that still have something to fix: printed with their fix.
+DETAIL_FIX = {
+    "volatile_prefix_at_start": "Set the timestamp or id once per day, or move it to the end of the prompt, so a "
+                                "restarted session shares the cached tools and system prompt.",
 }
 
 
@@ -241,6 +251,8 @@ def render(f: dict, command: str = "serve") -> str:
         for e in f["expected"]:
             for d in e.get("details") or []:
                 lines.append(f"  {d['requests']} x {e['what'].split(':')[0]}: {d['what']}.")
+                if d["detail"] in DETAIL_FIX:
+                    lines.append(f"     Fix: {DETAIL_FIX[d['detail']]}")
     unread = f.get("unread_writes") or []
     if unread:
         tok = sum(u["tokens"] for u in unread)

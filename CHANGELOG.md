@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **A restart that recomputes a shareable prefix is named.** The first request of a session that reads nothing, within the cache window of another session's request whose tools and system prompt are the same except for a date, time or id (a timestamp set at session start), carries the detail `volatile_prefix_at_start`, and the report prints its fix under the expected misses. Before, the proxy compared prefixes across sessions as sent, so a fresh timestamp hid the match, and only on Anthropic. From Reddit (Character_Fix_5317, r/DeepSeek). The comparison uses a masked prefix key; no text is kept.
+
 ## 0.10.1: 2026-11-09
 
 Two fixes from the first week's feedback. A timestamp in the system prompt is a volatile value whatever

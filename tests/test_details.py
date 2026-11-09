@@ -348,3 +348,61 @@ def test_the_engine_is_scoped_to_the_providers_it_serves():
     assert p.engine_for("openai") == "vllm" and p.engine_for("anthropic") == "vllm"
     p.engine_providers = {"openai"}
     assert p.engine_for("openai") == "vllm" and p.engine_for("anthropic") is None
+
+
+def test_a_restart_with_a_fresh_timestamp_is_named_on_any_provider():
+    """Reddit (Character_Fix_5317): a session restarted with a session-start timestamp in the system
+    prompt misses completely with nothing else changed. The restart's first request is `first_write`
+    (nothing in this session to reuse), with the detail `volatile_prefix_at_start`: another session
+    completed the same prefix moments earlier except for the timestamp."""
+    import json as _json
+    # OpenAI-compatible (an engine or the hosted API): the other request's prefix is cached implicitly
+    p = PrefixwiseProxy(upstream_url="http://unused", api_key="k")
+    usages = [{"prompt_tokens": 3000, "completion_tokens": 5, "prompt_tokens_details": {"cached_tokens": 0}}] * 4
+
+    def fake(provider, body, request_id, session_id, client_headers, api="chat"):
+        return 200, {"id": "chatcmpl-" + request_id[:8], "usage": usages.pop(0)}
+    p._forward = fake
+
+    def req(session, stamp, extra=""):
+        body = {"model": "gpt-5.6-luna", "tools": TOOLS,
+                "messages": [{"role": "system", "content": f"Current time: {stamp}. You are careful.{extra} " * 20},
+                             {"role": "user", "content": "hi"}]}
+        res, entry = p.handle("openai", body, {"x-prefixwise-session-id": session})
+        return res["cause"], entry.detail
+    assert req("s1", "2026-11-09 07:15:00") == ("first_write", None)
+    cause, detail = req("s2", "2026-11-09 07:15:30")  # the restart, 30 s later, a fresh timestamp
+    assert (cause, detail) == ("first_write", "volatile_prefix_at_start")
+    # a different wording is a different prompt, not a restart
+    assert req("s3", "2026-11-09 07:16:00", " Be brief.")[1] is None
+    # the same session again is not a first request
+    assert req("s2", "2026-11-09 07:15:30")[1] is None
+
+    # Anthropic: the other session must have written a cache entry for the prefix to be shareable
+    q = proxy([a_usage(write5=8_000), a_usage(fresh=8_000), a_usage(fresh=8_000), a_usage(fresh=8_000)])
+
+    def areq(session, stamp, marker=True):
+        b = body([{"role": "user", "content": "hi"}], system_marker=marker)
+        b["system"][0]["text"] = f"Now: {stamp}. " + b["system"][0]["text"]
+        res, entry = q.handle("anthropic", b, {"x-prefixwise-session-id": session})
+        return res["cause"], entry.detail
+    assert areq("a1", "2026-11-09T07:15:00Z") == ("first_write", None)
+    assert areq("a2", "2026-11-09T07:15:30Z") == ("first_write", "volatile_prefix_at_start")
+    assert areq("a3", "2026-11-09T07:16:00Z", marker=False) == ("first_write", None)  # a2 wrote no entry
+    assert areq("a4", "2026-11-09T07:16:30Z")[1] is None  # nor did a3: nothing was shareable
+
+
+def test_the_report_prints_the_fix_for_a_restart_miss():
+    from prefixwise.findings import findings, render
+    p = PrefixwiseProxy(upstream_url="http://unused", api_key="k")
+    usages = [{"prompt_tokens": 3000, "completion_tokens": 5, "prompt_tokens_details": {"cached_tokens": 0}}] * 2
+
+    def fake(provider, body, request_id, session_id, client_headers, api="chat"):
+        return 200, {"id": "chatcmpl-" + request_id[:8], "usage": usages.pop(0)}
+    p._forward = fake
+    for session, stamp in (("s1", "07:15:00"), ("s2", "07:15:30")):
+        p.handle("openai", {"model": "m", "messages": [{"role": "system", "content": f"Time {stamp}. " * 30},
+                                                      {"role": "user", "content": "hi"}]},
+                 {"x-prefixwise-session-id": session})
+    text = render(findings(p.ledger))
+    assert "except for a date, time or id" in text and "Fix: Set the timestamp or id once per day" in text
