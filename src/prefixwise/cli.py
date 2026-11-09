@@ -217,9 +217,11 @@ def _report_session(led, session: str, as_json: bool, since: float | None = None
                      _fmt_usd(t["avoidable_cost"]) if t.get("avoidable_cost") is not None else "-"])
     print(_table(rows, ["turn", *extra, "prompt", "cached", "hit", "cause", "first changed", "cost", "avoidable",
                         "avoidable $"]))
-    print("\nfirst changed: the block where this request's prompt first differs from the request it was compared "
-          "with, this session's previous one on the same model and conversation (system[0]: the first system "
-          "block; tools[2]: the third tool; messages[5]: the sixth message). One request: prefixwise request <id>")
+    print("\nfirst changed: the block where this request's prompt first differs from this session's previous request "
+          "on the same model and conversation. The number is the block's position in the whole prompt, from 0: "
+          "tools, then system, then the conversation (one position per tool, system prompt and message; "
+          "tool_results[n] is a tool result). On an append-only hit it is the first block of the new turn. "
+          "One request: prefixwise request <id>")
     return 0
 
 
@@ -898,7 +900,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--detail", action="store_true", help="also print totals and the per-group table")
     p.add_argument("--session", metavar="ID",
                    help="one session turn by turn: hit rate per turn, the cause, and the block where the prompt "
-                        "first changed (system[0], tools[2], messages[5]); `latest` for the most recent session")
+                        "first changed, as role[position in the whole prompt] (tools[0], messages[9]); `latest` for the most "
+                        "recent session")
     p.add_argument("--share", action="store_true",
                    help="a short block to paste into a chat or a thread: counts, dollars, the top cause and its fix; no text")
     p.add_argument("--prices", metavar="FILE", help="also load this rates file (default: $PREFIXWISE_PRICES)")
