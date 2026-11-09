@@ -562,7 +562,8 @@ def cmd_check(args) -> int:
         ledger = os.path.join(tmp.name, "check.db")
     watch = check.VolatileWatch()
     try:
-        proxy = PrefixwiseProxy(ledger_path=ledger, mock=True, upstreams=None, otel="")
+        # fixes=(): the gate judges the agent as it is, whatever PREFIXWISE_FIXES says in this shell
+        proxy = PrefixwiseProxy(ledger_path=ledger, mock=True, upstreams=None, otel="", fixes=())
     except ValueError as exc:
         print(f"prefixwise: {exc}", file=sys.stderr)
         return 2
@@ -857,9 +858,9 @@ def build_parser() -> argparse.ArgumentParser:
                         "(anyone who reaches the port can spend the key)")
     p.add_argument("--fix", action="append", metavar="NAME",
                    help="apply a fix to every request before forwarding (repeatable). "
-                        "Available: canonical_tools (proven), auto_breakpoints (opt-in, Anthropic). Default: $PREFIXWISE_FIXES or none")
+                        "Available: canonical_tools, auto_breakpoints (Anthropic); both proven. Default: $PREFIXWISE_FIXES or none")
     p.add_argument("--optimize", action="store_true",
-                   help="apply every proven fix (today: canonical_tools), plus any --fix named")
+                   help="apply every proven fix (today: canonical_tools and, on Anthropic, auto_breakpoints), plus any --fix named")
     p.add_argument("--collector", metavar="URL",
                    help="send turn records to a `prefixwise collect` server (http://...) or to the record log it "
                         "reads (redis://...) instead of keeping a ledger here (default: $PREFIXWISE_COLLECTOR; "
@@ -936,8 +937,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--full-attention", action="store_true", default=None,
                    help="SGLang: the model has no sliding-window or Mamba layers (lets its KV events rule an eviction out)")
     p.add_argument("--fix", action="append", metavar="NAME",
-                   help="apply a fix (repeatable): canonical_tools (proven), auto_breakpoints (opt-in, Anthropic)")
-    p.add_argument("--optimize", action="store_true", help="apply every proven fix (today: canonical_tools)")
+                   help="apply a fix (repeatable): canonical_tools, auto_breakpoints (Anthropic); both proven")
+    p.add_argument("--optimize", action="store_true", help="apply every proven fix (today: canonical_tools and, on Anthropic, auto_breakpoints)")
     ledger_opt(p)
     p.add_argument("--otel", action="store_const", const="genai", default=None,
                    help="export a span per request over OpenTelemetry (OTLP, configured by OTEL_* variables; "

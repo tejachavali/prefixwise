@@ -20,7 +20,7 @@ Only rewrites that cannot change what the prompt means are toggles:
   tools + system within the cache TTL (the session's own previous turn,
   or another session's), the prefix is above the model's minimum, and the
   client set no marker of its own (a client's markers are never moved).
-  Opt-in, not in --optimize until an E4 run shows the writes pay.
+  Proven on Anthropic (E4 live 2026-11-09), so --optimize turns it on.
 
 `--optimize` turns on PROVEN_FIXES, the set with an E4 run behind it, and
 any --fix the user names on top.
@@ -41,7 +41,7 @@ from __future__ import annotations
 import json
 
 AVAILABLE_FIXES = ("canonical_tools", "auto_breakpoints")
-PROVEN_FIXES = ("canonical_tools",)  # what --optimize turns on; a fix joins after an E4 run (FIX_STATUS)
+PROVEN_FIXES = ("canonical_tools", "auto_breakpoints")  # what --optimize turns on; a fix joins after an E4 run (FIX_STATUS)
 OPTIMIZE = "optimize"  # the name --optimize stands for in a fix list
 
 # Evidence per fix. Change only with a committed E4 run behind it.
@@ -53,11 +53,11 @@ FIX_STATUS = {
                     "experiments/e4/runs/2026-11-06-live.md",
     },
     "auto_breakpoints": {
-        "status": "opt-in",
-        "evidence": "No E4 run yet. Places up to three ephemeral cache_control markers on an Anthropic request "
-                    "that carries none, only when this proxy saw the same tools and system prompt within the "
-                    "cache TTL; the rows it rewrote show whether the writes were read back "
-                    "(prefixwise fixes, 'Already active').",
+        "status": "proven",
+        "evidence": "E4 live 2026-11-09 on Anthropic (Haiku 5.5), a client with no cache_control: 106.8% of "
+                    "predicted savings realised, prompt-side cost down 85.6% with the write surcharge included, "
+                    "task success flat (59/60 off, 60/60 on), no marker rejected. Multi-turn sessions; one model. "
+                    "experiments/e4/runs/2026-11-09-auto-breakpoints-live.md",
     },
 }
 
