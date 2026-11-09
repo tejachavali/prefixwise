@@ -562,7 +562,8 @@ def cmd_check(args) -> int:
         ledger = os.path.join(tmp.name, "check.db")
     watch = check.VolatileWatch()
     try:
-        proxy = PrefixwiseProxy(ledger_path=ledger, mock=True, upstreams=None, otel="")
+        # fixes=(): the gate judges the agent as it is, whatever PREFIXWISE_FIXES says in this shell
+        proxy = PrefixwiseProxy(ledger_path=ledger, mock=True, upstreams=None, otel="", fixes=())
     except ValueError as exc:
         print(f"prefixwise: {exc}", file=sys.stderr)
         return 2

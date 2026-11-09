@@ -170,3 +170,51 @@ def test_fixes_says_whether_the_placed_markers_paid(tmp_path, capsys):
     q.handle("anthropic", _turn(0))
     q.handle("anthropic", _turn(1))
     assert breakpoints_paid(q.ledger)["paid"] is False
+
+
+def test_a_rejection_that_does_not_name_the_field_still_resends_the_clients_request():
+    """A gateway may answer only "extra inputs are not permitted". Prefixwise changed the request, so
+    it resends it as the client sent it; the markers count as refused because the resend worked."""
+    p = PrefixwiseProxy(mock=True, fixes=["auto_breakpoints"])
+    real, sent = p._forward, []
+
+    def fake(provider, body, *a, **k):
+        sent.append(body)
+        if _marked(body):
+            return 400, {"error": {"message": "Extra inputs are not permitted"}}
+        return real(provider, body, *a, **k)
+
+    p._forward = fake
+    p.handle("anthropic", _turn(0))
+    for n in (1, 2):
+        r, e = p.handle("anthropic", _turn(n))
+        assert r["status"] == 200 and e.fixes is None and _marked(sent[-2]) and not _marked(sent[-1])
+    assert ("anthropic", "auto_breakpoints") in p.rejected_fields
+
+
+def test_a_request_that_fails_with_and_without_markers_is_not_held_against_the_markers():
+    p = PrefixwiseProxy(mock=True, fixes=["auto_breakpoints"])
+    real = p._forward
+    p.handle("anthropic", _turn(0))
+    p._forward = lambda *a, **k: (400, {"error": {"message": "max_tokens is required"}})
+    for n in (1, 2, 3):
+        assert p.handle("anthropic", _turn(n))[0]["status"] == 400  # the client's own error, passed on
+    assert ("anthropic", "auto_breakpoints") not in p.rejected_fields
+    p._forward = real
+    assert p.handle("anthropic", _turn(4))[1].fixes == "auto_breakpoints"  # still placed
+
+
+def test_no_markers_for_a_self_hosted_engine_or_under_the_middleware():
+    """cache_control is Anthropic's; a vLLM or SGLang behind /v1/messages caches prefixes itself."""
+    p = PrefixwiseProxy(mock=True, fixes=["optimize"], engine="vllm")
+    for n in range(3):
+        r, e = p.handle("anthropic", _turn(n))
+        assert e.fixes is None and r["fixes_applied"] == []
+
+
+def test_check_ignores_fixes_from_the_environment(monkeypatch, tmp_path):
+    """A CI gate judges the agent as it is: PREFIXWISE_FIXES=optimize in the shell must not hide a finding."""
+    import inspect
+
+    import prefixwise.cli as cli
+    assert "fixes=()" in inspect.getsource(cli.cmd_check)

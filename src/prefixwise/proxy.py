@@ -927,7 +927,10 @@ class PrefixwiseProxy:
         facts = body_facts(provider, forward_body, model=str(body.get("model", "")), credential=credential)
         sent = time.time()
         unmarked = None
+        # Anthropic's own cache only: a self-hosted engine caches prefixes by itself and may refuse the
+        # field (and the in-process middleware has no resend to fall back on).
         if ("auto_breakpoints" in self.fixes and provider == "anthropic" and facts.prefix_key_masked
+                and self.engine_for(provider) is None
                 and (provider, "auto_breakpoints") not in self.rejected_fields):
             # A write pays only when read: place markers only when this edge saw the same tools and
             # system prompt (this session's previous turn, or another session's) within the cache TTL.
@@ -1153,6 +1156,8 @@ class PrefixwiseProxy:
             status, payload = self._forward(provider, ctx["forward_body"], ctx["request_id"],
                                             ctx["upstream_session_id"] or ctx["session_id"],
                                             ctx["headers"], api=api)
+            if status < 400:
+                self._markers_were_refused(ctx)
         self.response_started(ctx)
         ctx["upstream_ms"] = (time.perf_counter() - sent) * 1000
         upstream_headers = getattr(self._upstream, "headers", {}) or {}
@@ -1315,8 +1320,13 @@ class PrefixwiseProxy:
         if status not in (400, 422) or not (injected or ctx.get("unmarked_body") is not None):
             return False
         text = (payload if isinstance(payload, str) else json.dumps(payload)).lower()
-        if ctx.get("unmarked_body") is not None and "cache_control" in text:
-            # the markers sit inside blocks, so they are undone as a whole: the client's body as it was
+        undone = False
+        if ctx.get("unmarked_body") is not None:
+            # Any rejection of a request that carries placed markers: resend it as the client sent it,
+            # whether or not the error names cache_control (a gateway may say only "extra inputs are not
+            # permitted"). The markers sit inside blocks, so they are undone as a whole. Whether they
+            # were the reason is known only when the resend succeeds (_markers_were_refused).
+            undone = ctx["marker_retry"] = True
             ctx["forward_body"], ctx["unmarked_body"] = ctx["unmarked_body"], None
             ctx["fixes_applied"] = [f for f in ctx.get("fixes_applied") or [] if f != "auto_breakpoints"]
             old = ctx["facts"]
@@ -1325,21 +1335,8 @@ class PrefixwiseProxy:
                          "volatile_shared_wrote", "volatile_shared_kind"):
                 setattr(facts, name, getattr(old, name))
             ctx["facts"] = facts
-            key = (ctx["provider"], "auto_breakpoints")
-            with self._lock:
-                self._rejections[key] = n = self._rejections.get(key, 0) + 1
-                if n >= 2:
-                    self.rejected_fields.add(key)
-            if n == 2:
-                print(f"prefixwise: the {ctx['provider']} upstream rejects the cache_control markers "
-                      "auto_breakpoints adds; requests are resent without them, and they are no longer added",
-                      file=sys.stderr)
-            return True
-        if not injected:
-            return False
+        # fields Prefixwise added that the error names go in the same pass: there is one resend
         rejected = [f for f in injected if any(name in text for name in (f, *_INNER_KEYS.get(f, ())))]
-        if not rejected:
-            return False
         for field in rejected:
             original = injected.pop(field)
             if original is _MISSING:
@@ -1357,7 +1354,22 @@ class PrefixwiseProxy:
             if field in ("session_id", "vllm_xargs") and self.engine_events is not None:
                 self.engine_events.discard(ctx.get("engine_token"))
                 ctx["engine_token"] = None
-        return True
+        return undone or bool(rejected)
+
+    def _markers_were_refused(self, ctx: dict) -> None:
+        """The resend without the placed markers went through, so the markers were what the upstream
+        refused: count it, and after the second stop placing them for this provider."""
+        if not ctx.pop("marker_retry", False):
+            return
+        key = (ctx["provider"], "auto_breakpoints")
+        with self._lock:
+            self._rejections[key] = n = self._rejections.get(key, 0) + 1
+            if n >= 2:
+                self.rejected_fields.add(key)
+        if n == 2:
+            print(f"prefixwise: the {ctx['provider']} upstream rejects the cache_control markers "
+                  "auto_breakpoints adds; requests are resent without them, and they are no longer added",
+                  file=sys.stderr)
 
     @staticmethod
     def _http_error(exc: urllib.error.HTTPError) -> tuple[int, dict]:
@@ -1417,6 +1429,8 @@ class PrefixwiseProxy:
                 resp = urllib.request.urlopen(req, timeout=UPSTREAM_TIMEOUT)
                 ctx["upstream_headers"] = relay_headers(resp.headers)
                 self.response_started(ctx)
+                if attempt == 2:
+                    self._markers_were_refused(ctx)
                 break
             except urllib.error.HTTPError as exc:
                 ctx["upstream_headers"] = relay_headers(exc.headers)

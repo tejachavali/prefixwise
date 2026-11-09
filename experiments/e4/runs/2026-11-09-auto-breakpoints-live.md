@@ -34,8 +34,9 @@ Markers rejected by the provider: no
   sessions 2 to 6 also reads the tools and system prompt that session 1 wrote.
 - **The bill: prompt-side cost down 85.6%, surcharge included.** By hand from Haiku 5.5's rates ($0.10
   input, $0.01 read, $0.125 five-minute write per million): OFF is 226,115 tokens at the input rate,
-  $0.0226; ON is 216,533 read, 5,716 written and 3,866 uncached, $0.0033. One write of the whole prompt on
-  session 1's second turn, then about 35 tokens written per turn.
+  $0.0226; ON is 216,533 read, 5,716 written and 3,866 uncached, $0.0033. The report gives only the total
+  written; it is consistent with one write of a whole prompt (about 3,770 tokens) on session 1's second turn
+  and about 35 tokens per turn after, which is an inference, since the per-request rows were not kept.
 - **Tool choices: unchanged or better.** 59 of 60 right without the fix, 60 of 60 with it. One turn's
   difference is chance, not an effect of the markers: they do not change what the model reads.
 - **No request rejected for its markers**; the one request not rewritten is the arm's first, when the
@@ -48,7 +49,8 @@ Markers rejected by the provider: no
   turns seconds apart. A client whose turns come more than five minutes apart pays the write and reads
   nothing; the proxy's guard (the same prefix seen within the cache TTL) is what keeps markers off it,
   and that guard is pinned by unit tests, not by this run.
-- Scripted sessions, not an agent's own traffic.
+- Scripted sessions, not an agent's own traffic. Anthropic's own API: the resend when an upstream rejects
+  the markers was not exercised (none was rejected), and is pinned by unit tests.
 - The per-request rows (`.json`) and the log stayed in the Colab runtime.
 
 ## What follows
