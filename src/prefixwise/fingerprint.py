@@ -59,24 +59,51 @@ DEFAULT_SHORT_BLOCK_CHARS = 256
 # was ~80% of the proxy's per-request CPU on long prompts. Bounded LRU.
 MASK_CACHE_ENTRIES = 32768
 
-_DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)?")
-_TIME_RE = re.compile(r"\b\d{1,2}:\d{2}(?::\d{2})?(?:\s*[AP]M)?\b", re.IGNORECASE)
+# Volatile values, masked for the `masked` hash. Dates in any common form (ISO, slash, dotted, "Nov 9,
+# 2026", "09 Nov 2026", RFC 2822 with a weekday), with or without a time and a zone, all become one
+# <DATE>, so a timestamp whose *format* or precision changes between turns still reads as the same
+# prompt with a volatile value in it (volatile_system, which has a fix) and not as an edit (reported on
+# Reddit, Nov 2026: a timestamp normalised to another format was `system_edit`, with no fix shown).
+_MONTH = r"(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)[a-z]*\.?"
+_WEEKDAY = r"(?:Mon|Tue|Tues|Wed|Thu|Thur|Thurs|Fri|Sat|Sun)[a-z]*,?\s+"
+_CLOCK = r"\d{1,2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:\s*[AP]M)?"
+_TZ = r"(?:\s*(?-i:Z|UTC|GMT|[ECMP][SD]T|[+-]\d{2}:?\d{2}))?(?![A-Za-z])"
+_DATE_RE = re.compile(
+    rf"(?:{_WEEKDAY})?(?:"
+    rf"\d{{4}}[-/.]\d{{1,2}}[-/.]\d{{1,2}}"                     # 2026-11-09, 2026/11/09, 2026.11.09
+    rf"|\d{{1,2}}[-/.]\d{{1,2}}[-/.]\d{{2,4}}"                  # 09/11/2026, 11-09-26
+    rf"|{_MONTH}\s+\d{{1,2}}(?:st|nd|rd|th)?,?\s+\d{{4}}"       # Nov 9, 2026
+    rf"|\d{{1,2}}(?:st|nd|rd|th)?\s+{_MONTH},?\s+\d{{4}}"       # 09 Nov 2026
+    rf")(?:(?:[T ]|,\s*|\s+at\s+)?{_CLOCK})?{_TZ}", re.IGNORECASE)
+_TIME_RE = re.compile(rf"\b{_CLOCK}{_TZ}", re.IGNORECASE)
 _UUID_RE = re.compile(r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b")
 _HEX_ID_RE = re.compile(r"\b[0-9a-fA-F]{16,}\b")
+# Absolute paths (two or more segments; a URL's path is not one, since it follows a letter or a slash):
+# the working directory an agent writes into its system prompt changes per checkout and per machine.
+_PATH_RE = re.compile(r"(?<![\w.:/\\])(?:~|/)[\w.@+%-]+(?:/[\w.@+%-]*)+|\b[A-Za-z]:\\[^\s\"'<>|,;]+")
 _NUMBER_RE = re.compile(r"\b\d+(?:\.\d+)?\b")
 _TOKEN_WITH_DIGIT_RE = re.compile(r"\b\w*\d\w*\b")
 
+# (pattern, placeholder, kind): applied in this order. The kind is what the classifier names.
+_MASKS = ((_DATE_RE, "<DATE>", "date"), (_TIME_RE, "<TIME>", "time"), (_UUID_RE, "<ID>", "id"),
+          (_HEX_ID_RE, "<ID>", "id"), (_PATH_RE, "<PATH>", "path"), (_NUMBER_RE, "<N>", "number"),
+          (_TOKEN_WITH_DIGIT_RE, "<ID>", "id"))  # abc123 / session-42 are ids, not stable words
+
+
+def mask_volatiles_kinds(text: str) -> tuple[str, tuple[str, ...]]:
+    """(the text with volatile values replaced by placeholders, the kinds of value found, in order:
+    date, time, id, path, number). The kinds are the only thing kept about the values."""
+    kinds: list[str] = []
+    for pattern, token, kind in _MASKS:
+        text, n = pattern.subn(token, text)
+        if n and kind not in kinds:
+            kinds.append(kind)
+    return text, tuple(kinds)
+
 
 def mask_volatiles(text: str) -> str:
-    """Replace volatile values (dates, times, ids, numbers) with placeholders."""
-    text = _DATE_RE.sub("<DATE>", text)
-    text = _TIME_RE.sub("<TIME>", text)
-    text = _UUID_RE.sub("<ID>", text)
-    text = _HEX_ID_RE.sub("<ID>", text)
-    text = _NUMBER_RE.sub("<N>", text)
-    # Tokens like abc123 / session-42 are ids, not stable words.
-    text = _TOKEN_WITH_DIGIT_RE.sub("<ID>", text)
-    return text
+    """Replace volatile values (dates, times, ids, paths, numbers) with placeholders."""
+    return mask_volatiles_kinds(text)[0]
 
 
 def canonical_bytes(value: object) -> bytes:
@@ -109,6 +136,9 @@ class BlockFingerprint:
     masked: str
     byte_length: int
     hmac: bool = False
+    # Kinds of volatile value the block carries ("date", "time", "id", "path", "number"), from the
+    # masking; never the values. Lets a volatile_system verdict say what to move or drop.
+    volatile: list[str] = field(default_factory=list)
     # First-divergence position in tokens is filled by the caller when a
     # tokenizer is available; None means "not measured", never a guess.
     token_estimate: int | None = None
@@ -123,19 +153,21 @@ class Fingerprinter:
     _masked_cache: OrderedDict = field(default_factory=OrderedDict, repr=False, compare=False)
     _cache_lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
 
-    def _masked_hash(self, canon: bytes, canon_hash: str, key: bytes | None) -> str:
+    def _masked_hash(self, canon: bytes, canon_hash: str, key: bytes | None) -> tuple[str, tuple[str, ...]]:
+        """(masked hash, kinds of volatile value found)."""
         # canon_hash already depends on key, so it is a safe cache key for either mode.
         with self._cache_lock:
             hit = self._masked_cache.get(canon_hash)
             if hit is not None:
                 self._masked_cache.move_to_end(canon_hash)
                 return hit
-        masked = _hash(mask_volatiles(canon.decode("utf-8", "replace")).encode("utf-8"), key)
+        text, kinds = mask_volatiles_kinds(canon.decode("utf-8", "replace"))
+        entry = (_hash(text.encode("utf-8"), key), kinds)
         with self._cache_lock:
-            self._masked_cache[canon_hash] = masked
+            self._masked_cache[canon_hash] = entry
             if len(self._masked_cache) > MASK_CACHE_ENTRIES:
                 self._masked_cache.popitem(last=False)
-        return masked
+        return entry
 
     def _is_short(self, raw: bytes) -> bool:
         return len(raw) <= self.short_block_chars
@@ -153,10 +185,11 @@ class Fingerprinter:
         # HMAC replaces bare hashing for short/predictable blocks entirely.
         key = self.hmac_key if self._is_short(raw) else None
         canon_hash = _hash(canon, key)
+        masked, kinds = self._masked_hash(canon, canon_hash, key)
         return BlockFingerprint(
             role=role, index=index,
-            raw=_hash(raw, key), canonical=canon_hash, masked=self._masked_hash(canon, canon_hash, key),
-            byte_length=len(raw), hmac=bool(key),
+            raw=_hash(raw, key), canonical=canon_hash, masked=masked,
+            byte_length=len(raw), hmac=bool(key), volatile=list(kinds),
         )
 
     def fingerprint_blocks(self, blocks: list[tuple[str, object]]) -> list[BlockFingerprint]:

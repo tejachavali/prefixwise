@@ -28,7 +28,7 @@ Three hashes per block, in prefix order. Order is per provider, not universal: A
 
 - `raw`: exact bytes as sent. TOOL_RESERIALIZE is defined as canonical-equal, raw-different, so without raw it cannot be seen.
 - `canonical`: sorted keys, fixed separators, NFC unicode.
-- `masked`: canonical bytes with volatile values masked (dates, times, ids, numbers). A system block whose raw hash changed but whose masked hash is equal is VOLATILE_SYSTEM, not SYSTEM_EDIT.
+- `masked`: canonical bytes with volatile values masked (dates and timestamps in any common format, times, ids, absolute file paths, numbers). A system block whose raw hash changed but whose masked hash is equal is VOLATILE_SYSTEM, not SYSTEM_EDIT; the block also carries the *kinds* of volatile value it holds (never the values), which the verdict names.
 
 Hashes are stored, never raw prompts, by default. A bare SHA-256 of a short or predictable block is dictionary-guessable, so when an HMAC key is supplied, every hash of a short block is an HMAC with the per-install key, replacing bare SHA-256 entirely for that block. The short-block threshold (default 64 tokens, approximate) is a policy choice, not a verified fact. Soft tokens are fingerprinted by type and count only, never hashed as text.
 

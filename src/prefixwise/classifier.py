@@ -264,6 +264,25 @@ def _stable_uncached_tail(prev: RequestSnapshot, curr: RequestSnapshot, secondar
     return held, shared, tail
 
 
+_VOLATILE_NAMES = {"date": "a date or timestamp", "time": "a time", "id": "an id", "path": "a file path",
+                   "number": "a number"}
+
+
+def _volatile_kinds(prev_blocks: list, curr_blocks: list) -> str:
+    """What the changed system blocks carry (dates, ids, paths...), from the fingerprints' kinds: the
+    candidates for what changed, since the values themselves are never kept. '' on older records."""
+    kinds: list[str] = []
+    for b in list(prev_blocks) + list(curr_blocks):
+        for k in getattr(b, "volatile", ()) or ():
+            if k in _VOLATILE_NAMES and k not in kinds:
+                kinds.append(k)
+    if not kinds:
+        return ""
+    names = [_VOLATILE_NAMES[k] for k in kinds]
+    joined = names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]
+    return f" (the system prompt carries {joined}: move it to the end of the prompt, or drop it)"
+
+
 def _first_change(prev: RequestSnapshot, curr: RequestSnapshot, secondary: list,
                   native_reason: str | None) -> Classification | None:
     """The cause named by the first part of the prompt that changed, or None if none did
@@ -281,8 +300,8 @@ def _first_change(prev: RequestSnapshot, curr: RequestSnapshot, secondary: list,
         if role in ("system", "system_dynamic"):
             if [b.masked for b in p] == [b.masked for b in c]:
                 return Classification(MissCause.VOLATILE_SYSTEM, False,
-                                      "system raw hash changed, masked hash equal (dates/ids/numbers only)",
-                                      secondary, native_reason)
+                                      "system raw hash changed, masked hash equal: only volatile values differ"
+                                      + _volatile_kinds(p, c), secondary, native_reason)
             return Classification(MissCause.SYSTEM_EDIT, None,
                                   "system masked hash changed", secondary, native_reason)
         if role == "tools":

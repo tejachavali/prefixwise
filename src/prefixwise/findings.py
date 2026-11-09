@@ -20,7 +20,7 @@ CAUSE_PLAIN = {
     "none": "served from cache",
     "first_write": "first request of a session: nothing to reuse yet",
     "model_switch": "switched model: each model has its own cache",
-    "volatile_system": "the system prompt changed only in a date, time or id",
+    "volatile_system": "the system prompt changed only in a date, time, id or file path",
     "system_edit": "the system prompt was edited",
     "tool_reserialize": "the same tools were sent in a different order or format",
     "tool_catalog_change": "tools were added or removed",

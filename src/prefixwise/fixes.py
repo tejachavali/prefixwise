@@ -90,8 +90,8 @@ FIX_ADVICE: dict[str, dict] = {
                          "fix": "Send tools in a fixed order with deterministic serialization "
                                 "(or let the proxy do it: prefixwise serve --fix canonical_tools)."},
     "volatile_system": {"toggle": None,
-                        "fix": "Move dates, times and ids out of the system prompt, to the end of the "
-                               "prompt or the latest user message."},
+                        "fix": "Move dates, times, ids and paths (the working directory) out of the system "
+                               "prompt, to the end of the prompt or the latest user message, in one fixed format."},
     "tool_result_mutation": {"toggle": None,
                              "fix": "Store each tool result once, exactly as first sent; never re-render it."},
     "history_edit": {"toggle": None,
