@@ -168,7 +168,7 @@ def cmd_fixes(args) -> int:
               f"{paid['requests']} requests and read {_fmt_int(paid['read_tokens'])} back: {verdict} "
               f"(reads saved {_fmt_int(paid['read_saving_token_equivalents'])} input-token equivalents against a "
               f"write surcharge of {_fmt_int(paid['write_surcharge_token_equivalents'])}; a model: 5-minute write "
-              "1.25x, 1-hour write 2x, read 0.1x)")
+              "1.25x, read 0.1x, over the requests it rewrote)")
     return 0
 
 

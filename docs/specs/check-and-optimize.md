@@ -159,10 +159,10 @@ four characters each; an over-count only places a marker Anthropic ignores at no
 inside blocks, so a provider 400 that names `cache_control` resends the client's body as it was
 (not the field-by-field undo the injected ids use) and, on the second such 400, stops placing
 them. `prefixwise fixes` lists the rows it rewrote under "Already active" and says whether the markers
-paid: over those rows (the client set no marker, so every write and read on them came through the
-placed ones), tokens written against tokens read back, the reads' saving (0.9 per token) against the
-writes' surcharge (0.25 per token for 5 minutes, 1.0 for 1 hour), a model from Anthropic's multipliers,
-not a bill. Not in `--optimize`: no E4 run.
+paid: over those rows, the writes the placed markers caused against the reads they enabled (Anthropic
+serves no read without a marker), the reads' saving (0.9 per token) against the writes' surcharge (0.25
+per token; the placed markers are 5-minute ones), a model from Anthropic's multipliers, not a bill. Reads
+of entries another client's own markers wrote count, and reads of these writes by such a client do not. Not in `--optimize`: no E4 run.
 
 ### 2.3 Volatile values in the system prompt: warn by default
 
