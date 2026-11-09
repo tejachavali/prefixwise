@@ -62,6 +62,7 @@ FIX_STATUS = {
 }
 
 MARKER = {"type": "ephemeral"}
+_THINKING = ("thinking", "redacted_thinking")  # Anthropic rejects cache_control on these
 LOOKBACK_BLOCKS = 20  # Anthropic checks this many blocks before each marker for an earlier entry
 _CHARS_PER_TOKEN = 4  # a generous estimate: an over-count places a marker below the minimum, which Anthropic ignores at no cost
 
@@ -72,8 +73,11 @@ def _with_marker(block) -> dict:
 
 
 def _mark_last(content):
-    """A message's content with a marker on its last block (a string becomes one text block)."""
+    """A message's content with a marker on its last block (a string becomes one text block); None
+    when the last block is a thinking block, which cannot carry one."""
     if isinstance(content, list) and content:
+        if isinstance(content[-1], dict) and content[-1].get("type") in _THINKING:
+            return None
         return content[:-1] + [_with_marker(content[-1])]
     if isinstance(content, str) and content:
         return [_with_marker(content)]

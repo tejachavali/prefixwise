@@ -78,10 +78,27 @@ def test_proxy_places_markers_only_once_the_prefix_was_seen_within_the_ttl():
         assert r["cause"] == "first_write" and e.fixes is None
     r, e = off.handle("anthropic", _turn(1))
     assert r["cause"] == "breakpoint_misplaced" and e.fixes is None
-    r, e = on.handle("anthropic", _turn(1))
-    assert r["cause"] == "none" and e.fixes == "auto_breakpoints" and r["fixes_applied"] == ["auto_breakpoints"]
+    r, e = on.handle("anthropic", _turn(1))  # the first marked turn writes: the unmarked turn before it cached nothing
+    assert r["cause"] == "first_write" and e.fixes == "auto_breakpoints" and r["fixes_applied"] == ["auto_breakpoints"]
+    assert r["response"]["usage"]["cache_creation_input_tokens"] > 0 and e.cached_tokens == 0
     r, e = on.handle("anthropic", _turn(2))
     assert r["cause"] == "none" and e.cached_tokens > 0
+
+
+def test_proxy_leaves_a_prefix_alone_that_matches_only_with_its_timestamp_masked():
+    """A system prompt rewritten every turn (a clock in it) is seen every turn under its masked key,
+    but a marker on it would buy a write nobody reads: no markers, and the cause stays volatile_system."""
+    p = PrefixwiseProxy(mock=True, fixes=["auto_breakpoints"])
+    for n in range(3):
+        r, e = p.handle("anthropic", _turn(n, system=BIG + f" now 2026-11-09T19:0{n}:00Z"))
+        assert e.fixes is None
+    assert r["cause"] == "volatile_system"
+
+
+def test_no_marker_on_a_thinking_block():
+    msgs = [{"role": "user", "content": "q"}, {"role": "assistant", "content": [{"type": "thinking", "thinking": "t", "signature": "s"}]}]
+    out = auto_breakpoints({"system": BIG, "messages": msgs})
+    assert _marked(out["system"]) and not _marked(out["messages"])
 
 
 def test_proxy_places_markers_for_a_new_session_whose_prefix_another_session_wrote():
@@ -118,7 +135,7 @@ def test_a_400_about_cache_control_resends_the_clients_request_and_stops_after_t
         r, e = p.handle("anthropic", _turn(n))
         assert r["status"] == 200 and e is not None and e.fixes is None and r["fixes_applied"] == []
         assert _marked(sent[-2]) and not _marked(sent[-1]) and sent[-1]["messages"] == _turn(n)["messages"]
-        assert len(e.__dict__) and e.cause in ("breakpoint_misplaced", "first_write")
+        assert e.cause == "breakpoint_misplaced"  # the record says what the provider received: no marker
     assert ("anthropic", "auto_breakpoints") in p.rejected_fields
     r, e = p.handle("anthropic", _turn(3))
     assert not _marked(sent[-1]) and r["fixes_applied"] == []  # no third try

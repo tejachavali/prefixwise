@@ -472,6 +472,13 @@ def classify(prev: RequestSnapshot | None, curr: RequestSnapshot,
                               "append-only turn; cache_read at least half of the prior prefix",
                               secondary, native_reason)
 
+    # Anthropic writes only at a breakpoint: a previous turn without one left nothing to read,
+    # so a zero read on the first turn that carries one is the first write, not a miss.
+    if curr.provider == "anthropic" and curr.has_breakpoint and not prev.has_breakpoint and curr.cached_tokens == 0:
+        return Classification(MissCause.FIRST_WRITE, True,
+                              "the previous turn carried no cache_control, so nothing was written for this turn "
+                              "to read; this turn's write is the first", secondary, native_reason)
+
     # From here the prefix was reusable but cache_read was low.
     # Engine eviction events are direct evidence; they outrank inference.
     if curr.evicted_blocks:

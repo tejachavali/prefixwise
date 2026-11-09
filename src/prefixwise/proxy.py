@@ -934,7 +934,9 @@ class PrefixwiseProxy:
             with self._lock:
                 seen = self.prefix_seen.get(facts.prefix_key_masked)
             ttl = cache_ttl_seconds(provider, body, headers) or MIN_PROVIDER_TTL_SECONDS
-            if seen is not None and sent - seen[0] <= ttl:
+            # the same bytes, not a prefix that matches only with its timestamp masked: that one is
+            # rewritten every turn, and a marker on it would buy a write nobody reads
+            if seen is not None and sent - seen[0] <= ttl and seen[2] == facts.prefix_key_canonical:
                 marked = auto_breakpoints(forward_body, anthropic_min_prefix(facts.model))
                 if marked is not None:
                     unmarked, forward_body = forward_body, marked
@@ -1038,7 +1040,8 @@ class PrefixwiseProxy:
             previous_response_id=(str(body["previous_response_id"]) if ctx.get("api") == "responses"
                                   and body.get("previous_response_id") else None),
             blocks=fps, params={k: param_fingerprint(body.get(k)) for k in PARAM_KEYS if body.get(k) is not None},
-            has_breakpoint=has_cache_breakpoint(body), ttl_seconds=ctx.get("ttl_seconds"), facts=facts,
+            # the request the provider received: with auto_breakpoints on, the markers Prefixwise placed
+            has_breakpoint=has_cache_breakpoint(ctx.get("forward_body") or body), ttl_seconds=ctx.get("ttl_seconds"), facts=facts,
             fixes_applied=list(ctx.get("fixes_applied") or []),
             sent_at=ctx.get("span_start") or ctx.get("sent_at") or facts.done_at,
             engine=self.engine_for(provider), engine_caches=self.engine_caches, engine_verdict=verdict,
@@ -1186,8 +1189,8 @@ class PrefixwiseProxy:
         if provider == "anthropic":  # as Anthropic bills: nothing without cache_control; a first write
             if not markers:
                 cached = 0
-            elif not cached:
-                write = 2000
+            elif not cached or not getattr(prev, "has_breakpoint", True):  # the previous turn wrote nothing
+                cached, write = 0, 2000
         call = None
         if self.mock_tool_calls and body is not None:
             # One tool call at a time: a turn that follows a tool call gets text, however the agent
