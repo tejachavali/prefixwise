@@ -9,9 +9,12 @@ turn, through the real Prefixwise proxy (in-process, like E-evict), with the eng
   prev_prompt       the previous turn's prompt: the prefix any cache can serve
   prev_full         previous prompt + the previous output: what an engine that caches decoded
                     blocks (vLLM, SGLang) could serve if the template re-rendered nothing
-  reuse             "full" (cached >= prev_full - a block), "prompt" (the previous output was
-                    re-rendered: cached ~ prev_prompt), "break" (cached < prev_prompt - a block: a
-                    prefix break, the condition behind Prefixwise's "not an eviction"), "cold"
+  reuse             "full" (cached >= prev_full - slack), "prompt" (the previous output was
+                    re-rendered: cached ~ prev_prompt), "break" (cached < prev_prompt - slack: a
+                    prefix break, the condition behind Prefixwise's "not an eviction"), "cold";
+                    slack = one block plus 8 tokens: block rounding, and Qwen3's 4-token think stub
+                    (`<think>\n\n</think>\n\n`) that the generation prompt carries only while
+                    thinking is off, so a toggle moves the prefix end by 4 tokens, not a re-render
   verdict           Prefixwise's cause / detail / evidence for the turn
 
 Variants (each a session of --turns turns against the same engine):
@@ -25,7 +28,13 @@ Qwen3's template drops the <think> block of earlier assistant turns and re-rende
 at a shifted position (measured on CPU, 2026-11-09: the shared prefix with the previous turn's
 prompt+output is exactly the previous prompt), so the prediction is reuse = "prompt" on every
 variant but the first turn, never "break": the previous output is re-prefilled every turn, a tail
-cost invisible in Prefixwise's verdicts (a clean `none`) and in cache-hit rates as a share.
+cost invisible in Prefixwise's verdicts (a clean `none`) and in cache-hit rates as a share. For
+`stripped`, prev_full still counts the think tokens the client deleted, so its "lost tail" is the
+client's choice, not the template's; the CPU mode shows the template alone. Each variant gets its
+own system prompt: the engine's prefix cache is global, and `kept` and `stripped` render the same
+bytes from turn 2 on, so a shared prompt would let one variant serve the other's blocks. Turns the
+model cut off (`finish_reason: length`, an unclosed <think>) are marked `truncated`; max_tokens
+is 1,500 so that is rare.
 
     python experiments/e_template/e_template.py --mock
     python experiments/e_template/e_template.py --engine vllm --url http://127.0.0.1:8000 --model Qwen/Qwen3-4B \\
@@ -72,7 +81,7 @@ def system_text(words: int) -> str:
 
 
 def body(model: str, system: str, msgs: list, variant: str, turn: int) -> dict:
-    b = {"model": model, "messages": [{"role": "system", "content": system}, *msgs], "max_tokens": 400, "temperature": 0}
+    b = {"model": model, "messages": [{"role": "system", "content": system}, *msgs], "max_tokens": 1500, "temperature": 0}
     if variant == "nothink":
         b["chat_template_kwargs"] = {"enable_thinking": False}
     elif variant == "toggle":
@@ -95,12 +104,16 @@ def assistant_message(payload: dict, variant: str) -> dict:
     return out
 
 
+THINK_STUB = 4  # tokens the generation prompt carries only while thinking is off (Qwen3)
+
+
 def classify_reuse(cached: int, prev_prompt: int | None, prev_full: int | None, block: int) -> str:
+    slack = block + THINK_STUB + 4
     if prev_prompt is None:
         return "first"
-    if prev_full is not None and cached >= prev_full - block:
+    if prev_full is not None and cached >= prev_full - slack:
         return "full"
-    if cached >= prev_prompt - block:
+    if cached >= prev_prompt - slack:
         return "prompt"
     if cached > block:
         return "break"
@@ -109,7 +122,7 @@ def classify_reuse(cached: int, prev_prompt: int | None, prev_full: int | None, 
 
 def run_variant(proxy: PrefixwiseProxy, args, variant: str, block: int) -> list[dict]:
     sid = f"template-{variant}-{int(time.time())}"
-    system = system_text(args.system_words)
+    system = f"[{variant}] " + system_text(args.system_words)  # its own prefix: the engine's cache is global
     msgs: list = []
     rows = []
     prev = None  # (prompt, completion)
@@ -128,23 +141,25 @@ def run_variant(proxy: PrefixwiseProxy, args, variant: str, block: int) -> list[
         prev_prompt = prev[0] if prev else None
         prev_full = (prev[0] + prev[1]) if prev else None
         reuse = classify_reuse(cached, prev_prompt, prev_full, block)
+        choice = res["response"]["choices"][0]
+        content = choice["message"].get("content") or ""
+        truncated = choice.get("finish_reason") == "length" or ("<think>" in content and "</think>" not in content)
         row = {"turn": turn + 1, "prompt": prompt, "cached": cached, "completion": completion,
                "prev_prompt": prev_prompt, "prev_full": prev_full, "reuse": reuse,
                "lost_tail": max(0, (prev_full or 0) - cached) if reuse == "prompt" else 0,
                "cause": res["cause"], "detail": getattr(entry, "detail", None),
                "evidence": (res.get("evidence") or "")[:200],
-               "think_in_content": "<think>" in (res["response"]["choices"][0]["message"].get("content") or "")}
+               "think_in_content": "<think>" in content, "finish_reason": choice.get("finish_reason"),
+               "truncated": truncated}
         rows.append(row)
         print(f"{variant:9s} turn {turn + 1}: prompt {prompt} cached {cached} completion {completion} "
               f"prev_prompt {prev_prompt} prev_full {prev_full} -> {reuse:6s} {res['cause']}"
-              + (f" [{row['detail']}]" if row["detail"] else ""), flush=True)
+              + (f" [{row['detail']}]" if row["detail"] else "") + (" TRUNCATED" if truncated else ""), flush=True)
         msg = assistant_message(res["response"], variant)
         msgs.append(msg)
-        if msg.get("tool_calls"):  # answer the call so the loop continues
+        if msg.get("tool_calls"):  # answer the call; the next user question follows the tool result
             for call in msg["tool_calls"]:
                 msgs.append({"role": "tool", "tool_call_id": call["id"], "content": "def main():\n    print('hi')\n"})
-            if turn + 1 < args.turns:  # the next user question follows the tool result
-                pass
         prev = (prompt, completion)
     return rows
 
@@ -247,7 +262,8 @@ def write(result: dict, out_dir: Path) -> Path:
         for name, rows in result["variants"].items():
             for r in rows:
                 tag = f" [{r['detail']}]" if r.get("detail") else ""
-                lines.append(f"| {name} | {r['turn']} | {r['prompt']} | {r['cached']} | {r['completion']} | {r['prev_prompt'] or ''} | "
+                cut = " (truncated)" if r.get("truncated") else ""
+                lines.append(f"| {name} | {r['turn']} | {r['prompt']} | {r['cached']} | {r['completion']}{cut} | {r['prev_prompt'] or ''} | "
                              f"{r['prev_full'] or ''} | {r['reuse']} | {r['lost_tail']} | `{r['cause']}`{tag} |")
         s = result["summary"]
         lines += ["", f"- Turns with a previous turn: {s['eligible']}; reuse full {s['full']}, prompt-only {s['prompt']}, "
@@ -255,7 +271,7 @@ def write(result: dict, out_dir: Path) -> Path:
                   f"- Previous output re-prefilled (lost tail), total: {s['lost_tail_total']:,} tokens "
                   f"({s['lost_tail_share']:.0%} of eligible turns' prompt tokens)",
                   f"- Prefixwise verdicts: " + ", ".join(f"`{k}` x{v}" for k, v in s["verdicts"].items()),
-                  f"- `unknown` (\"not an eviction\") turns: {s['not_an_eviction']}"]
+                  f"- `unknown` (\"not an eviction\") turns: {s['not_an_eviction']}; truncated answers: {s['truncated']}"]
         eng = result.get("engine_check") or {}
         lines += ["", f"Engine check notes: {'; '.join(eng.get('notes') or []) or 'none'}",
                   f"KV-event stream at the end: `{json.dumps(eng.get('events'))}`"]
@@ -306,7 +322,8 @@ def main(argv=None) -> int:
                              "lost_tail_total": sum(r["lost_tail"] for r in eligible),
                              "lost_tail_share": (sum(r["lost_tail"] for r in eligible) / max(1, sum(r["prompt"] for r in eligible))),
                              "verdicts": verdicts,
-                             "not_an_eviction": sum(1 for r in rows if r["cause"] == "unknown" and "not an eviction" in r["evidence"])}
+                             "not_an_eviction": sum(1 for r in rows if r["cause"] == "unknown" and "not an eviction" in r["evidence"]),
+                             "truncated": sum(1 for r in rows if r.get("truncated"))}
         result["engine_check"] = {"notes": proxy.engine_notes,
                                   "events": proxy.engine_events.snapshot() if proxy.engine_events is not None else None}
         if proxy.engine_events is not None:

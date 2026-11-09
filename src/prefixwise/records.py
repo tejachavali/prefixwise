@@ -34,7 +34,9 @@ PARAM_KEYS = ("tool_choice", "thinking", "reasoning", "output_format",
               "extra_key",
               "text_format", "text", "verbosity",
               # self-hosted engines render the prompt through a chat template: its arguments
-              # (enable_thinking on Qwen3) and a per-request template change the rendered prefix
+              # (enable_thinking on Qwen3) and a per-request template change the rendered prompt
+              # (on Qwen3 a 4-token tail; on others possibly the prefix). Compared as a whole: a
+              # client that sends the same kwargs every turn sees no change
               "chat_template_kwargs", "chat_template")
 
 

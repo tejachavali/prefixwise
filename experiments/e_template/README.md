@@ -18,8 +18,12 @@ diffs token ids, naming the clause behind each divergence; no server.
 `<think>` blocks and re-renders their content at a shifted position, so the shared prefix with the
 previous turn's prompt+output is exactly the previous prompt: reuse `prompt` on every turn after
 the first, never `break`. The previous output is re-prefilled every turn (the lost tail), a cost
-that is a clean `none` for Prefixwise and invisible in cache-hit shares. `toggle` is
-`param_rendered` (chat_template_kwargs is a compared parameter since 0.10).
+that is a clean `none` for Prefixwise and invisible in cache-hit shares. `enable_thinking` only
+adds or removes a 4-token stub at the end of the generation prompt (a tail, not a re-render), which
+the reuse classifier's slack absorbs; `toggle` (thinking off on turns 1, 3, 5) is `param_rendered`
+since `chat_template_kwargs` became a compared parameter (0.10), or `none` with it as a secondary
+cause when the cache absorbed it. For `stripped`, "lost tail" counts the think tokens the client
+removed, so it is the client's choice, not the template's; the CPU mode shows the template alone.
 
 ## Run on Colab (L4, Qwen3-4B)
 
