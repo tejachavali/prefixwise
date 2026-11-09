@@ -28,7 +28,8 @@ Configuration, when vLLM instantiates the class with `app` only, comes from the 
   per-rank publisher configs (`app.state.engine_client.get_kv_event_sources()`, what
   `GET /kv_event_sources` serves) and subscribes; `sys.argv`'s `--kv-events-config` is the last
   resort. Needs `pip install "prefixwise[engines]"`.
-- `PREFIXWISE_FIX`: a fix to apply to every request (`canonical_tools`).
+- `PREFIXWISE_FIX`: fixes to apply to every request (`canonical_tools`, or `optimize` for
+  every proven fix); `PREFIXWISE_OPTIMIZE=1` is the same as `optimize`.
 - `PREFIXWISE_COLLECTOR` / `PREFIXWISE_COLLECTOR_TOKEN`: send records to a `prefixwise collect`
   (HTTP) or to the record log (`redis://`) instead of a ledger in this process. **Required with
   `--api-server-count` above 1:** each API-server process gets its own middleware, and a session's
@@ -139,7 +140,10 @@ class PrefixwiseMiddleware:
         ledger = ledger or get("PREFIXWISE_LEDGER", "PREFIXWISE_LEDGER_PATH", default="prefixwise.db")
         self.engine = engine or get("PREFIXWISE_ENGINE") or _default_engine()
         if fixes is None:
-            fixes = [f for f in (get("PREFIXWISE_FIX", "PREFIXWISE_FIXES", default="") or "").split(",") if f.strip()] or None
+            fixes = [f for f in (get("PREFIXWISE_FIX", "PREFIXWISE_FIXES", default="") or "").split(",") if f.strip()]
+            if (get("PREFIXWISE_OPTIMIZE") or "").lower() not in ("", "0", "false", "no", "off"):
+                fixes.append("optimize")
+            fixes = fixes or None
         if full_attention is None and get("PREFIXWISE_FULL_ATTENTION"):
             full_attention = get("PREFIXWISE_FULL_ATTENTION").lower() not in ("0", "false", "no", "off")
         collector_url = collector_url if collector_url is not None else get("PREFIXWISE_COLLECTOR", "PREFIXWISE_LOG")

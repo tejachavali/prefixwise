@@ -29,6 +29,8 @@ RECORD_VERSION = 1
 # Prompt-affecting request parameters the classifier compares (RequestSnapshot.params). A change
 # in one of these re-renders the prompt without changing any block.
 PARAM_KEYS = ("tool_choice", "thinking", "reasoning", "output_format",
+              # Chat Completions structured outputs: the schema is rendered into the prompt
+              "response_format",
               # SGLang leaves extra_key out of its KV-event hashes, so a change must be seen here
               # (cache_salt is in them)
               "extra_key",

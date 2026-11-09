@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- **`prefixwise serve --optimize` and `prefixwise run --optimize`**: every proven fix in one flag (today `canonical_tools`), so a fix that passes its E4 run later joins without a flag change. `--fix NAME` still names one; `optimize` works in `PREFIXWISE_FIXES`, and `PREFIXWISE_OPTIMIZE=1` turns it on for the vLLM middleware. Off by default, as before. The spec's idea of sorting the keys of `response_format` and `tool_choice` too was built and dropped: providers parse those, so wrapper key order never reaches the prompt, and the order that does (a schema's `properties`) must not change.
+- **A changed `response_format` is `param_rendered`.** Chat Completions renders the structured-output schema into the prompt, so a session that changes it mid-way now sees a named cause with its fix instead of an unexplained miss. Records carry one more parameter digest, never the schema.
+
 ## 0.10.4: 2026-11-09
 
 The dollar line is always there, and the result fits in a message. Every current Claude model is priced,

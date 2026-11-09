@@ -1,6 +1,6 @@
 # Specs: `prefixwise check` and `prefixwise serve --optimize`
 
-Status: `prefixwise check` **built** (0.9, 2026-11-08, as amended below); `--optimize` **proposed, not built**. Both keep the core guarantee: the prompt itself is
+Status: `prefixwise check` **built** (0.9, 2026-11-08, as amended below); `--optimize` **built** (0.10.5: the flag and the proven set; sections 2.2 and 2.3 still proposed). Both keep the core guarantee: the prompt itself is
 never stored or sent anywhere; only block hashes, counts and Prefixwise's verdicts are.
 
 ## 1. `prefixwise check`: a CI gate for cache regressions
@@ -118,8 +118,16 @@ each one.
 
 `canonical_tools` sorts tools by name and every key inside them. It eliminates
 `tool_reserialize`; E4 (2026-11-06) realised 99.9% (Anthropic) and 97.5% (vLLM) of the predicted
-savings with task success flat. It is the first member of `--optimize`. Extending it to sort keys
-inside other JSON the client sends (response formats, tool choice) is safe on the same grounds.
+savings with task success flat. It is the first member of `--optimize` (`PROVEN_FIXES`, `fixes.py`;
+`prefixwise serve --optimize`, `prefixwise run --optimize`, `PREFIXWISE_OPTIMIZE=1` for the
+middleware, or `optimize` in any fix list).
+
+*Not* extended to the other JSON a client sends (`tool_choice`, `response_format`, `text.format`):
+the provider parses those into a structure, so wrapper key order never reaches the rendered prompt,
+and the one order that does reach it, a schema's `properties` (OpenAI emits keys in that order),
+is the one a rewrite must not touch. Prefixwise's own comparison agrees: a parameter is recorded as
+a digest of its canonical JSON (`param_fingerprint`), so a key reorder is no change and no cause
+would ever recommend such a fix. Built then dropped on these grounds on 2026-11-09.
 
 ### 2.2 Automatic `cache_control` placement: opt-in, not lossless for the bill
 
