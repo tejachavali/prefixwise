@@ -169,37 +169,53 @@ def test_without_the_engines_extra_the_engine_is_set_but_events_are_not(monkeypa
     assert (engine, kv) == ("sglang", None) and any("prefixwise[engines]" in l for l in lines)
 
 
-def test_run_detects_the_engine_behind_the_agents_base_url(monkeypatch, tmp_path):
-    """`prefixwise run` probes the OpenAI base URL like `serve` probes --upstream; when the Anthropic
-    base URL is another host, the engine is scoped to the OpenAI traffic."""
+def test_run_detects_the_engine_behind_the_agents_base_urls(monkeypatch, tmp_path):
+    """`prefixwise run` probes the agent's base URLs like `serve` probes --upstream, and scopes the
+    engine to the providers whose URL is the engine: the OpenAI one, or the Anthropic one when vLLM
+    is behind it (it serves /v1/messages), or both when they are the same server."""
     import prefixwise.cli as cli
+    import prefixwise.proxy as proxy_mod  # cmd_run imports these from the module when it runs
     seen = {}
-
-    def fake_detect(upstream, engine, kv_events, full_attention, mock=False, probe=None):
-        seen["upstream"] = upstream
-        return "vllm", None, []
 
     class FakeProxy:
         def __init__(self, **kw):
             seen["kw"] = kw
+            seen["proxy"] = self
             self.spans = None
             self.engine_providers = None
 
     class Stop(Exception):
         pass
 
-    import prefixwise.proxy as proxy_mod  # cmd_run imports these from the module when it runs
-
     def no_server(*a, **k):
         raise Stop()
-    monkeypatch.setattr(cli, "_detect_engine", fake_detect)
-    monkeypatch.setattr(proxy_mod, "PrefixwiseProxy", FakeProxy)
-    monkeypatch.setattr(proxy_mod, "PrefixwiseHTTPServer", no_server)
-    monkeypatch.setenv("OPENAI_BASE_URL", "http://127.0.0.1:8000/v1")
+
+    def run(engines_by_url, argv=()):
+        seen.clear()
+        monkeypatch.setattr(cli, "_detect_engine",
+                            lambda upstream, *a, **k: (engines_by_url.get(upstream), None, []))
+        monkeypatch.setattr(cli, "_is_prefixwise", lambda url: False)
+        monkeypatch.setattr(proxy_mod, "PrefixwiseProxy", FakeProxy)
+        monkeypatch.setattr(proxy_mod, "PrefixwiseHTTPServer", no_server)
+        args = cli.build_parser().parse_args(["run", "--ledger", str(tmp_path / "l.db"), *argv, "--", "echo", "hi"])
+        try:
+            cli.cmd_run(args)
+        except Stop:
+            pass
+        return seen["kw"].get("engine"), seen["proxy"].engine_providers
+
+    vllm = "http://127.0.0.1:8000"
+    monkeypatch.setenv("OPENAI_BASE_URL", vllm + "/v1")
     monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
-    args = cli.build_parser().parse_args(["run", "--ledger", str(tmp_path / "l.db"), "--", "echo", "hi"])
-    try:
-        cli.cmd_run(args)
-    except Stop:
-        pass
-    assert seen["upstream"] == "http://127.0.0.1:8000/v1" and seen["kw"]["engine"] == "vllm"
+    assert run({vllm + "/v1": "vllm"}) == ("vllm", {"openai"})
+    # Claude Code against vLLM: only the Anthropic URL is the engine
+    monkeypatch.delenv("OPENAI_BASE_URL")
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", vllm)
+    assert run({vllm: "vllm"}) == ("vllm", {"anthropic"})
+    # both URLs the same server: the whole proxy
+    monkeypatch.setenv("OPENAI_BASE_URL", vllm + "/v1")
+    assert run({vllm + "/v1": "vllm", vllm: "vllm"}) == ("vllm", None)
+    # an explicit --engine is the user's call for the whole proxy; none skips the probe
+    monkeypatch.delenv("OPENAI_BASE_URL")
+    assert run({}, ["--engine", "vllm"]) == ("vllm", None)
+    assert run({vllm: "vllm"}, ["--engine", "none"]) == (None, None)

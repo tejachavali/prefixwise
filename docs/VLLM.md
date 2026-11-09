@@ -108,7 +108,7 @@ And when the prefix *was* reused (`none`), one detail separates two hits that lo
 | detail | meaning | evidence |
 |---|---|---|
 | none | the GPU served the prefix | nothing removed |
-| `output_rerendered` | the read stopped at the previous prompt: none of the previous turn's output (160+ tokens) was reused, although the earlier messages are unchanged. Qwen3's template drops reasoning from history, so each turn prefills the previous answer again in its rendered form; a client that strips thinking itself reads the same. The template's cost, not the client's and not an eviction | usage alone: the previous turn's prompt and output counts, this turn's read; live 47 of 50 turns, 25-36% of prompt tokens ([record](../experiments/e_template/runs/2026-11-09-colab-l4-rerun.md)) |
+| `output_rerendered` | the read covered the previous prompt and stopped there: none of the previous turn's output (160+ tokens) was reused, although the earlier messages are unchanged. Qwen3's template drops reasoning from history, so each turn prefills the previous answer again in its rendered form; a client that strips thinking itself reads the same. The template's cost, not the client's and not an eviction | usage alone: the previous turn's prompt and output counts, this turn's read, behind an engine. Live: the output was recomputed on 47 of 50 turns, 25-36% of prompt tokens; the detail would have named 29 of them, the floor leaving short answers out ([record](../experiments/e_template/runs/2026-11-09-colab-l4-rerun.md)) |
 | `host_restored` | the GPU copy had been evicted and an offload tier (LMCache, vLLM's CPU offload) loaded it back, no prefill recomputed: a hit that cost a restore, and a sign the GPU cache alone is too small for the session | GPU `BlockRemoved` for the previous request's blocks the read covered, the tier's own `BlockStored` seen on the stream, one cache only, a clean stream ([#64](https://github.com/tejachavali/prefixwise/pull/64); live 5/5 on LMCache and HiCache, [record](../experiments/e_evict/runs/2026-11-08-colab-l4-host-restored.md)) |
 
 And when the prompt itself changed, the cause names what changed first: `volatile_system` (a
@@ -124,7 +124,8 @@ every turn after the first read back the previous *prompt* and recomputed the pr
 because Qwen3's template drops `<think>` blocks from earlier assistant messages, so the history is
 rendered differently from how it was generated. 23 of 25 turns; the previous output re-prefilled came
 to 25% of all prompt tokens. Prefixwise reports such a turn as `none` with the detail
-`output_rerendered`. Two more things the run showed: a truncated answer (no closing `</think>`) is
+`output_rerendered` once the previous answer was at least 160 tokens (14 of those 23 turns; below
+that, the rounding of reads could hide a reused output). Two more things the run showed: a truncated answer (no closing `</think>`) is
 kept whole as content, so the prompt grows by the unfinished thinking and carries it on every later
 turn; and `enable_thinking: false` only adds a 4-token stub to the generation prompt, so toggling it
 costs nothing (`none`, with `param_rendered` as a secondary note). Llama 3.x templates keep history as

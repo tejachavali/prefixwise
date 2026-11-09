@@ -23,17 +23,19 @@ extended-thinking docs (Nov 2026), Claude Code / Codex / opencode / LiteLLM issu
                      GPU: the prefix came back from a host or offload tier (vLLM CPU offload,
                      LMCache, SGLang HiCache) without recomputing prefill. A hit, but one that
                      cost a restore; it says the GPU cache alone is too small for the session.
-  output_rerendered  a hit (none) behind an OpenAI-compatible endpoint or engine where the cache
-                     read stopped at the previous prompt: none of the previous turn's output
-                     (at least 160 tokens) was read back, although the request repeats the
-                     earlier messages. The chat template renders history differently from how
-                     it was generated (Qwen3 drops reasoning; a thinking stub differs), or the
-                     client did not resend the output, so each turn re-prefills it. Not waste
-                     the client caused and not an eviction: the cost of the template. Live: 47 of
-                     50 turns on vLLM and SGLang, 25-36% of prompt tokens (experiments/e_template).
-                     Below 160 output tokens the rounding of reads could hide a reused output, so
-                     nothing is claimed; never on Anthropic (its reads are exact and its history
-                     is kept as generated).
+  output_rerendered  a hit (none) behind a self-hosted engine (vLLM, SGLang) where the read covered
+                     the previous prompt and stopped there: none of the previous turn's output (at
+                     least 160 tokens) was read back, although the request repeats the earlier
+                     messages. The chat template renders history differently from how it was
+                     generated (Qwen3 drops reasoning; a thinking stub differs), or the client did
+                     not resend the output, so each turn re-prefills it. Not waste the client
+                     caused and not an eviction: the cost of the template. Engines only: a hosted
+                     API counts reasoning it never returns in the output, and may not cache output
+                     at all, so there the comparison means nothing. Below 160 output tokens the
+                     rounding of reads could hide a reused output, so nothing is claimed. Live
+                     (experiments/e_template): the previous output was recomputed on 47 of 50 turns
+                     on vLLM and SGLang, 25-36% of prompt tokens; the detail, added after that run,
+                     would have named 29 of them (the floor leaves the short answers out).
   thinking_stripped  history_edit on a model that keeps earlier turns' thinking (Opus
                      4.5+, Sonnet 4.6+, Haiku 5.5, Fable, Mythos), where the only
                      change to earlier messages is removed thinking blocks. On other
@@ -203,10 +205,13 @@ MIN_RERENDERED_OUTPUT = 160  # above one 128-token read block plus a 16-token en
 
 
 def detail_for(cause: str, prev: Facts | None, curr: Facts, *, prompt_tokens: int, cached_tokens: int,
-               evicted_blocks: int | None = None) -> tuple[tuple[str, bool | None] | None, str | None, str]:
+               evicted_blocks: int | None = None, engine: bool = False,
+               prompt_served: bool = False) -> tuple[tuple[str, bool | None] | None, str | None, str]:
     """((new cause, its legitimacy) or None to keep the cause, detail or None, evidence to append).
     `evicted_blocks`: from the engine's KV events (one cache only): on a hit, blocks of the previous
-    request this read covered that had been removed from the GPU."""
+    request this read covered that had been removed from the GPU. `engine`: a self-hosted engine
+    (vLLM, SGLang) served this request. `prompt_served`: the read covered the previous prompt to
+    within the engine's block (the classifier's hit check), so what it did not read is the output."""
     if prompt_tokens <= 0:
         return None, None, ""
     cold = cached_tokens < 0.1 * prompt_tokens
@@ -220,7 +225,8 @@ def detail_for(cause: str, prev: Facts | None, curr: Facts, *, prompt_tokens: in
     gap = (curr.sent_at - prev.done_at) if prev is not None and curr.sent_at and prev.done_at else None
     anthropic = curr.provider == "anthropic"
 
-    if cause == "none" and not anthropic and prev is not None and prev.completion_tokens >= MIN_RERENDERED_OUTPUT \
+    if cause == "none" and engine and prompt_served and prev is not None \
+            and prev.completion_tokens >= MIN_RERENDERED_OUTPUT \
             and 0 < prev.prompt_tokens and cached_tokens <= prev.prompt_tokens < prompt_tokens \
             and prev.msgs and curr.msgs[:len(prev.msgs)] == prev.msgs:
         return None, "output_rerendered", (

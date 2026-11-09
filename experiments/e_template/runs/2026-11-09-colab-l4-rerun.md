@@ -128,8 +128,10 @@ opening, shared with the other variants' sessions in SGLang's global radix tree.
    prefilled again every turn, in the form the template renders it (reasoning dropped): 25% of the
    prompt tokens on vLLM, 36% on SGLang. Prefixwise said `none` on all of them, which is right
    (nothing the client did, no eviction), but said nothing about the tail. That is now the detail
-   `output_rerendered`, added after this run and sized from it (claimed from 160 output tokens,
-   where the rounding of reads cannot hide a reused output).
+   `output_rerendered`, added after this run and sized from it: claimed behind an engine when the
+   read covered the previous prompt and the previous answer was at least 160 tokens, where the
+   rounding of reads cannot hide a reused output. On these tables it would have named 29 of the
+   47 turns (14 on vLLM, 15 on SGLang); the `nothink` answers and the short ones are below the floor.
 3. **Truncated reasoning stays in history.** The 3 turns that reused prompt *plus* output follow a
    1,500-token truncation: with no closing `</think>`, Qwen3's template keeps the whole unfinished
    thinking as content, so the prompt jumps by 1,500 tokens and is then reused in full. A session

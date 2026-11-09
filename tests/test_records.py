@@ -108,6 +108,6 @@ def test_the_engine_block_size_travels_on_the_record():
     p = proxy([a_usage(write5=8_000), a_usage(write5=8_000)])
     [plain] = _records(p, [b])
     assert plain.engine_block is None
-    p.engine_events = SimpleNamespace(block_size=16)
+    p.engine, p.engine_events = "vllm", SimpleNamespace(block_size=16)  # the block size is the engine's
     [rec] = _records(p, [b])
     assert rec.engine_block == 16 and TurnRecord.from_dict(json.loads(json.dumps(rec.to_dict()))).engine_block == 16

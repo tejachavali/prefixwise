@@ -678,6 +678,13 @@ class PrefixwiseProxy:
                 del self._recording[ctx["thread_key"]]
         ev.set()
 
+    def _engine_base(self) -> str:
+        """The engine's own URL (no /v1): the upstream of a provider it serves, the OpenAI one by default."""
+        for name in sorted(self.engine_providers or ("openai",), key=lambda n: n != "openai"):
+            if self.upstreams.get(name):
+                return self.upstreams[name].removesuffix("/v1")
+        return (self.upstreams.get("openai") or self.upstream_url).removesuffix("/v1")
+
     def engine_for(self, provider: str) -> str | None:
         """The engine behind this provider's upstream, or None (a hosted API through the same proxy)."""
         if self.engine_providers is not None and provider not in self.engine_providers:
@@ -701,7 +708,7 @@ class PrefixwiseProxy:
     def _discover_vllm(self) -> None:
         """--kv-events auto: every data-parallel rank's KV-event endpoint, from vLLM's
         GET /kv_event_sources ({rank: KVEventsConfig}, endpoints resolved per rank)."""
-        base = (self.upstreams.get("openai") or self.upstream_url).removesuffix("/v1")
+        base = self._engine_base()
         headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
         try:
             req = urllib.request.Request(base + "/kv_event_sources", headers=headers)
@@ -737,7 +744,7 @@ class PrefixwiseProxy:
         --kv-events auto, no prefill/decode disaggregation and one node. With auto it
         subscribes to every rank. It also sizes the block index from the cache capacity,
         and a sliding-window model turns "not an eviction" off."""
-        base = (self.upstreams.get("openai") or self.upstream_url).removesuffix("/v1")
+        base = self._engine_base()
         headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
         try:
             req = urllib.request.Request(base + "/server_info", headers=headers)
@@ -1010,7 +1017,7 @@ class PrefixwiseProxy:
             fixes_applied=list(ctx.get("fixes_applied") or []),
             sent_at=ctx.get("span_start") or ctx.get("sent_at") or facts.done_at,
             engine=self.engine_for(provider), engine_caches=self.engine_caches, engine_verdict=verdict,
-            engine_block=getattr(self.engine_events, "block_size", None),
+            engine_block=getattr(self.engine_events, "block_size", None) if self.engine_for(provider) else None,
             status=status, error=error, usage=usage, response_model=(str(payload["model"]) if payload.get("model")
                                                                       else None),
             response_id=payload.get("id"), native_reason=native_reason_from(payload) if payload else None,

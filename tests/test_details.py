@@ -310,22 +310,26 @@ def test_output_rerendered_names_the_previous_output_a_prompt_only_read_left_beh
     from prefixwise.details import Facts, detail_for
     prev = Facts(provider="openai", model="m", prompt_tokens=403, completion_tokens=573, msgs=["s", "u1"])
     curr = Facts(provider="openai", model="m", prompt_tokens=510, msgs=["s", "u1", "a1", "u2"])
-    new, detail, why = detail_for("none", prev, curr, prompt_tokens=510, cached_tokens=400)
+    hit = dict(prompt_tokens=510, cached_tokens=400, engine=True, prompt_served=True)
+    new, detail, why = detail_for("none", prev, curr, **hit)
     assert new is None and detail == "output_rerendered" and "573-token output was not reused" in why
     # the output was read back (a template that keeps history as generated): no claim
-    assert detail_for("none", prev, curr, prompt_tokens=976 + 107, cached_tokens=960)[1] is None
+    assert detail_for("none", prev, curr, prompt_tokens=976 + 107, cached_tokens=960, engine=True,
+                      prompt_served=True)[1] is None
+    # the read did not cover the previous prompt (an eviction tail, judged a hit by the half rule): no claim
+    assert detail_for("none", prev, curr, prompt_tokens=510, cached_tokens=240, engine=True,
+                      prompt_served=False)[1] is None
+    # a hosted API: its output count includes reasoning it never returns, and it may not cache output
+    assert detail_for("none", prev, curr, prompt_tokens=510, cached_tokens=400, engine=False,
+                      prompt_served=True)[1] is None
     # too short an output: the rounding of reads could hide a reused one
     short = Facts(provider="openai", model="m", prompt_tokens=403, completion_tokens=60, msgs=["s", "u1"])
-    assert detail_for("none", short, curr, prompt_tokens=470, cached_tokens=400)[1] is None
+    assert detail_for("none", short, curr, **{**hit, "prompt_tokens": 470})[1] is None
     # the earlier messages changed (a different conversation shape): not this detail
     edited = Facts(provider="openai", model="m", prompt_tokens=510, msgs=["s", "u1x", "a1", "u2"])
-    assert detail_for("none", prev, edited, prompt_tokens=510, cached_tokens=400)[1] is None
-    # Anthropic keeps history as generated and reports exact reads: never claimed there
-    a_prev = Facts(provider="anthropic", model="m", prompt_tokens=403, completion_tokens=573, msgs=["s", "u1"])
-    a_curr = Facts(provider="anthropic", model="m", prompt_tokens=510, msgs=["s", "u1", "a1", "u2"])
-    assert detail_for("none", a_prev, a_curr, prompt_tokens=510, cached_tokens=403)[1] is None
+    assert detail_for("none", prev, edited, **hit)[1] is None
     # a miss is not this detail either
-    assert detail_for("evicted", prev, curr, prompt_tokens=510, cached_tokens=0)[1] is None
+    assert detail_for("evicted", prev, curr, prompt_tokens=510, cached_tokens=0, engine=True)[1] is None
 
 
 def test_usage_facts_keep_the_turn_token_counts():
