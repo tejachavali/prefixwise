@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- **The PyPI page's links work.** The project description is README.md with its relative links (docs/, experiments/, benchmarks/, the top-level .md files, in-page anchors) rewritten to GitHub at build time (`hatch-fancy-pypi-readme`); on the 0.10.0 page they still point nowhere. `Documentation` and `Changelog` added to the project URLs. WORKLOG.md brought up to date.
 - **E-template on three more templates** (Colab L4, vLLM 0.33.0; `experiments/e_template/runs/2026-11-09-colab-l4-models.md`): `output_rerendered` live on a DeepSeek-R1 distill, 25 of 25 turns (the previous answer was 57% of prompt tokens); silent on Qwen2.5, which keeps history as generated and reused it in full on 25 of 25 turns; Llama 3.2's template reuses in full too and renders the date into the prefix. "Not an eviction": 0 on every model. The harness's template-alone diff now allows the generation tail (0 to 4 tokens, template by template) instead of calling it a break.
 
 ## 0.10.0: 2026-11-09

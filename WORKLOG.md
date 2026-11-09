@@ -32,20 +32,35 @@ Shared handoff between the agents working on Prefixwise. It says **what is being
 | E1-hosted, OpenAI | **Blocked on OpenAI:** `prompt_cache_diagnostics` returns `unavailable` on every comparison (GPT-5.6 Luna/Sol/base, delays up to 120 s, completed baseline). Not a Prefixwise bug. | `experiments/e1_hosted/runs/2026-11-06-round4.md` |
 | E4: a fix saves what Prefixwise predicts, tasks still succeed | **Pass** 2026-11-06: `canonical_tools` 99.9% realised (Anthropic), 97.5% (vLLM); success flat (0/60, 1/60 changed) | `experiments/e4/runs/2026-11-06-live.md` |
 | Dogfood: real agent traffic | **Done** 2026-11-06: opencode, 25 requests, 92.9% cached, 0 avoidable; 4 rough edges found and fixed (PR #18). Dogfood 2 (2026-11-07): 21 requests, 92.2% cached, 0 avoidable, fixes confirmed | `experiments/dogfood/2026-11-06-opencode.md` |
-| E2/E3 engine join, E5 compaction | Not started | README "Build order" |
+| E2/E3 engine join | **Pass** 2026-11-07/08: evictions confirmed 5/5 from vLLM and SGLang KV events; LMCache and HiCache restores 5/5 as hits, each `host_restored` (2026-11-08); two vLLM replicas behind a router: routing misses 5/5 confirmed; Prefixwise inside `vllm serve` as middleware 5/5 | `experiments/e_evict/runs/`, `experiments/e_route/runs/` |
+| `prefixwise check` (CI gate) | **Shipped** 0.9.0 (2026-11-08): mock provider, allow-list, baseline, pytest plugin, GitHub Action `tejachavali/prefixwise@v0.10` | `docs/specs/check-and-optimize.md` |
+| E-template: token-level divergence in real traffic | **Measured** 2026-11-09: "not an eviction" 0 of 108 requests (Qwen3-4B on vLLM and SGLang, DeepSeek-R1 distill, Qwen2.5, opencode and Claude Code against vLLM). What the runs showed instead: reasoning templates recompute the previous answer every turn (Qwen3 25-36%, R1 distill 57% of prompt tokens), now the detail `output_rerendered`; Qwen2.5 and Llama 3.2 reuse it in full | `experiments/e_template/runs/` |
+| E5 compaction | Not started | |
 
 ## Now
 
-**Prefixwise 0.4.0 is ready to release** (PR: release 0.4.0), waiting only on Muse's compatibility check: Claude Code, Codex CLI and SDK scripts through `prefixwise run` (message given to Teja). On main since 0.3.1:
-- **Data first and API first** (PR #30): every request's facts recorded, failures included; every metric defined once (`prefixwise.metrics`); `/api/v1`; `prefixwise export`. docs/DATA.md, docs/API.md.
-- **`prefixwise run -- <agent>` and a plain-English report** (PR #31).
-- **Self-hosted engines** (PR #29, includes #24): `--engine`, vLLM `--kv-events`; validated live on vLLM, LMCache, SGLang and HiCache, all eight runs as expected. docs/ENGINES.md.
+**Prefixwise 0.10.0 is released** (2026-11-09; PyPI and the GitHub Release match, the Action's moving tag
+`v0.10` resolves). Since 0.4.0, in order: 0.5 to 0.8 (sub-reasons, importers for Claude Code and Codex
+logs, LiteLLM/OpenTelemetry/SDK middleware, Prometheus and Grafana, the collector and record log, the
+multi-replica engine join, SGLang data-parallel ranks over the wire), 0.9.0 (`prefixwise check`,
+`host_restored`, docs/SGLANG.md and docs/LMCACHE.md), 0.10.0 (Prefixwise inside `vllm serve` as ASGI
+middleware; engine auto-detection for `serve` and `run`; the block-rounded hit fix and the engine's block
+size on the record; `output_rerendered`; E-template live on vLLM, SGLang, real agents and four templates).
 
-**Releasing:** Claude prepares the bump; **Muse (or Teja) creates the GitHub release** `v0.4.0` in the web UI after the release PR merges; the workflow publishes to PyPI; Claude verifies the install.
+**Nothing is running.** Open, in rough order of value:
+- A Llama 3.2 run on vLLM with `VLLM_ARGS="--max-model-len 32768"` (it did not fit at the script's 131k),
+  to see its full reuse live, and a session across the server's midnight on a Llama template, to catch the
+  date-line divergence that Prefixwise would call "not an eviction".
+- Data-parallel ranks inside one server (`--kv-events auto` on vLLM and SGLang): tested over the wire,
+  needs two GPUs to run live. Middleware streaming under load and `--api-server-count` above 1 with a
+  collector: not yet run live.
+- Outreach beyond the vLLM Slack post (0.4.0): SGLang and LMCache communities have not been told; the
+  guides for them (docs/SGLANG.md, docs/LMCACHE.md) are the material. Waits on Teja.
+- The PyPI page: until this change ships in the next release, the README's relative links on the 0.10.0
+  PyPI page do not resolve (the build now rewrites them to GitHub).
 
-**After 0.4.0:** Teja posts in the vLLM Slack (~15k members; draft ready, links docs/VLLM.md); watch issues and DMs from that and the founders' group post. (The Omni founder already has the earlier message.) Next build unless feedback says otherwise: Prometheus / OpenTelemetry export (research in docs/DATA.md).
-
-**Waiting on Teja (nothing blocked):** the local web view; the OpenAI support note; scrubbing the old note from git history.
+**Standing rules unchanged:** Muse runs only (tags releases); API keys never in files, reports or chat;
+no force-pushes; independent review before every merge; nothing changed to make a run pass.
 
 ## In parallel (Claude): launch gates
 
@@ -159,3 +174,5 @@ Then a soft launch to a few people who run agents (Omni's founder is a candidate
 - **2026-11-07:** 0.4.0 released (GitHub release from 0de0e93, PyPI); verified from PyPI on Python 3.10 and 3.13 (run, report, export, /api/v1, engines extra). Teja posted to the vLLM Slack. README rewritten to lead with measured results and charts (PR #35, merged).
 - **2026-11-07:** SGLang KV events (PR #34, ready, NOT merged): research showed SGLang >= 0.5.20 stamps a body `session_id` on BlockStored (0.4.0's "rejects unknown ids" was about `session_params`). Built `SGLangEvents` (tree of GPU blocks, leaf-first eviction, own-store barrier, /server_info gating); two independent reviews, all findings fixed; 217 tests. **Next, Muse:** live E-evict on SGLang with events (`KV_EVENTS=1 sglang_server.sh`, `e_evict.py --engine sglang --kv-events tcp://127.0.0.1:5557 --full-attention`); expected T3 `evicted` "confirmed" 5/5. Runs only; send output on any difference. If it passes: merge #34, add to README results, release 0.4.1.
 - **2026-11-07:** Muse ran SGLang 0.5.23 with KV events live (Colab L4, Qwen3-4B; SGLang in a Python 3.12 venv because outlines_core has no 3.13 wheel): T3 `evicted` **confirmed 5/5**, T2 hits 5/5, 0 dropped messages; E1-open 120/120 with session ids sent. Record: experiments/e_evict/runs/2026-11-07-colab-l4-sglang-events.md. PR #34 to merge; then release 0.4.1.
+- **2026-11-08:** 0.5.0 to 0.8.0 shipped (see CHANGELOG: sub-reasons, importers, LiteLLM/OTel/SDK middleware, Prometheus, collector and record log, multi-replica join, SGLang DP ranks over the wire). Three review edge cases fixed (#62). `prefixwise check` built to the amended spec (#63). `host_restored` (#64), docs/SGLANG.md and docs/LMCACHE.md (#65). 0.9.0 released (#66); Muse tagged v0.9.0 and the moving v0.9. Upstream auto-detection (#68) and the vLLM ASGI middleware (#69) merged after independent reviews. Muse: `host_restored` live 5/5 on LMCache 0.5.7 and SGLang HiCache (#70); middleware inside `vllm serve` 5/5 confirmed evictions (#71). Teja: hold 0.10.0 for one more validation round (token-level divergence; `--dp-size 2` needs two GPUs, deferred).
+- **2026-11-09:** E-template built (#72). Muse ran it: vLLM first run exposed a classifier bug (block-rounded reads with a parameter change read as `param_rendered`), fixed with a strict block comparison and slack capped at an eighth of the prefix (#73), then the engine's block size on the record (#74). The Colab runtime recycled twice; Muse re-ran end to end on a fresh L4: "not an eviction" 0 of 50 harness turns and 0 of 8 agent requests; the previous answer recomputed on 47 of 50 Qwen3 turns. Built `output_rerendered` (engines only, from 160 output tokens, with the hit check), `prefixwise run` engine detection on both base URLs (#75). 0.10.0 released (#76; README audited; Muse tagged v0.10.0 and v0.10, hashes match). Muse swept three more templates (#77): DeepSeek-R1 distill 25/25 `output_rerendered` (57%), Qwen2.5 full reuse 25/25, Llama 3.2 template alone (vLLM did not fit at 131k). Then: PyPI README links made absolute at build time (hatch-fancy-pypi-readme); this file brought up to date after two days without entries.
