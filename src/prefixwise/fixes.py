@@ -202,6 +202,34 @@ FIX_ADVICE: dict[str, dict] = {
 }
 
 
+# Anthropic's multipliers on the input rate: a 5-minute cache write 1.25x, a 1-hour write 2x, a read 0.1x
+# (docs.anthropic.com prompt caching pricing, Nov 2026). Only the surcharge above sending the tokens
+# uncached counts against a placed marker: 0.25 (5 min) or 1.0 (1 hour) per token written; a read saves 0.9.
+_WRITE_SURCHARGE = {300.0: 0.25, 3600.0: 1.0}
+_READ_SAVING = 0.9
+
+
+def breakpoints_paid(ledger) -> dict | None:
+    """Did the markers auto_breakpoints placed pay for themselves? Over the rows it rewrote (the client
+    set no marker, so every cache write and read on them came through the placed markers): tokens
+    written, tokens read back, and the reads' saving against the writes' surcharge, in input-token
+    equivalents. None when it rewrote nothing. A model, not a bill: the multipliers above."""
+    with ledger._lock:
+        rows = ledger.conn.execute(
+            "SELECT cache_write_tokens, cached_tokens, cache_ttl_seconds FROM entries "
+            "WHERE fixes IS NOT NULL AND (',' || fixes || ',') LIKE '%,auto_breakpoints,%' AND error IS NULL").fetchall()
+    if not rows:
+        return None
+    written = sum(w or 0 for w, _, _ in rows)
+    read = sum(r or 0 for _, r, _ in rows)
+    surcharge = sum((w or 0) * _WRITE_SURCHARGE.get(float(ttl or 300), 0.25) for w, _, ttl in rows)
+    saving = read * _READ_SAVING
+    return {"requests": len(rows), "written_tokens": written, "read_tokens": read,
+            "write_surcharge_token_equivalents": round(surcharge), "read_saving_token_equivalents": round(saving),
+            "net_token_equivalents": round(saving - surcharge),
+            "paid": (saving > surcharge) if (written or read) else None}
+
+
 def recommend(ledger) -> dict:
     """Fixes ranked by the avoidable tokens this ledger attributes to their cause
     (the data behind `prefixwise fixes` and GET /api/v1/fixes)."""
@@ -228,4 +256,4 @@ def recommend(ledger) -> dict:
                      "status": status.get("status") or "recommended (predicted; prove it with experiments/e4)",
                      "evidence": status.get("evidence")})
     recs.sort(key=lambda x: -x["predicted_savings_tokens"])
-    return {"recommendations": recs, "requests_rewritten_by_fixes": fixed}
+    return {"recommendations": recs, "requests_rewritten_by_fixes": fixed, "auto_breakpoints": breakpoints_paid(ledger)}

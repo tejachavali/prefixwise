@@ -140,3 +140,29 @@ def test_a_400_about_cache_control_resends_the_clients_request_and_stops_after_t
     r, e = p.handle("anthropic", _turn(3))
     assert not _marked(sent[-1]) and r["fixes_applied"] == []  # no third try
     assert "auto_breakpoints" in capsys.readouterr().err
+
+
+def test_fixes_says_whether_the_placed_markers_paid(tmp_path, capsys):
+    from prefixwise.cli import main
+    from prefixwise.fixes import breakpoints_paid
+
+    path = str(tmp_path / "l.db")
+    p = PrefixwiseProxy(ledger_path=path, mock=True, fixes=["auto_breakpoints"])
+    assert breakpoints_paid(p.ledger) is None  # nothing rewritten yet
+    for n in range(4):
+        p.handle("anthropic", _turn(n))
+    paid = breakpoints_paid(p.ledger)
+    # turn 2 wrote 2,000 (the first marked turn), turns 3 and 4 read 2,000 each: 3 rewritten rows
+    assert paid["requests"] == 3 and paid["written_tokens"] == 2000 and paid["read_tokens"] == 4000
+    assert paid["write_surcharge_token_equivalents"] == 500 and paid["read_saving_token_equivalents"] == 3600
+    assert paid["paid"] is True and paid["net_token_equivalents"] == 3100
+    assert main(["fixes", "--ledger", path]) == 0
+    out = capsys.readouterr().out
+    assert "auto_breakpoints rewrote 3 requests" in out and "paid for itself" in out and "read 4,000 back" in out
+    assert main(["fixes", "--ledger", path, "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["auto_breakpoints"]["paid"] is True
+    # one write, nothing read back yet: not paid
+    q = PrefixwiseProxy(ledger_path=str(tmp_path / "m.db"), mock=True, fixes=["auto_breakpoints"])
+    q.handle("anthropic", _turn(0))
+    q.handle("anthropic", _turn(1))
+    assert breakpoints_paid(q.ledger)["paid"] is False
