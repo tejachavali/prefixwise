@@ -23,6 +23,17 @@ extended-thinking docs (Nov 2026), Claude Code / Codex / opencode / LiteLLM issu
                      GPU: the prefix came back from a host or offload tier (vLLM CPU offload,
                      LMCache, SGLang HiCache) without recomputing prefill. A hit, but one that
                      cost a restore; it says the GPU cache alone is too small for the session.
+  output_rerendered  a hit (none) behind an OpenAI-compatible endpoint or engine where the cache
+                     read stopped at the previous prompt: none of the previous turn's output
+                     (at least 160 tokens) was read back, although the request repeats the
+                     earlier messages. The chat template renders history differently from how
+                     it was generated (Qwen3 drops reasoning; a thinking stub differs), or the
+                     client did not resend the output, so each turn re-prefills it. Not waste
+                     the client caused and not an eviction: the cost of the template. Live: 47 of
+                     50 turns on vLLM and SGLang, 25-36% of prompt tokens (experiments/e_template).
+                     Below 160 output tokens the rounding of reads could hide a reused output, so
+                     nothing is claimed; never on Anthropic (its reads are exact and its history
+                     is kept as generated).
   thinking_stripped  history_edit on a model that keeps earlier turns' thinking (Opus
                      4.5+, Sonnet 4.6+, Haiku 5.5, Fable, Mythos), where the only
                      change to earlier messages is removed thinking blocks. On other
@@ -85,6 +96,8 @@ class Facts:
     write_5m: int = 0
     write_1h: int = 0
     cache_write: int = 0
+    prompt_tokens: int = 0  # this request's prompt and output, from its usage (output_rerendered reads
+    completion_tokens: int = 0  # the previous turn's)
     fanout_age: float | None = None  # seconds since a same-prefix request still in flight was sent
     shared_age: float | None = None  # seconds since another session wrote an entry inside tools/system
     shared_write_pos: int | None = None  # where that entry ends
@@ -178,9 +191,15 @@ def usage_facts(f: Facts, usage: dict, cache_write: int) -> Facts:
     f.write_5m = int(created.get("ephemeral_5m_input_tokens") or 0)
     f.write_1h = int(created.get("ephemeral_1h_input_tokens") or 0)
     f.cache_write = int(cache_write or 0)
+    from .pricing import completion_tokens_of, normalize_usage
+    f.prompt_tokens = normalize_usage(f.provider, usage or {})[0]
+    f.completion_tokens = completion_tokens_of(f.provider, usage or {})
     if f.provider == "anthropic" and not created and f.cache_write:
         f.write_5m = f.cache_write  # no split reported: a 5-minute write (as pricing.breakdown reads it)
     return f
+
+
+MIN_RERENDERED_OUTPUT = 160  # above one 128-token read block plus a 16-token engine block: a reused output shows
 
 
 def detail_for(cause: str, prev: Facts | None, curr: Facts, *, prompt_tokens: int, cached_tokens: int,
@@ -200,6 +219,15 @@ def detail_for(cause: str, prev: Facts | None, curr: Facts, *, prompt_tokens: in
             "without recomputing them")
     gap = (curr.sent_at - prev.done_at) if prev is not None and curr.sent_at and prev.done_at else None
     anthropic = curr.provider == "anthropic"
+
+    if cause == "none" and not anthropic and prev is not None and prev.completion_tokens >= MIN_RERENDERED_OUTPUT \
+            and 0 < prev.prompt_tokens and cached_tokens <= prev.prompt_tokens < prompt_tokens \
+            and prev.msgs and curr.msgs[:len(prev.msgs)] == prev.msgs:
+        return None, "output_rerendered", (
+            f"the previous turn's {prev.completion_tokens:,}-token output was not reused: the read stopped at the "
+            f"previous prompt ({cached_tokens:,} of {prompt_tokens:,} read; it was {prev.prompt_tokens:,}), so the "
+            "history renders that output differently from how it was generated (a reasoning model's thinking is "
+            "dropped) or the client did not resend it, and the turn after it is prefilled again each time")
 
     if anthropic and prev is not None and cold and gap is not None and gap > 300 \
             and cause in ("ttl_expired", "routing_miss", "unknown") \

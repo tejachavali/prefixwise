@@ -349,11 +349,14 @@ skew, failed requests), fixed above. The rules above answer all of them.
   alternates, 5/5 hits when it is sticky, no false claim
   (`experiments/e_route/runs/2026-11-08-colab-l4.md`). Not yet run live: data-parallel ranks
   inside one server (`auto`), real routers.
-- Token-level divergence, live (`experiments/e_template`, Colab L4, Qwen3-4B, vLLM 0.33.0 with KV
-  events, [record](../experiments/e_template/runs/2026-11-09-colab-l4.md)): 0 of 25 turns were
-  "not an eviction". Qwen3's template drops reasoning from history, so every turn reuses the
-  previous *prompt* and recomputes the previous *output* (a stable prefix, a tail Prefixwise never
-  expected back: `none` is right). The one true prefix divergence found is in Llama 3.x templates,
-  which render the date into the system header: every session's prefix is recomputed once a day
-  at the server's midnight, with no change in the request. Open: the same on SGLang (page size 1),
-  and real agent traffic (opencode, Claude Code) against vLLM.
+- **Token-level divergence, live** (`experiments/e_template`, Colab L4, Qwen3-4B; vLLM 0.33.0 and
+  SGLang 0.5.23 with KV events, opencode and Claude Code against vLLM through `prefixwise run`;
+  [record](../experiments/e_template/runs/2026-11-09-colab-l4-rerun.md)): "not an eviction" in **0 of 50**
+  harness turns and **0 of 8** agent requests. Qwen3's template drops reasoning from history, so 47 of
+  50 turns reused the previous *prompt* and recomputed the previous *output* (25% of prompt tokens on
+  vLLM, 36% on SGLang): a stable prefix and a tail Prefixwise never expected back, `none` with the
+  detail `output_rerendered` (added from this run). SGLang's page size of 1 gives the exact shortfall
+  of a full read: 0 tokens, or the 4-token `<think>` stub when thinking is off. The one template
+  clause found that divides a prefix is Llama 3.x's date line in the system header: every session's
+  prefix is recomputed once a day at the server's midnight, with no change in the request. Open: a
+  run across that midnight.

@@ -286,6 +286,12 @@ def _show_url(url: str) -> str:
     return f"{u.scheme}://{u.hostname}{':' + str(u.port) if u.port else ''}" if u.hostname else "?"
 
 
+def _host_of(url: str) -> str:
+    from urllib.parse import urlsplit
+    u = urlsplit(url)
+    return f"{u.hostname}:{u.port or (443 if u.scheme == 'https' else 80)}"
+
+
 def _is_prefixwise(url: str) -> bool:
     """Does this local base URL already point at a Prefixwise proxy?"""
     import urllib.request
@@ -337,12 +343,22 @@ def cmd_run(args) -> int:
                   "or use that proxy directly; chaining two would count every request twice.", file=sys.stderr)
             return 2
     ledger = args.ledger or os.environ.get("PREFIXWISE_LEDGER_PATH") or DEFAULT_LEDGER
+    # A self-hosted engine behind the agent's base URL (vLLM, SGLang: OpenAI-compatible, so the OpenAI
+    # one; vLLM also serves /v1/messages, so the Anthropic one when it is the same server) gets the
+    # same join as `serve`: --engine, and KV events when it publishes them. Live: without it, an
+    # agent's miss against vLLM was `unknown` where the events would have named it (E-template).
+    engine, kv_events, lines = _detect_engine(None if args.mock else openai, args.engine, None,
+                                              args.full_attention, mock=bool(args.mock))
+    for line in lines:
+        print(line, file=sys.stderr, flush=True)
     try:
         proxy = PrefixwiseProxy(ledger_path=ledger, mock=True if args.mock else None, fixes=args.fix or None,
                                 upstreams=None if args.mock else {"anthropic": anthropic, "openai": openai},
-                                otel=args.otel)
+                                otel=args.otel, engine=engine, kv_events=kv_events, full_attention=args.full_attention)
     except ValueError as exc:
         sys.exit(f"prefixwise: {exc}")
+    if engine and _host_of(anthropic) != _host_of(openai):
+        proxy.engine_providers = {"openai"}  # the Anthropic traffic goes elsewhere: not the engine's
     if proxy.spans is not None:  # `run` is its own process: it sets up the exporter
         from .otel import install_provider
         install_provider()
@@ -816,6 +832,10 @@ def build_parser() -> argparse.ArgumentParser:
                                    "and prints what this run's cache did when the agent exits.")
     p.add_argument("--port", type=int, default=0, help="default: any free port")
     p.add_argument("--mock", action="store_true", help="synthetic responses, no API calls")
+    p.add_argument("--engine", choices=("vllm", "sglang", "none"),
+                   help="what is behind the agent's base URL (default: detected; none: a hosted API or a router)")
+    p.add_argument("--full-attention", action="store_true", default=None,
+                   help="SGLang: the model has no sliding-window or Mamba layers (lets its KV events rule an eviction out)")
     p.add_argument("--fix", action="append", metavar="NAME", help="apply a fix (repeatable): canonical_tools")
     ledger_opt(p)
     p.add_argument("--otel", action="store_const", const="genai", default=None,

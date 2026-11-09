@@ -97,6 +97,7 @@ changed never reaches RadixAttention's match at all. The verdicts, and the evide
 | **Eviction.** The radix tree dropped the prefix (leaves first) and this turn recomputed it | `evicted`, confirmed | | the block where the cache read stopped was removed (`"3,382 of the previous request's KV blocks removed"`) |
 | Eviction without events | `evicted`, inferred | | one engine, prefix unchanged, not reused; the evidence says *inferred* |
 | **Not an eviction.** The block is still on the GPU, so the token prefix changed although the request did not (a chat template re-rendering history) | `unknown` | | KV events, `--full-attention`, the request's own store arrived (up to 0.5 s) and nothing was lost |
+| **Previous output re-prefilled.** The read stopped at the previous prompt: none of the previous turn's output (160+ tokens) was reused, although the earlier messages are unchanged. Qwen3's template drops reasoning from history, so each turn prefills the previous answer again in its rendered form | `none` | `output_rerendered` | usage alone; live 24 of 25 turns, 36% of prompt tokens (SGLang 0.5.23, page size 1, [record](../experiments/e_template/runs/2026-11-09-colab-l4-rerun.md)). With page size 1 the counts are exact: a full read stops at the previous prompt, or 4 tokens before it when thinking is off (the `<think>` stub the history never repeats) |
 | **Agent-layer prompt change**, before SGLang can match anything | `volatile_system` (a timestamp or id in the system prompt), `tool_reserialize` (same tools, different order or bytes), `history_edit` (an earlier message rewritten), `tool_result_mutation` (an earlier tool result changed) | | the request's own block hashes; the first block that differs is named (`divergence_role`) |
 
 The agent-layer causes are the ones that get blamed on the cache. They are decided from the
@@ -153,6 +154,9 @@ restart, concurrency, lost messages, overflow, and the `/server_info` checks.
   its copy of the tree and judges nothing until it rebuilds; chains kept for sessions are capped
   at 16 million tokens.
 - Several ranks: tested over the wire, not yet run live (a single L4 runs one rank).
+- Token-level divergence ("not an eviction") did not occur live: 0 of 25 turns on SGLang (Qwen3-4B).
+  A truncated answer (no closing `</think>`) is kept whole as content by Qwen3's template, so the
+  prompt grows by the unfinished thinking and carries it on every later turn (3 of 25 turns).
 
 Design, alternatives considered and failure modes: [ENGINES.md](ENGINES.md). Questions and bug
 reports: GitHub issues.

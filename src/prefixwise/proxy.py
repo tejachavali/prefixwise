@@ -554,6 +554,9 @@ class PrefixwiseProxy:
         # stream for the engine join (prefixwise.engines).
         # None: from the environment; "" pins it off (prefixwise.sdk.Recorder).
         self.engine = (engine if engine is not None else os.environ.get("PREFIXWISE_ENGINE")) or None
+        # Providers the engine serves (None: all). `prefixwise run` sets it when only one of the agent's
+        # base URLs is the engine, so hosted traffic through the same proxy is not judged as an engine's.
+        self.engine_providers: set[str] | None = None
         if self.engine not in (None, "vllm", "sglang"):
             raise ValueError(f"unknown engine {self.engine!r}: expected vllm or sglang")
         kv_events = (kv_events if kv_events is not None else os.environ.get("PREFIXWISE_KV_EVENTS")) or None
@@ -674,6 +677,12 @@ class PrefixwiseProxy:
             if self._recording.get(ctx["thread_key"]) is ev:
                 del self._recording[ctx["thread_key"]]
         ev.set()
+
+    def engine_for(self, provider: str) -> str | None:
+        """The engine behind this provider's upstream, or None (a hosted API through the same proxy)."""
+        if self.engine_providers is not None and provider not in self.engine_providers:
+            return None
+        return self.engine
 
     def _start_events(self, sources: list[tuple[str, str]], full_attention: bool = False,
                       ranks: list[int] | None = None) -> None:
@@ -847,11 +856,12 @@ class PrefixwiseProxy:
             injected.setdefault(field, forward_body.get(field, _MISSING))
             forward_body[field] = value
             return True
-        if (self.engine == "sglang" and api == "chat" and self.engine_events is not None and self.sglang_join
+        engine = self.engine_for(provider)
+        if (engine == "sglang" and api == "chat" and self.engine_events is not None and self.sglang_join
                 and body.get("n") in (None, 1)):  # n > 1: the choices' stores would mix
             if inject("session_id", session_id):
                 engine_token = self.engine_events.request_sent(session_id)
-        if self.engine == "vllm" and api == "chat" and inject("session_id", session_id):
+        if engine == "vllm" and api == "chat" and inject("session_id", session_id):
             xargs = body.get("vllm_xargs")
             if (self.engine_events is not None and (xargs is None or isinstance(xargs, dict))
                     and ("vllm", "vllm_xargs") not in self.rejected_fields):
@@ -999,7 +1009,7 @@ class PrefixwiseProxy:
             has_breakpoint=has_cache_breakpoint(body), ttl_seconds=ctx.get("ttl_seconds"), facts=facts,
             fixes_applied=list(ctx.get("fixes_applied") or []),
             sent_at=ctx.get("span_start") or ctx.get("sent_at") or facts.done_at,
-            engine=self.engine, engine_caches=self.engine_caches, engine_verdict=verdict,
+            engine=self.engine_for(provider), engine_caches=self.engine_caches, engine_verdict=verdict,
             engine_block=getattr(self.engine_events, "block_size", None),
             status=status, error=error, usage=usage, response_model=(str(payload["model"]) if payload.get("model")
                                                                       else None),
