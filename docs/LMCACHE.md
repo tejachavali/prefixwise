@@ -126,7 +126,7 @@ question: LMCache 0.5.7 publishes its tier's stores into vLLM's event stream
 sub-chunk tail is recomputed, as LMCache's chunking predicts.
 
 The classifier also scores **120/120** on injected causes on vLLM + LMCache
-(`experiments/e1_open`, 120 turns across ten cause types, two sessions growing turn by turn as
+(`experiments/e1_open`, 120 turns across nine cause types, two sessions growing turn by turn as
 agent traffic does).
 
 ## Limits
