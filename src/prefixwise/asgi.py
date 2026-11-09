@@ -28,8 +28,8 @@ Configuration, when vLLM instantiates the class with `app` only, comes from the 
   per-rank publisher configs (`app.state.engine_client.get_kv_event_sources()`, what
   `GET /kv_event_sources` serves) and subscribes; `sys.argv`'s `--kv-events-config` is the last
   resort. Needs `pip install "prefixwise[engines]"`.
-- `PREFIXWISE_FIX`: fixes to apply to every request (`canonical_tools`, or `optimize` for
-  every proven fix); `PREFIXWISE_OPTIMIZE=1` is the same as `optimize`.
+- `PREFIXWISE_FIX`: fixes to apply to every request (`canonical_tools`, `auto_breakpoints`,
+  or `optimize` for every proven fix); `PREFIXWISE_OPTIMIZE=1` is the same as `optimize`.
 - `PREFIXWISE_COLLECTOR` / `PREFIXWISE_COLLECTOR_TOKEN`: send records to a `prefixwise collect`
   (HTTP) or to the record log (`redis://`) instead of a ledger in this process. **Required with
   `--api-server-count` above 1:** each API-server process gets its own middleware, and a session's

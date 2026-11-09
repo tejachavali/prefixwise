@@ -794,7 +794,7 @@ def build_parser() -> argparse.ArgumentParser:
                         "(anyone who reaches the port can spend the key)")
     p.add_argument("--fix", action="append", metavar="NAME",
                    help="apply a fix to every request before forwarding (repeatable). "
-                        "Available: canonical_tools (proven). Default: $PREFIXWISE_FIXES or none")
+                        "Available: canonical_tools (proven), auto_breakpoints (opt-in, Anthropic). Default: $PREFIXWISE_FIXES or none")
     p.add_argument("--optimize", action="store_true",
                    help="apply every proven fix (today: canonical_tools), plus any --fix named")
     p.add_argument("--collector", metavar="URL",
@@ -869,7 +869,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--full-attention", action="store_true", default=None,
                    help="SGLang: the model has no sliding-window or Mamba layers (lets its KV events rule an eviction out)")
     p.add_argument("--fix", action="append", metavar="NAME",
-                   help="apply a fix (repeatable): canonical_tools (proven)")
+                   help="apply a fix (repeatable): canonical_tools (proven), auto_breakpoints (opt-in, Anthropic)")
     p.add_argument("--optimize", action="store_true", help="apply every proven fix (today: canonical_tools)")
     ledger_opt(p)
     p.add_argument("--otel", action="store_const", const="genai", default=None,

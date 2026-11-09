@@ -11,6 +11,17 @@ Only rewrites that cannot change what the prompt means are toggles:
   rebuilding definitions) misses the whole cache. Sorting is stable:
   same tool set, same bytes, every turn.
 
+- auto_breakpoints (Anthropic): cache_control markers for a request that
+  carries none, placed where agents reuse: the end of tools + system and
+  the latest message, with a third on the previous user turn when more
+  than Anthropic's 20-block lookback lies between. Not lossless for the
+  bill (a write costs 1.25x input, 2x for 1 hour, and pays off only when
+  read), so the proxy places them only when this edge saw the same
+  tools + system within the cache TTL (the session's own previous turn,
+  or another session's), the prefix is above the model's minimum, and the
+  client set no marker of its own (a client's markers are never moved).
+  Opt-in, not in --optimize until an E4 run shows the writes pay.
+
 `--optimize` turns on PROVEN_FIXES, the set with an E4 run behind it, and
 any --fix the user names on top.
 
@@ -29,7 +40,7 @@ from __future__ import annotations
 
 import json
 
-AVAILABLE_FIXES = ("canonical_tools",)
+AVAILABLE_FIXES = ("canonical_tools", "auto_breakpoints")
 PROVEN_FIXES = ("canonical_tools",)  # what --optimize turns on; a fix joins after an E4 run (FIX_STATUS)
 OPTIMIZE = "optimize"  # the name --optimize stands for in a fix list
 
@@ -41,7 +52,79 @@ FIX_STATUS = {
                     "97.5% on vLLM (Qwen3-4B); task success flat (0/60 and 1/60 turns changed). "
                     "experiments/e4/runs/2026-11-06-live.md",
     },
+    "auto_breakpoints": {
+        "status": "opt-in",
+        "evidence": "No E4 run yet. Places up to three ephemeral cache_control markers on an Anthropic request "
+                    "that carries none, only when this proxy saw the same tools and system prompt within the "
+                    "cache TTL; the rows it rewrote show whether the writes were read back "
+                    "(prefixwise fixes, 'Already active').",
+    },
 }
+
+MARKER = {"type": "ephemeral"}
+LOOKBACK_BLOCKS = 20  # Anthropic checks this many blocks before each marker for an earlier entry
+_CHARS_PER_TOKEN = 4  # a generous estimate: an over-count places a marker below the minimum, which Anthropic ignores at no cost
+
+
+def _with_marker(block) -> dict:
+    return {**block, "cache_control": MARKER} if isinstance(block, dict) else {"type": "text", "text": str(block),
+                                                                                 "cache_control": MARKER}
+
+
+def _mark_last(content):
+    """A message's content with a marker on its last block (a string becomes one text block)."""
+    if isinstance(content, list) and content:
+        return content[:-1] + [_with_marker(content[-1])]
+    if isinstance(content, str) and content:
+        return [_with_marker(content)]
+    return None
+
+
+def _n_blocks(content) -> int:
+    return len(content) if isinstance(content, list) else (1 if content not in (None, "") else 0)
+
+
+def auto_breakpoints(body: dict, min_prefix_tokens: int = 1024) -> dict | None:
+    """An Anthropic Messages body with cache_control markers placed, or None when none belongs:
+    the client set a marker anywhere (never moved), there is no tools + system prefix, or the
+    prefix is estimated below `min_prefix_tokens` (Anthropic would ignore the marker). Marker 1
+    ends tools + system (on the last system block, which covers the tools before it; on the last
+    tool when there is no system). Marker 2 is on the last block of the last message. Marker 3 is
+    on the last block of the previous user turn when more than LOOKBACK_BLOCKS blocks follow it,
+    where the previous request's marker 2 sat. Never mutates body."""
+    if "cache_control" in json.dumps(body, default=str):
+        return None
+    tools, system = body.get("tools"), body.get("system")
+    if not tools and not system:
+        return None
+    if len(json.dumps(tools or [], default=str)) + len(json.dumps(system or "", default=str)) \
+            < min_prefix_tokens * _CHARS_PER_TOKEN:
+        return None
+    out = dict(body)
+    if isinstance(system, list) and system:
+        out["system"] = system[:-1] + [_with_marker(system[-1])]
+    elif isinstance(system, str) and system:
+        out["system"] = [_with_marker(system)]
+    elif isinstance(tools, list) and tools and isinstance(tools[-1], dict):
+        out["tools"] = tools[:-1] + [_with_marker(tools[-1])]
+    msgs = body.get("messages")
+    if isinstance(msgs, list) and msgs and isinstance(msgs[-1], dict):
+        marked = _mark_last(msgs[-1].get("content"))
+        if marked is not None:
+            msgs = msgs[:-1] + [{**msgs[-1], "content": marked}]
+            # the previous user turn: the previous request ended there, so its marker 2 sat there
+            after = _n_blocks(msgs[-1].get("content"))
+            for i in range(len(msgs) - 2, -1, -1):
+                m = msgs[i]
+                if isinstance(m, dict) and m.get("role") == "user":
+                    if after > LOOKBACK_BLOCKS:
+                        prev = _mark_last(m.get("content"))
+                        if prev is not None:
+                            msgs = msgs[:i] + [{**m, "content": prev}] + msgs[i + 1:]
+                    break
+                after += _n_blocks(m.get("content")) if isinstance(m, dict) else 0
+            out["messages"] = msgs
+    return out
 
 
 def _tool_name(tool: object) -> str | None:
@@ -108,7 +191,7 @@ FIX_ADVICE: dict[str, dict] = {
                             "send X-Prefixwise-Compaction-Event: 1 and compact at task boundaries."},
     "retry_replay": {"toggle": None,
                      "fix": "Check retry logic: identical requests within seconds are re-billed in full."},
-    "breakpoint_misplaced": {"toggle": None,
+    "breakpoint_misplaced": {"toggle": "auto_breakpoints",
                              "fix": "Anthropic: add a cache_control breakpoint after the stable prefix "
                                     "(tools and system), and one on the last message so the growing "
                                     "history is cached too."},
