@@ -32,7 +32,8 @@ pip install -e ".[engines]" "vllm>=0.30"
 MODEL=Qwen/Qwen3-4B ./experiments/e1_open/vllm_server.sh &        # publishes KV events on 5557
 python experiments/e_template/e_template.py --engine vllm --url http://127.0.0.1:8000 --model Qwen/Qwen3-4B \
     --kv-events tcp://127.0.0.1:5557
-# SGLang (Python 3.12 venv, as in experiments/e_evict/README.md)
+# SGLang (Python 3.12 venv, as in experiments/e_evict/README.md). Stop the vLLM server first:
+# the two do not fit on one L4 together (seen live: SGLang died loading the model)
 MODEL=Qwen/Qwen3-4B KV_EVENTS=1 ./experiments/e1_open/sglang_server.sh &
 python experiments/e_template/e_template.py --engine sglang --url http://127.0.0.1:30000 --model Qwen/Qwen3-4B \
     --kv-events tcp://127.0.0.1:5557 --full-attention --block 1
