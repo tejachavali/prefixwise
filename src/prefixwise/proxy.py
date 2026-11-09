@@ -61,11 +61,11 @@ import urllib.request
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from .classifier import _blocks_by_role, _role_unchanged
+from .classifier import MIN_PROVIDER_TTL_SECONDS, _blocks_by_role, _role_unchanged, anthropic_min_prefix
 from .details import Facts, body_facts, keeps_thinking, usage_facts
 from .diagnostics import anthropic_diagnostics
 from .fingerprint import Fingerprinter
-from .fixes import apply_fixes, parse_fixes
+from .fixes import apply_fixes, auto_breakpoints, parse_fixes
 from . import api
 from .pricing import PriceTable, breakdown, completion_tokens_of, normalize_usage  # noqa: F401 (re-exported)
 from .ledger import Ledger, LedgerEntry
@@ -925,8 +925,24 @@ class PrefixwiseProxy:
         credential = hashlib.sha256((headers.get("x-api-key") or headers.get("authorization")
                                      or self.api_key or "").encode()).hexdigest()[:12]
         facts = body_facts(provider, forward_body, model=str(body.get("model", "")), credential=credential)
-        request_id = str(uuid.uuid4())
         sent = time.time()
+        unmarked = None
+        if ("auto_breakpoints" in self.fixes and provider == "anthropic" and facts.prefix_key_masked
+                and (provider, "auto_breakpoints") not in self.rejected_fields):
+            # A write pays only when read: place markers only when this edge saw the same tools and
+            # system prompt (this session's previous turn, or another session's) within the cache TTL.
+            with self._lock:
+                seen = self.prefix_seen.get(facts.prefix_key_masked)
+            ttl = cache_ttl_seconds(provider, body, headers) or MIN_PROVIDER_TTL_SECONDS
+            # the same bytes, not a prefix that matches only with its timestamp masked: that one is
+            # rewritten every turn, and a marker on it would buy a write nobody reads
+            if seen is not None and sent - seen[0] <= ttl and seen[2] == facts.prefix_key_canonical:
+                marked = auto_breakpoints(forward_body, anthropic_min_prefix(facts.model))
+                if marked is not None:
+                    unmarked, forward_body = forward_body, marked
+                    fixes_applied = [*fixes_applied, "auto_breakpoints"]
+                    facts = body_facts(provider, forward_body, model=facts.model, credential=credential)
+        request_id = str(uuid.uuid4())
         facts.sent_at = sent
         if facts.prefix_key:
             with self._lock:
@@ -953,6 +969,8 @@ class PrefixwiseProxy:
             "forward_body": forward_body, "session_id": session_id,
             "upstream_session_id": upstream_session_id, "engine_token": engine_token,
             "injected": injected,
+            "unmarked_body": unmarked,  # the client's request before auto_breakpoints: resent on a 400
+            "credential": credential,
             "agent_id": str(headers.get("x-prefixwise-agent-id") or body.get("agent_id") or "proxy"),
             "task_id": str(task_id) if task_id else None,
             "request_id": request_id, "model": str(body.get("model", "unknown")),
@@ -1022,7 +1040,8 @@ class PrefixwiseProxy:
             previous_response_id=(str(body["previous_response_id"]) if ctx.get("api") == "responses"
                                   and body.get("previous_response_id") else None),
             blocks=fps, params={k: param_fingerprint(body.get(k)) for k in PARAM_KEYS if body.get(k) is not None},
-            has_breakpoint=has_cache_breakpoint(body), ttl_seconds=ctx.get("ttl_seconds"), facts=facts,
+            # the request the provider received: with auto_breakpoints on, the markers Prefixwise placed
+            has_breakpoint=has_cache_breakpoint(ctx.get("forward_body") or body), ttl_seconds=ctx.get("ttl_seconds"), facts=facts,
             fixes_applied=list(ctx.get("fixes_applied") or []),
             sent_at=ctx.get("span_start") or ctx.get("sent_at") or facts.done_at,
             engine=self.engine_for(provider), engine_caches=self.engine_caches, engine_verdict=verdict,
@@ -1170,8 +1189,8 @@ class PrefixwiseProxy:
         if provider == "anthropic":  # as Anthropic bills: nothing without cache_control; a first write
             if not markers:
                 cached = 0
-            elif not cached:
-                write = 2000
+            elif not cached or not getattr(prev, "has_breakpoint", True):  # the previous turn wrote nothing
+                cached, write = 0, 2000
         call = None
         if self.mock_tool_calls and body is not None:
             # One tool call at a time: a turn that follows a tool call gets text, however the agent
@@ -1293,9 +1312,31 @@ class PrefixwiseProxy:
         adding that field for this provider once it is rejected twice. True if the request
         should be sent again. Prefixwise must never turn a working request into an error."""
         injected = ctx.get("injected") or {}
-        if status not in (400, 422) or not injected:
+        if status not in (400, 422) or not (injected or ctx.get("unmarked_body") is not None):
             return False
         text = (payload if isinstance(payload, str) else json.dumps(payload)).lower()
+        if ctx.get("unmarked_body") is not None and "cache_control" in text:
+            # the markers sit inside blocks, so they are undone as a whole: the client's body as it was
+            ctx["forward_body"], ctx["unmarked_body"] = ctx["unmarked_body"], None
+            ctx["fixes_applied"] = [f for f in ctx.get("fixes_applied") or [] if f != "auto_breakpoints"]
+            old = ctx["facts"]
+            facts = body_facts(ctx["provider"], ctx["forward_body"], model=old.model, credential=ctx.get("credential", ""))
+            for name in ("sent_at", "fanout_age", "shared_age", "shared_write_pos", "volatile_shared_age",
+                         "volatile_shared_wrote", "volatile_shared_kind"):
+                setattr(facts, name, getattr(old, name))
+            ctx["facts"] = facts
+            key = (ctx["provider"], "auto_breakpoints")
+            with self._lock:
+                self._rejections[key] = n = self._rejections.get(key, 0) + 1
+                if n >= 2:
+                    self.rejected_fields.add(key)
+            if n == 2:
+                print(f"prefixwise: the {ctx['provider']} upstream rejects the cache_control markers "
+                      "auto_breakpoints adds; requests are resent without them, and they are no longer added",
+                      file=sys.stderr)
+            return True
+        if not injected:
+            return False
         rejected = [f for f in injected if any(name in text for name in (f, *_INNER_KEYS.get(f, ())))]
         if not rejected:
             return False

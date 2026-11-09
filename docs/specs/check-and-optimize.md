@@ -1,6 +1,6 @@
 # Specs: `prefixwise check` and `prefixwise serve --optimize`
 
-Status: `prefixwise check` **built** (0.9, 2026-11-08, as amended below); `--optimize` **built** (0.10.5: the flag and the proven set; sections 2.2 and 2.3 still proposed). Both keep the core guarantee: the prompt itself is
+Status: `prefixwise check` **built** (0.9, 2026-11-08, as amended below); `--optimize` **built** (0.10.5: the flag and the proven set, and `--fix auto_breakpoints` as opt-in; section 2.3 still proposed). Both keep the core guarantee: the prompt itself is
 never stored or sent anywhere; only block hashes, counts and Prefixwise's verdicts are.
 
 ## 1. `prefixwise check`: a CI gate for cache regressions
@@ -129,7 +129,7 @@ is the one a rewrite must not touch. Prefixwise's own comparison agrees: a param
 a digest of its canonical JSON (`param_fingerprint`), so a key reorder is no change and no cause
 would ever recommend such a fix. Built then dropped on these grounds on 2026-11-09.
 
-### 2.2 Automatic `cache_control` placement: opt-in, not lossless for the bill
+### 2.2 Automatic `cache_control` placement: opt-in, not lossless for the bill (built 0.10.5)
 
 Adding or moving a breakpoint changes what the user pays: a 5-minute cache write costs 1.25x
 input, a 1-hour write 2x, and a write pays off only if it is read about 1.4 times
@@ -144,6 +144,22 @@ input, a 1-hour write 2x, and a write pays off only if it is read about 1.4 time
   least one earlier turn within the TTL (a one-shot request would pay for a write it never reads).
 - Records the predicted break-even and, after the session, the realised reads, so `prefixwise
   fixes` can show whether the policy paid.
+
+As built (`auto_breakpoints`, `fixes.py`; applied in `PrefixwiseProxy.prepare`), with three
+corrections to the plan above. Marker 1 goes on the last **system** block, which covers the tools
+before it (on the last tool only when there is no system): a marker on the last tool would leave
+the system prompt uncached. Marker 2 goes on the last block of the last message. Marker 3 goes on
+the last block of the previous user turn, where the previous request's marker 2 sat, and only when
+more than 20 blocks follow it; that is what lets Anthropic's lookback find the earlier entry. The
+"earlier turn within the TTL" guard is keyed on the edge's own `prefix_seen` map (the same tools
+and system prompt completed on this edge within the TTL, from this session or another), because
+with a remote collector the edge has no session history; a new session whose prefix another
+session just wrote gets markers from its first turn. The minimum-prefix guard estimates tokens at
+four characters each; an over-count only places a marker Anthropic ignores at no cost. Markers sit
+inside blocks, so a provider 400 that names `cache_control` resends the client's body as it was
+(not the field-by-field undo the injected ids use) and, on the second such 400, stops placing
+them. `prefixwise fixes` lists the rows it rewrote under "Already active"; break-even per session
+is not computed yet. Not in `--optimize`: no E4 run.
 
 ### 2.3 Volatile values in the system prompt: warn by default
 
