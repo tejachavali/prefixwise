@@ -35,7 +35,9 @@ extended-thinking docs (Nov 2026), Claude Code / Codex / opencode / LiteLLM issu
                      rounding of reads could hide a reused output, so nothing is claimed. Live
                      (experiments/e_template): the previous output was recomputed on 47 of 50 turns
                      on vLLM and SGLang, 25-36% of prompt tokens; the detail, added after that run,
-                     would have named 29 of them (the floor leaves the short answers out).
+                     would have named 29 of them (the floor leaves the short answers out). Live on a
+                     DeepSeek-R1 distill: 25 of 25 turns (57%); on Qwen2.5, whose template keeps
+                     history as generated: 0 of 25.
   thinking_stripped  history_edit on a model that keeps earlier turns' thinking (Opus
                      4.5+, Sonnet 4.6+, Haiku 5.5, Fable, Mythos), where the only
                      change to earlier messages is removed thinking blocks. On other

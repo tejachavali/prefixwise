@@ -128,7 +128,10 @@ to 25% of all prompt tokens. Prefixwise reports such a turn as `none` with the d
 that, the rounding of reads could hide a reused output). Two more things the run showed: a truncated answer (no closing `</think>`) is
 kept whole as content, so the prompt grows by the unfinished thinking and carries it on every later
 turn; and `enable_thinking: false` only adds a 4-token stub to the generation prompt, so toggling it
-costs nothing (`none`, with `param_rendered` as a secondary note). Llama 3.x templates keep history as
+costs nothing (`none`, with `param_rendered` as a secondary note). The same harness on three more templates ([record](../experiments/e_template/runs/2026-11-09-colab-l4-models.md)):
+a DeepSeek-R1 distill recomputes the previous answer on 25 of 25 turns, 57% of prompt tokens, every one
+named `output_rerendered`; Qwen2.5 reuses it in full on 25 of 25, no detail; Llama 3.2 reuses it in full by
+its template. Llama 3.x templates keep history as
 generated (full reuse) but render the date into the system header: every session's prefix is
 recomputed once a day at the server's midnight, with no change in the request, which Prefixwise sees
 as `evicted` (inferred) or, with KV events, as `unknown` "not an eviction".
