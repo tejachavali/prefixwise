@@ -373,6 +373,9 @@ def test_a_restart_with_a_fresh_timestamp_is_named_on_any_provider():
     assert req("s1", "2026-11-09 07:15:00") == ("first_write", None)
     cause, detail = req("s2", "2026-11-09 07:15:30")  # the restart, 30 s later, a fresh timestamp
     assert (cause, detail) == ("first_write", "volatile_prefix_at_start")
+    with p.ledger.reader() as c:
+        ev = c.execute("SELECT evidence FROM entries ORDER BY id DESC LIMIT 1").fetchone()[0]
+    assert "except for a date or time in the system prompt" in ev and "set the timestamp once per day" in ev
     # a different wording is a different prompt, not a restart
     assert req("s3", "2026-11-09 07:16:00", " Be brief.")[1] is None
     # the same session again is not a first request
@@ -405,4 +408,67 @@ def test_the_report_prints_the_fix_for_a_restart_miss():
                                                       {"role": "user", "content": "hi"}]},
                  {"x-prefixwise-session-id": session})
     text = render(findings(p.ledger))
-    assert "except for a date, time or id" in text and "Fix: Set the timestamp or id once per day" in text
+    assert "except for a date, time or id" in text and "Fix: Move the value that changes per session" in text
+
+
+def test_restart_detail_names_what_differed_and_ignores_what_is_not_volatile():
+    """Review scenarios: a per-user id names "an id"; a number names the mixed kind; a changed tool version
+    is a catalog change, not this; tools in another key order are the same prefix, not this."""
+    def fresh():
+        p = PrefixwiseProxy(upstream_url="http://unused", api_key="k")
+        usages = [{"prompt_tokens": 3000, "completion_tokens": 5, "prompt_tokens_details": {"cached_tokens": 0}}] * 6
+
+        def fake(provider, body, request_id, session_id, client_headers, api="chat"):
+            return 200, {"id": "chatcmpl-" + request_id[:8], "usage": usages.pop(0)}
+        p._forward = fake
+        return p
+
+    def run(p, session, system, tools):
+        body = {"model": "m", "tools": tools, "messages": [{"role": "system", "content": system * 20},
+                                                           {"role": "user", "content": "hi"}]}
+        res, entry = p.handle("openai", body, {"x-prefixwise-session-id": session})
+        with p.ledger.reader() as c:
+            ev = c.execute("SELECT evidence FROM entries ORDER BY id DESC LIMIT 1").fetchone()[0]
+        return entry.detail, ev
+
+    tool = lambda name: {"type": "function", "function": {"name": name, "parameters": {"type": "object"}}}
+    tools = [tool("read_file"), tool("write_file")]
+    # a per-user id in the template: another user of the same prompt
+    p = fresh()
+    run(p, "u1", "User alice42, be careful. ", tools)
+    detail, ev = run(p, "u2", "User bob77, be careful. ", tools)
+    assert detail == "volatile_prefix_at_start" and "except for an id" in ev and "another user of the same prompt" in ev
+    # a number: the mixed wording, no false "id" or "date"
+    p = fresh()
+    run(p, "n1", "You have 50 credits. ", tools)
+    detail, ev = run(p, "n2", "You have 49 credits. ", tools)
+    assert detail == "volatile_prefix_at_start" and "volatile values (dates, ids or numbers)" in ev
+    # a tool whose name changed version: a different catalog, nothing shareable
+    p = fresh()
+    run(p, "v1", "Be careful. ", [tool("read_v2")])
+    assert run(p, "v2", "Be careful. ", [tool("read_v3")])[0] is None
+    # the same tools with keys in another order: the same prefix, not a volatile difference
+    p = fresh()
+    run(p, "k1", "Be careful. ", [{"type": "function", "function": {"name": "a", "parameters": {"type": "object"}}}])
+    assert run(p, "k2", "Be careful. ", [{"function": {"parameters": {"type": "object"}, "name": "a"}, "type": "function"}])[0] is None
+
+
+def test_restart_detail_on_anthropic_needs_a_write_inside_the_prefix_and_yields_to_an_exact_match():
+    """Review scenarios: a write at the last user message only is not a shareable prefix; a session whose
+    prompt equals an earlier session's exactly (a third one with a fresh stamp in between) is the exact
+    match, shared_prefix_not_reused, not this."""
+    q = proxy([a_usage(write5=8_000), a_usage(fresh=8_000), a_usage(write5=8_000), a_usage(fresh=8_000),
+               a_usage(fresh=8_000)])
+
+    def areq(session, stamp, system_marker=True, last_marker=False):
+        b = body([{"role": "user", "content": "hi"}], system_marker=system_marker, last_marker=last_marker)
+        b["system"][0]["text"] = f"Now: {stamp}. " + b["system"][0]["text"]
+        res, entry = q.handle("anthropic", b, {"x-prefixwise-session-id": session})
+        return entry.detail
+    # b1 writes, but only at its last user message: nothing an other session's system prompt could read
+    assert areq("b1", "2026-11-09T07:00:00Z", system_marker=False, last_marker=True) is None
+    assert areq("b2", "2026-11-09T07:00:30Z") is None
+    # a1 writes at the system breakpoint; a2 restarts with a fresh stamp; a3 comes back with a1's exact prompt
+    assert areq("a1", "2026-11-09T07:15:00Z") is None
+    assert areq("a2", "2026-11-09T07:15:30Z") == "volatile_prefix_at_start"
+    assert areq("a3", "2026-11-09T07:15:00Z") == "shared_prefix_not_reused"

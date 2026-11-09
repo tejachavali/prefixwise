@@ -49,9 +49,9 @@ DETAIL_PLAIN = {
                                  "or warm the prefix first",
     "shared_prefix_not_reused": "another session had just cached the same tools and system prompt, yet nothing "
                                 "was read",
-    "volatile_prefix_at_start": "another session had the same tools and system prompt moments earlier except "
-                                "for a date, time or id in it, so the restart recomputed a prefix it could have "
-                                "shared",
+    "volatile_prefix_at_start": "another session (a restart, or another user of the same prompt) had the same "
+                                "tools and system prompt moments earlier except for a date, time or id in it, so "
+                                "this one recomputed a prefix it could have shared",
     "thinking_stripped": "thinking blocks were removed from earlier messages",
     "cache_key_changed": "prompt_cache_key changed between turns",
 }
@@ -59,8 +59,9 @@ DETAIL_PLAIN = {
 
 # Details under an expected cause that still have something to fix: printed with their fix.
 DETAIL_FIX = {
-    "volatile_prefix_at_start": "Set the timestamp or id once per day, or move it to the end of the prompt, so a "
-                                "restarted session shares the cached tools and system prompt.",
+    "volatile_prefix_at_start": "Move the value that changes per session (a timestamp, an id) out of the system "
+                                "prompt to the end of the prompt; a timestamp can also be set once per day. Then a "
+                                "restarted or parallel session shares the cached tools and system prompt.",
 }
 
 
