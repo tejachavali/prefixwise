@@ -39,8 +39,8 @@ never stored or sent anywhere; only block hashes, counts and Prefixwise's verdic
   production; a fixed cutoff date is to be ignored).
 - Exit codes: 2 when a gated cause is found and not allowed, else 1 when the command exited
   non-zero, else 0. With `--json` the command's own stdout goes to stderr so stdout is the report.
-- The Action pins the version from its own tag (`@v0.9.0` installs `prefixwise==0.9.0`; a moving
-  `@v0.9` installs the latest).
+- The Action pins the version from its own tag (`@v0.10.0` installs `prefixwise==0.10.0`; a moving
+  `@v0.10` installs the latest).
 
 **Problem.** The costly cache regressions are code changes: a tool list built from a set (order
 drifts, `tool_reserialize`), a timestamp added to the system prompt (`volatile_system`), a
@@ -91,7 +91,7 @@ a baseline, report tokens only. Never invent a price (the pricing rule).
 **GitHub Action** (composite, in this repo as `action.yml`):
 
 ```yaml
-- uses: tejachavali/prefixwise@v0.9
+- uses: tejachavali/prefixwise@v0.10
   with:
     command: pytest tests/agent_scenarios
     fail-on: tool_reserialize,volatile_system,breakpoint_misplaced

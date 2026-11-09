@@ -22,11 +22,12 @@ Every number below is from a live run against real models; each links to its rec
 | Tells engine eviction from everything else | GPU KV cache flooded 3x; vLLM, SGLang, with and without LMCache / HiCache | evictions **5 of 5**, confirmed from the KV events of vLLM and of SGLang; prefixes restored from CPU counted as hits **5 of 5** ([record](experiments/e_evict/runs/2026-11-07-colab-l4.md), [SGLang events](experiments/e_evict/runs/2026-11-07-colab-l4-sglang-events.md)) |
 | A fix pays what it predicts | `--fix canonical_tools` on 60 paired requests with tool-order drift | **99.9%** (Claude) and **97.5%** (vLLM) of predicted savings realised, task success unchanged ([record](experiments/e4/runs/2026-11-06-live.md)) |
 | Works with real agents | `prefixwise run` with Claude Code, Codex CLI, opencode, Anthropic and OpenAI SDKs | all five ([record](experiments/compat/2026-11-07.md)); opencode building a small CLI: 92% cached, 0 avoidable tokens ([record](experiments/dogfood/2026-11-07-opencode-2.md)) |
+| Tells a template's cost from an eviction | 50 multi-turn sessions on Qwen3-4B (vLLM 0.33, SGLang 0.5.23, KV events on) plus opencode and Claude Code against vLLM | "not an eviction" **0 of 58** requests; the previous answer recomputed on **47 of 50** turns, 25-36% of prompt tokens, now named `output_rerendered` ([record](experiments/e_template/runs/2026-11-09-colab-l4-rerun.md)) |
 | Costs almost nothing | proxy overhead and throughput, measured on a VM | **3 ms** per request at 2k tokens, 13 ms at 120k; 185 requests/s per process ([record](benchmarks/runs/2026-11-07-vm.md)) |
 
 Not yet measured live: agreement with OpenAI's own miss reason (its diagnostics returned
-`unavailable` on every call we made), TTL expiry and routing misses in real traffic, and how
-often "not an eviction" occurs in real agent traffic. [Limits](#limits) has the full list.
+`unavailable` on every call we made), and TTL expiry and routing misses in real traffic.
+[Limits](#limits) has the full list.
 
 ### Turning on a fix: what Prefixwise predicted, and what it saved
 
@@ -72,6 +73,7 @@ Ways in, each about thirty seconds; all write the same ledger and the same repor
 |---|---|---|
 | An agent you run from a terminal (Claude Code, Codex, opencode, your own) | `prefixwise run -- <your command>` | unchanged: the agent still calls its provider |
 | A service, several agents, or a gateway | `prefixwise serve --upstream https://api.anthropic.com` and point clients at it | unchanged |
+| Your own vLLM server | `vllm serve <model> ... --middleware prefixwise.PrefixwiseMiddleware`: no proxy, no port change ([docs/VLLM.md](docs/VLLM.md)) | nothing leaves the server |
 | Your own Python code | `client = prefixwise.wrap(Anthropic())` (or OpenAI) | unchanged: calls go straight to the provider |
 | LiteLLM (SDK or proxy server) | `litellm.callbacks = [PrefixwiseCallback()]` | unchanged |
 | Claude Code or Codex on a subscription (no API key) | `prefixwise import claude-code` / `prefixwise import codex` | nothing is sent anywhere: reads the local logs |
@@ -84,7 +86,7 @@ pip install prefixwise
 prefixwise run -- claude                     # or any agent: your command after the --
 ```
 
-`prefixwise run` starts the proxy, points the agent at it (`ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`; the agent keeps its own API key), and when the agent exits prints what that run's cache did, in plain English. This is the real output of `prefixwise report` on a ledger from the mock provider (20 requests from four scripted sessions: a date in the system prompt on every turn, tools shuffled on every turn, a well-behaved one, and a Haiku side call before a main thread; the mock answers every request with 2,000 prompt tokens and, like a provider's cache with a breakpoint on the last message, reads all of them when the request continues the previous one with the same tools, system prompt and parameters (on Anthropic, with a cache breakpoint), and on Anthropic writes all of them when it does not, so the token counts are flat and the verdicts, prices and fixes are the real ones):
+`prefixwise run` starts the proxy, points the agent at it (`ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`; the agent keeps its own API key), and when the agent exits prints what that run's cache did, in plain English. If a base URL is a vLLM or SGLang server of your own, it recognises it and reads its KV events, as `serve` does. This is the real output of `prefixwise report` on a ledger from the mock provider (20 requests from four scripted sessions: a date in the system prompt on every turn, tools shuffled on every turn, a well-behaved one, and a Haiku side call before a main thread; the mock answers every request with 2,000 prompt tokens and, like a provider's cache with a breakpoint on the last message, reads all of them when the request continues the previous one with the same tools, system prompt and parameters (on Anthropic, with a cache breakpoint), and on Anthropic writes all of them when it does not, so the token counts are flat and the verdicts, prices and fixes are the real ones):
 
 ```
 20 requests, 40,000 prompt tokens, 30% served from cache. Cost $0.0666.
@@ -135,7 +137,7 @@ prefixwise check -- pytest tests/agent_scenarios      # exit 2 on a cache regres
 The costly regressions are code changes that pass every functional test: a tool list built from a set (its order drifts), a timestamp added to the system prompt, a `cache_control` marker moved or dropped, an earlier tool result re-rendered. `prefixwise check` runs your agent's scenarios against a local mock provider (no API calls, nothing leaves the machine), compares each turn with its conversation's previous turn exactly as in production, and fails on `tool_reserialize`, `volatile_system`, `breakpoint_misplaced` and `tool_result_mutation` (`--strict` adds `history_edit`, `system_edit`, `param_rendered`; `--fail-on` names any set). The mock answers a turn that offers tools with a tool call (placeholder arguments the agent must accept; `tool_choice` honoured; never two in a row, so no loop), so an agent's loop runs a second turn, the one the gate judges; it holds each conversation's first response for a second so a per-second timestamp changes between turns, and warns about a date or time it sees in a system prompt that did not change within the run. Under pytest, each test's node id is the scenario name (a bundled plugin), so a finding reads `scenario=tests/test_agent.py::test_refactor`, and `--allow FILE` passes known findings by (scenario, cause, first changed block) while you fix them. With a baseline from production (`prefixwise export --baseline`, read from `.prefixwise-baseline.json`), each finding gets a monthly projection, labelled as the estimate it is; without one, tokens. `--bodies FILE...` judges saved request bodies instead (`prefixwise explain`'s format). As a GitHub Action:
 
 ```yaml
-- uses: tejachavali/prefixwise@v0.9
+- uses: tejachavali/prefixwise@v0.10
   with:
     command: pytest tests/agent_scenarios
 ```
