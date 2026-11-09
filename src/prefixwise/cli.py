@@ -180,11 +180,15 @@ def _report_session(led, session: str, as_json: bool, since: float | None = None
     prompt = sum(t["prompt_tokens"] or 0 for t in turns)
     cached = sum(t["cached_tokens"] or 0 for t in turns)
     avoidable = sum(t["avoidable_tokens"] or 0 for t in turns)
+    priced = [t for t in turns if t.get("cost") is not None]
+    cost = sum(t["cost"] for t in priced)
     models = sorted({t["model"] for t in turns if t.get("model")})
     agents = sorted({t["agent_id"] for t in turns if t.get("agent_id")})
     print(f"Session {sid}: {len(turns)} requests, {_fmt_int(prompt)} prompt tokens, "
           f"cache hit rate {_fmt_pct(cached / prompt) if prompt else '-'}, "
-          f"{_fmt_int(avoidable)} avoidable" + (f"   ({', '.join(models)})" if len(models) == 1 else ""))
+          f"{_fmt_int(avoidable)} avoidable" + (f", cost {_fmt_usd(cost)}" if priced else "")
+          + (f" ({len(priced)} of {len(turns)} priced)" if priced and len(priced) < len(turns) else "")
+          + (f"   ({', '.join(models)})" if len(models) == 1 else ""))
     print()
     # Each model has its own cache and each agent (a subagent) its own conversation: when a session
     # mixes them, say which row is which, since "first changed" compares within a model and conversation.
@@ -193,16 +197,18 @@ def _report_session(led, session: str, as_json: bool, since: float | None = None
     for t in turns:
         tag = ([t.get("model") or "-"] if len(models) > 1 else []) + ([t.get("agent_id") or "-"] if len(agents) > 1 else [])
         if t.get("status") and t["status"] >= 400:
-            rows.append([t["turn"], *tag, "-", "-", "-", f"failed: {t.get('error') or t['status']}", "-", "-", "-"])
+            rows.append([t["turn"], *tag, "-", "-", "-", f"failed: {t.get('error') or t['status']}", "-", "-", "-", "-"])
             continue
         cause = t.get("cause") or "-"
         if t.get("detail"):
             cause += f" ({t['detail']})"
         rows.append([t["turn"], *tag, _fmt_int(t["prompt_tokens"] or 0), _fmt_int(t["cached_tokens"] or 0),
                      _fmt_pct(t["hit_rate"]) if t["hit_rate"] is not None else "-", cause,
-                     t["first_changed"] or "-", _fmt_int(t["avoidable_tokens"] or 0),
+                     t["first_changed"] or "-", _fmt_usd(t["cost"]) if t.get("cost") is not None else "-",
+                     _fmt_int(t["avoidable_tokens"] or 0),
                      _fmt_usd(t["avoidable_cost"]) if t.get("avoidable_cost") is not None else "-"])
-    print(_table(rows, ["turn", *extra, "prompt", "cached", "hit", "cause", "first changed", "avoidable", "$"]))
+    print(_table(rows, ["turn", *extra, "prompt", "cached", "hit", "cause", "first changed", "cost", "avoidable",
+                        "avoidable $"]))
     print("\nfirst changed: the block where this request's prompt first differs from the request it was compared "
           "with, this session's previous one on the same model and conversation (system[0]: the first system "
           "block; tools[2]: the third tool; messages[5]: the sixth message). One request: prefixwise request <id>")
