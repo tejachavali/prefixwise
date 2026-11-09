@@ -22,11 +22,12 @@ Every number below is from a live run against real models; each links to its rec
 | Tells engine eviction from everything else | GPU KV cache flooded 3x; vLLM, SGLang, with and without LMCache / HiCache | evictions **5 of 5**, confirmed from the KV events of vLLM and of SGLang; prefixes restored from CPU counted as hits **5 of 5** ([record](experiments/e_evict/runs/2026-11-07-colab-l4.md), [SGLang events](experiments/e_evict/runs/2026-11-07-colab-l4-sglang-events.md)) |
 | A fix pays what it predicts | `--fix canonical_tools` on 60 paired requests with tool-order drift | **99.9%** (Claude) and **97.5%** (vLLM) of predicted savings realised, task success unchanged ([record](experiments/e4/runs/2026-11-06-live.md)) |
 | Works with real agents | `prefixwise run` with Claude Code, Codex CLI, opencode, Anthropic and OpenAI SDKs | all five ([record](experiments/compat/2026-11-07.md)); opencode building a small CLI: 92% cached, 0 avoidable tokens ([record](experiments/dogfood/2026-11-07-opencode-2.md)) |
+| Tells a template's cost from an eviction | 50 multi-turn sessions on Qwen3-4B (vLLM 0.33, SGLang 0.5.23, KV events on) plus opencode and Claude Code against vLLM | "not an eviction" **0 of 58** requests; the previous answer recomputed on **47 of 50** turns, 25-36% of prompt tokens, now named `output_rerendered` ([record](experiments/e_template/runs/2026-11-09-colab-l4-rerun.md)) |
 | Costs almost nothing | proxy overhead and throughput, measured on a VM | **3 ms** per request at 2k tokens, 13 ms at 120k; 185 requests/s per process ([record](benchmarks/runs/2026-11-07-vm.md)) |
 
 Not yet measured live: agreement with OpenAI's own miss reason (its diagnostics returned
-`unavailable` on every call we made), TTL expiry and routing misses in real traffic, and how
-often "not an eviction" occurs in real agent traffic. [Limits](#limits) has the full list.
+`unavailable` on every call we made), and TTL expiry and routing misses in real agent traffic.
+[Limits](#limits) has the full list.
 
 ### Turning on a fix: what Prefixwise predicted, and what it saved
 
@@ -72,6 +73,7 @@ Ways in, each about thirty seconds; all write the same ledger and the same repor
 |---|---|---|
 | An agent you run from a terminal (Claude Code, Codex, opencode, your own) | `prefixwise run -- <your command>` | unchanged: the agent still calls its provider |
 | A service, several agents, or a gateway | `prefixwise serve --upstream https://api.anthropic.com` and point clients at it | unchanged |
+| Your own vLLM server | `pip install "prefixwise[engines]"`, then `vllm serve <model> ... --middleware prefixwise.PrefixwiseMiddleware`: no proxy, no port change ([docs/VLLM.md](docs/VLLM.md)) | nothing leaves the server |
 | Your own Python code | `client = prefixwise.wrap(Anthropic())` (or OpenAI) | unchanged: calls go straight to the provider |
 | LiteLLM (SDK or proxy server) | `litellm.callbacks = [PrefixwiseCallback()]` | unchanged |
 | Claude Code or Codex on a subscription (no API key) | `prefixwise import claude-code` / `prefixwise import codex` | nothing is sent anywhere: reads the local logs |
@@ -84,7 +86,7 @@ pip install prefixwise
 prefixwise run -- claude                     # or any agent: your command after the --
 ```
 
-`prefixwise run` starts the proxy, points the agent at it (`ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`; the agent keeps its own API key), and when the agent exits prints what that run's cache did, in plain English. This is the real output of `prefixwise report` on a ledger from the mock provider (20 requests from four scripted sessions: a date in the system prompt on every turn, tools shuffled on every turn, a well-behaved one, and a Haiku side call before a main thread; the mock answers every request with 2,000 prompt tokens and, like a provider's cache with a breakpoint on the last message, reads all of them when the request continues the previous one with the same tools, system prompt and parameters (on Anthropic, with a cache breakpoint), and on Anthropic writes all of them when it does not, so the token counts are flat and the verdicts, prices and fixes are the real ones):
+`prefixwise run` starts the proxy, points the agent at it (`ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`; the agent keeps its own API key), and when the agent exits prints what that run's cache did, in plain English. If a base URL is a vLLM or SGLang server of your own, it recognises it and reads its KV events, as `serve` does. This is the real output of `prefixwise report` on a ledger from the mock provider (20 requests from four scripted sessions: a date in the system prompt on every turn, tools shuffled on every turn, a well-behaved one, and a Haiku side call before a main thread; the mock answers every request with 2,000 prompt tokens and, like a provider's cache with a breakpoint on the last message, reads all of them when the request continues the previous one with the same tools, system prompt and parameters (on Anthropic, with a cache breakpoint), and on Anthropic writes all of them when it does not, so the token counts are flat and the verdicts, prices and fixes are the real ones):
 
 ```
 20 requests, 40,000 prompt tokens, 30% served from cache. Cost $0.0666.
@@ -135,7 +137,7 @@ prefixwise check -- pytest tests/agent_scenarios      # exit 2 on a cache regres
 The costly regressions are code changes that pass every functional test: a tool list built from a set (its order drifts), a timestamp added to the system prompt, a `cache_control` marker moved or dropped, an earlier tool result re-rendered. `prefixwise check` runs your agent's scenarios against a local mock provider (no API calls, nothing leaves the machine), compares each turn with its conversation's previous turn exactly as in production, and fails on `tool_reserialize`, `volatile_system`, `breakpoint_misplaced` and `tool_result_mutation` (`--strict` adds `history_edit`, `system_edit`, `param_rendered`; `--fail-on` names any set). The mock answers a turn that offers tools with a tool call (placeholder arguments the agent must accept; `tool_choice` honoured; never two in a row, so no loop), so an agent's loop runs a second turn, the one the gate judges; it holds each conversation's first response for a second so a per-second timestamp changes between turns, and warns about a date or time it sees in a system prompt that did not change within the run. Under pytest, each test's node id is the scenario name (a bundled plugin), so a finding reads `scenario=tests/test_agent.py::test_refactor`, and `--allow FILE` passes known findings by (scenario, cause, first changed block) while you fix them. With a baseline from production (`prefixwise export --baseline`, read from `.prefixwise-baseline.json`), each finding gets a monthly projection, labelled as the estimate it is; without one, tokens. `--bodies FILE...` judges saved request bodies instead (`prefixwise explain`'s format). As a GitHub Action:
 
 ```yaml
-- uses: tejachavali/prefixwise@v0.9
+- uses: tejachavali/prefixwise@v0.10
   with:
     command: pytest tests/agent_scenarios
 ```
@@ -294,19 +296,19 @@ Each detail is claimed only when all of its conditions hold; otherwise there is 
 
 | Command | |
 |---|---|
-| `prefixwise serve [--upstream URL] [--mock] [--fix canonical_tools] [--engine vllm\|sglang] [--kv-events ENDPOINT] [--host H] [--port P] [--ledger FILE]` | Run the proxy. `--engine`/`--kv-events`: see Self-hosted engines. Ledger defaults to `./prefixwise.db`. `--fix` applies an opt-in, reversible rewrite to every request (see below). |
-| `prefixwise run [--mock] [--fix NAME] -- <agent>` | Run an agent through Prefixwise and report on that run when it exits. |
-| `prefixwise check [--fail-on CAUSES] [--strict] [--allow FILE] [--baseline FILE] [--json] -- <command>` / `check --bodies FILE...` | CI gate: run the agent's scenarios through a local mock and exit 2 on a cache regression that is a code bug (tool order, a timestamp in the system prompt, a dropped breakpoint, a mutated tool result). `prefixwise export --baseline` writes the production baseline for its monthly projection. |
+| `prefixwise serve [--upstream URL] [--mock] [--fix canonical_tools] [--engine vllm\|sglang\|none] [--kv-events ENDPOINT\|auto] [--full-attention] [--collector URL] [--sink URL] [--otel] [--host H] [--port P] [--ledger FILE]` | Run the proxy. `--engine`/`--kv-events`/`--full-attention`: see Self-hosted engines (detected from `--upstream` when not given; `none` for a router or a hosted API). `--collector`, `--sink`: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Ledger defaults to `./prefixwise.db`. `--fix` applies an opt-in, reversible rewrite to every request (see below). |
+| `prefixwise run [--mock] [--fix NAME] [--engine vllm\|sglang\|none] [--full-attention] [--ledger FILE] [--port P] [--otel] -- <agent>` | Run an agent through Prefixwise and report on that run when it exits. A vLLM or SGLang behind the agent's base URL is detected (its KV events too); `--engine` says it explicitly. |
+| `prefixwise check [--fail-on CAUSES] [--strict] [--allow FILE] [--baseline FILE] [--json] [--json-file FILE] [--first-turn-delay S] -- <command>` / `check --bodies FILE...` | CI gate: run the agent's scenarios through a local mock and exit 2 on a cache regression that is a code bug (tool order, a timestamp in the system prompt, a dropped breakpoint, a mutated tool result). `prefixwise export --baseline` writes the production baseline for its monthly projection. |
 | `prefixwise prices [--json]` | The dated price table behind dollar costs, and where each rate came from. |
 | `prefixwise prune --older-than 30d` | Delete ledger entries older than that (retention). Add `--include-undated` to also drop rows written before 0.3.1. |
-| `prefixwise export [--format jsonl\|csv] [--since 7d] [--where session=s1]` | Every ledger row (facts, never prompt text) for a spreadsheet, notebook or warehouse. |
+| `prefixwise export [--format jsonl\|csv] [--since 7d] [--where session=s1] [--baseline]` | Every ledger row (facts, never prompt text) for a spreadsheet, notebook or warehouse. |
 | `prefixwise fixes [--json]` | The fixes that would save the most, ranked by the avoidable tokens your own ledger attributes to each cause. |
 | `prefixwise report [--by cause\|session_id\|agent_id\|model\|provider\|task_id] [--json]` | Totals and a breakdown, most avoidable first. |
 | `prefixwise task ID --success\|--failure` | Record a task outcome (safe while the proxy runs). |
 | `prefixwise request REQUEST_ID [--json]` | One request's ledger entry (from `X-Prefixwise-Request-Id`). |
 | `prefixwise explain A.json B.json` / `explain SESSION.jsonl [--json] [--fail-on-waste]` | Offline diagnosis of saved request bodies, or `{"request": ..., "usage": ..., "session_id": ..., "gap_seconds": ...}` records. |
 
-**HTTP endpoints:** `POST /v1/chat/completions`, `POST /v1/responses`, `POST /v1/messages` (streaming supported on all three; the same paths without `/v1` also work, and query strings are forwarded). Any other path, such as `GET /v1/models` or `count_tokens`, passes through to the upstream unchanged and is not recorded. Also: `POST /tasks {"task_id", "success"}`, `GET /requests/<id>`, `GET /ledger`, `GET /metrics` (Prometheus), `GET /health`.
+**HTTP endpoints:** `POST /v1/chat/completions`, `POST /v1/responses`, `POST /v1/messages` (streaming supported on all three; the same paths without `/v1` also work, and query strings are forwarded). Any other path, such as `GET /v1/models` or `count_tokens`, passes through to the upstream unchanged and is not recorded. Also: `POST /tasks {"task_id", "success"}`, `GET /requests/<id>`, `GET /engine` (the KV-event stream's health), `GET /ledger`, `GET /metrics` (Prometheus), `GET /health`.
 
 **Request headers** (all optional; stripped before forwarding):
 
@@ -321,7 +323,7 @@ Each detail is claimed only when all of its conditions hold; otherwise there is 
 
 **Response headers:** `X-Prefixwise-Request-Id` always; `X-Prefixwise-Cause`, `X-Prefixwise-Legit`, `X-Prefixwise-Avoidable-Tokens` on non-streaming responses; `X-Prefixwise-Fixes` when a fix rewrote the request. Streamed requests are classified when the stream ends: read them from `GET /requests/<id>`.
 
-**Environment:** `PREFIXWISE_UPSTREAM_URL`, `PREFIXWISE_API_KEY` (overrides client auth; `x-api-key` for Anthropic), `PREFIXWISE_LEDGER_PATH`, `PREFIXWISE_HMAC_KEY` (HMAC short blocks so their hashes cannot be dictionary-guessed), `PREFIXWISE_MAX_SESSIONS` (default 10,000), `PREFIXWISE_FIXES` (e.g. `canonical_tools`), `PREFIXWISE_AUTH_TOKEN` (require `X-Prefixwise-Token`), `PREFIXWISE_MAX_BODY_BYTES`, `PREFIXWISE_PRICES` (your own rates file), `PREFIXWISE_CLIENT_TIMEOUT` (default 120 s), `PREFIXWISE_DRAIN_SECONDS` (default 8), `PORT`.
+**Environment** (the proxy; the middleware's own variables are in [docs/VLLM.md](docs/VLLM.md)): `PREFIXWISE_UPSTREAM_URL`, `PREFIXWISE_API_KEY` (overrides client auth; `x-api-key` for Anthropic), `PREFIXWISE_LEDGER_PATH`, `PREFIXWISE_HMAC_KEY` (HMAC short blocks so their hashes cannot be dictionary-guessed), `PREFIXWISE_MAX_SESSIONS` (default 10,000), `PREFIXWISE_FIXES` (e.g. `canonical_tools`), `PREFIXWISE_AUTH_TOKEN` (require `X-Prefixwise-Token`), `PREFIXWISE_MAX_BODY_BYTES`, `PREFIXWISE_PRICES` (your own rates file), `PREFIXWISE_CLIENT_TIMEOUT` (default 120 s), `PREFIXWISE_DRAIN_SECONDS` (default 8), `PORT`.
 
 **Dollar costs.** Each request is priced from the provider's own usage breakdown (uncached input, cache reads, cache writes by TTL, output), using a dated price table: `prefixwise prices` shows it. *Avoidable cost* is the avoidable tokens times (the rate the request paid for its uncached prompt tokens − the cache-read price): on a miss those tokens are usually written to the cache again, at the cache-write rate (Anthropic: 1.25x input for 5 minutes, 2x for 1 hour), and a hit would have read them. `prefixwise report` also says, per Anthropic model, whether the 1-hour cache would have paid on your traffic. A model with no rates shows `-`, never an estimate. To add other models or your negotiated rates, write a JSON file in the same format (`prefixwise prices --json` prints one) and set `PREFIXWISE_PRICES=/path/prices.json`. Your entries override the built-in ones. `prefixwise report` and `prefixwise fixes` then show dollars, and say how many requests were priced.
 
@@ -346,11 +348,11 @@ Found a vulnerability? See [SECURITY.md](SECURITY.md).
 
 ## Self-hosted engines: vLLM, SGLang, LMCache
 
-Inside vLLM itself, with no proxy: `vllm serve <model> ... --middleware prefixwise.PrefixwiseMiddleware` loads Prefixwise as ASGI middleware in vLLM's own API server (KV events found from the engine; `PREFIXWISE_LEDGER`, `PREFIXWISE_COLLECTOR` to configure; [docs/VLLM.md](docs/VLLM.md)).
+Inside vLLM itself, with no proxy: `vllm serve <model> ... --middleware prefixwise.PrefixwiseMiddleware` loads Prefixwise as ASGI middleware in vLLM's own API server (KV events found from the engine, with the `engines` extra installed; `PREFIXWISE_LEDGER`, `PREFIXWISE_ENGINE`, `PREFIXWISE_KV_EVENTS`, `PREFIXWISE_FIX`, `PREFIXWISE_FULL_ATTENTION`, `PREFIXWISE_COLLECTOR` to configure; [docs/VLLM.md](docs/VLLM.md)).
 
 Step-by-step guides, with what each verdict means and the live numbers: **[docs/VLLM.md](docs/VLLM.md)** (vLLM, KV events, several caches), **[docs/LMCACHE.md](docs/LMCACHE.md)** (vLLM with an offload tier: which hits LMCache rescued, which misses were the agent's), **[docs/SGLANG.md](docs/SGLANG.md)** (SGLang, HiCache, data-parallel ranks).
 
-Prefixwise reads the engine's `cached_tokens` like any provider's: start vLLM with `--enable-prompt-tokens-details`, SGLang with `--enable-cache-report`. It recognises the engine behind `--upstream` at startup (vLLM's `/version`, SGLang's `/server_info`) and, when the engine publishes KV events, subscribes to them (`--kv-events auto`); `--engine` and `--kv-events` are the explicit form, and `--engine none` says a URL is a router, not one engine:
+Prefixwise reads the engine's `cached_tokens` like any provider's: start vLLM with `--enable-prompt-tokens-details`, SGLang with `--enable-cache-report`. It recognises the engine behind `--upstream` at startup (vLLM's `/version`, SGLang's `/server_info`) and, when the engine publishes KV events and the `engines` extra is installed (`pip install "prefixwise[engines]"`), subscribes to them (`--kv-events auto`); `--engine` and `--kv-events` are the explicit form, and `--engine none` says a URL is a router, not one engine:
 
 ```bash
 prefixwise serve --upstream http://127.0.0.1:8000                    # detected: vLLM or SGLang, KV events if published
@@ -437,8 +439,8 @@ Measured by [`benchmarks/bench.py`](benchmarks/README.md) (results in [`benchmar
 
 - **Not verified yet:**
   - **OpenAI native agreement.** OpenAI's `prompt_cache_diagnostics` returned `unavailable` for every comparison on gpt-5.6, -luna and -sol. That held with turn delays of 1 s, 30 s and 120 s, and on a minimal standalone call with a completed baseline. OpenAI's dashboard shows 0 diagnosed responses. Prefixwise still classifies OpenAI traffic; only the cross-check against OpenAI's own verdict is missing.
-  - **Causes E1 does not inject:** TTL expiry, routing, eviction, tool-result mutation.
-  - **Real agent traffic,** which is messier than scripted turns.
+  - **Causes E1 does not inject:** TTL expiry and tool-result mutation (eviction and routing misses are verified live, below).
+  - **Real agent traffic at scale.** opencode and Claude Code have run through it ([compat](experiments/compat/2026-11-07.md), [against vLLM](experiments/e_template/runs/2026-11-09-colab-l4-rerun.md)); long sessions and many agents at once have not.
 - **Self-hosted engines:** with `--engine`, an engine eviction is inferred from one cache and no routing; on vLLM and SGLang, `--kv-events` confirms it or rules it out. Validated live on vLLM 0.33 and SGLang 0.5.23 (Colab L4): evictions named 5/5, confirmed with KV events on both ([vLLM](experiments/e_evict/runs/2026-11-07-colab-l4.md), [SGLang](experiments/e_evict/runs/2026-11-07-colab-l4-sglang-events.md)), LMCache and HiCache restores counted as hits 5/5 ([record](experiments/e_evict/runs/2026-11-07-colab-l4.md)). Token-level divergence measured live: 0 "not an eviction" in 50 harness turns on vLLM and SGLang and 8 agent requests (opencode, Claude Code) against vLLM; what the runs did show is the previous output re-prefilled every turn on Qwen3 (`output_rerendered`, [record](experiments/e_template/runs/2026-11-09-colab-l4-rerun.md)). Several vLLM caches (ranks, replicas behind a router): routing misses confirmed from KV events, live 5/5 on two vLLM replicas ([record](experiments/e_route/runs/2026-11-08-colab-l4.md)); data-parallel ranks inside one server (vLLM and SGLang, `--kv-events auto`) not yet run live.
 - **Divergence is located per block, not per token.** An edit at the very end of a long system prompt is reported as `system_edit`, even if the provider could have reused everything before it (a design for locating it inside the block: [docs/specs/hyperscale.md](docs/specs/hyperscale.md#21-chunk-sketches-designed-not-built)). In one live OpenAI call, appending three words to 2,100 tokens of instructions gave 0 cached tokens, which looks more like routing than the edit itself.
 - One proxy process keeps session state in memory: run one instance per agent fleet, or send all of a session's turns to the same instance.
@@ -455,7 +457,7 @@ The flowcharts are drawn by code: when the request flow or the classifier's orde
 
 ```bash
 pip install -e ".[dev]"
-python -m pytest tests -q                              # about 200 tests, 40 s
+python -m pytest tests -q                              # about 490 tests, 2 min
 python experiments/e1_open/e1_open.py --mock           # harness smoke test
 ```
 
