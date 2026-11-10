@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **Prefixwise inside vLLM works with LMCache, live.** One flag on `vllm serve`, no proxy: after a GPU flood every next turn was a hit labelled `host_restored`, 5 of 5, as through the proxy; the `canonical_tools` replay on the same server matched the vLLM-alone run to the token; and `prefixwise serve` detected vLLM and its event stream from the URL alone, its first live record ([record](experiments/e_evict/runs/2026-11-10-colab-l4-middleware-lmcache.md)). docs/LMCACHE.md gains the one-flag setup.
+
 ## 0.11.1: 2026-11-10
 
 Documentation only: no change to what the package does. The README is a third of its length and shows a

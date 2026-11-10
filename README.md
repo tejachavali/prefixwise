@@ -69,7 +69,7 @@ Every number is from a live run against real models, and each links to its recor
 |---|---|
 | Agrees with Anthropic's own miss reason | **32 of 32** misses Anthropic named ([1](experiments/e1_hosted/runs/2026-11-06-anthropic-claude-haiku-5-5.md), [2](experiments/e1_hosted/runs/2026-11-06-round4.md)) |
 | Names injected causes on open models | **120 of 120** on vLLM, vLLM + LMCache and SGLang ([vLLM](experiments/e1_open/runs/2026-11-06-colab-l4-qwen3-4b.md), [LMCache and SGLang](experiments/e_evict/runs/2026-11-07-colab-l4.md)) |
-| Tells an engine eviction from everything else | **5 of 5**, confirmed from KV events ([vLLM](experiments/e_evict/runs/2026-11-07-colab-l4.md), [SGLang](experiments/e_evict/runs/2026-11-07-colab-l4-sglang-events.md)); a prefix LMCache or HiCache restored counted as a hit **5 of 5** ([record](experiments/e_evict/runs/2026-11-08-colab-l4-host-restored.md)) |
+| Tells an engine eviction from everything else | **5 of 5**, confirmed from KV events ([vLLM](experiments/e_evict/runs/2026-11-07-colab-l4.md), [SGLang](experiments/e_evict/runs/2026-11-07-colab-l4-sglang-events.md)); a prefix LMCache or HiCache restored counted as a hit **5 of 5**, through the proxy and inside vLLM ([record](experiments/e_evict/runs/2026-11-08-colab-l4-host-restored.md), [inside vLLM](experiments/e_evict/runs/2026-11-10-colab-l4-middleware-lmcache.md)) |
 | The tool-order fix saves what was predicted | **99.9%** on Claude, **97.5%** on vLLM, task success flat (one of 60 turns changed on Qwen3-4B) ([record](experiments/e4/runs/2026-11-06-live.md)) |
 | The cache-marker fix pays for itself | **106.8%** of predicted savings, prompt cost down **85.6%** with the write surcharge included, task success flat ([record](experiments/e4/runs/2026-11-09-auto-breakpoints-live.md)) |
 | Works with real agents | Claude Code, Codex, opencode, the Anthropic and OpenAI SDKs ([record](experiments/compat/2026-11-07.md), [opencode](experiments/compat/2026-11-09-opencode-run.md)) |
@@ -84,7 +84,8 @@ Each takes about thirty seconds. All write the same ledger and print the same re
 | An agent you run from a terminal | `prefixwise run -- <your command>` |
 | A service, several agents, or a gateway | `prefixwise serve --upstream https://api.anthropic.com`, and point clients at it |
 | Your own vLLM server | `vllm serve <model> ... --middleware prefixwise.PrefixwiseMiddleware`: no proxy, no port change ([docs/VLLM.md](docs/VLLM.md)) |
-| vLLM with LMCache, or SGLang with HiCache | `prefixwise serve --upstream <url>` in front; it detects the engine ([LMCache](docs/LMCACHE.md), [SGLang](docs/SGLANG.md)) |
+| vLLM with LMCache | the same `--middleware` flag, or `prefixwise serve --upstream <url>` in front, which detects the engine ([docs/LMCACHE.md](docs/LMCACHE.md)) |
+| SGLang, with or without HiCache | `prefixwise serve --upstream <url>` in front; it detects the engine ([docs/SGLANG.md](docs/SGLANG.md)) |
 | Your own Python code | `client = prefixwise.wrap(Anthropic())` (or OpenAI) |
 | LiteLLM | `litellm.callbacks = [PrefixwiseCallback()]` |
 | Claude Code or Codex on a subscription | `prefixwise import claude-code` / `prefixwise import codex` |

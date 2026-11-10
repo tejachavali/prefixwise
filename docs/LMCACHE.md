@@ -31,7 +31,19 @@ prefixwise serve --upstream http://127.0.0.1:8000 --engine vllm --kv-events tcp:
 ```
 
 Point your client at `http://127.0.0.1:8080/v1` instead of vLLM, run your workload, then
-`prefixwise report`.
+`prefixwise report`. With no `--engine` or `--kv-events`, `prefixwise serve --upstream
+http://127.0.0.1:8000` detects vLLM and its event stream by itself and says so on its first line.
+
+**Or inside vLLM, with no proxy.** Install the extra where vLLM runs and add one flag; clients keep
+talking to vLLM on its own port, and the middleware finds the event stream itself:
+
+```bash
+vllm serve <model> ... (the same flags as above) --middleware prefixwise.PrefixwiseMiddleware
+prefixwise report --ledger prefixwise.db          # PREFIXWISE_LEDGER sets where the middleware writes
+```
+
+Inside the engine every request is recorded, including unrelated traffic such as a benchmark's load,
+which the proxy only sees if it is sent through it. More on the middleware: [VLLM.md](VLLM.md).
 
 - `--enable-prompt-tokens-details` is required: it puts `cached_tokens` in every response.
   Without it every request looks like a miss, and Prefixwise warns once.
@@ -115,6 +127,7 @@ unrelated prompts; 5 repetitions each ([record](../experiments/e_evict/runs/2026
 | vLLM alone | prefix lost, **0/5 hits** (0 of 3,404 tokens cached) | `evicted` 5/5, inferred |
 | vLLM + KV events | prefix lost, 0/5 hits | `evicted` 5/5, **confirmed** ("211 of the previous request's KV blocks removed"; the prefix spans about 213 blocks of 16) |
 | vLLM + LMCache | **98% restored, 5/5 hits** (3,328 of 3,404 tokens cached, from CPU memory) | `none` 5/5 |
+| vLLM + LMCache + KV events, Prefixwise **inside vLLM** as middleware, no proxy (2026-11-10, 0.11.1; [record](../experiments/e_evict/runs/2026-11-10-colab-l4-middleware-lmcache.md)) | 98% restored, 5/5 hits | `none` 5/5, each with `host_restored`, the same as through the proxy |
 | vLLM + LMCache + KV events (2026-11-08, Prefixwise 0.9.0) | 98% restored, 5/5 hits | `none` 5/5, each with **`host_restored`**: "208 of the previous request's KV blocks had been removed from GPU memory (KV events; the tier's own stores were seen), yet this request read 3,328 of 3,404 prompt tokens from the cache without recomputing them" ([record](../experiments/e_evict/runs/2026-11-08-colab-l4-host-restored.md)) |
 
 That is the ROI line: the same flood, the same session, 0 of 5 turns reusable without LMCache
@@ -124,6 +137,10 @@ plain `none`; the 2026-11-08 run is the same configuration on 0.9.0. It also set
 question: LMCache 0.5.7 publishes its tier's stores into vLLM's event stream
 (`offload_tier_seen: true`, 569 batches, 0 lost messages). 3,328 tokens is 13 chunks of 256: the
 sub-chunk tail is recomputed, as LMCache's chunking predicts.
+
+On the same vLLM + LMCache server, the `canonical_tools` replay realised 97.5% of its predicted
+saving, every figure identical to the vLLM-alone run, and `prefixwise serve` detected vLLM 0.33.0
+and its event stream from the URL alone (2026-11-10, same record).
 
 The classifier also scores **120/120** on injected causes on vLLM + LMCache
 (`experiments/e1_open`, 120 turns across nine cause types, two sessions growing turn by turn as
