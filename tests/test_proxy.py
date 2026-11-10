@@ -102,7 +102,7 @@ def test_passthrough_strips_prefixwise_fields_and_sets_ids():
         for k in ("session_id", "agent_id", "prefixwise_compaction_event", "prompt_cache_options"):
             assert k not in fwd["body"]
         assert fwd["headers"]["authorization"] == "Bearer sk-test"
-        assert fwd["headers"]["x-session-id"] == "s1"
+        assert "x-session-id" not in fwd["headers"]  # Prefixwise sends no session key of its own
         assert fwd["headers"]["x-request-id"] == headers["X-Prefixwise-Request-Id"]
         assert proxy.ledger.rollup_by_cause()[0]["cause"] == "first_write"
     finally:
@@ -119,7 +119,7 @@ def test_client_auth_passed_through_and_session_header():
              {"Authorization": "Bearer client-key", "X-Prefixwise-Session-Id": "hdr-session"})
         fwd = up.requests[0]
         assert fwd["headers"]["authorization"] == "Bearer client-key"
-        assert fwd["headers"]["x-session-id"] == "hdr-session"
+        assert "x-session-id" not in fwd["headers"]  # the Prefixwise id is not turned into a routing key
         assert "x-prefixwise-session-id" not in fwd["headers"]
     finally:
         server.shutdown()
