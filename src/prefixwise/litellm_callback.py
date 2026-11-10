@@ -303,8 +303,11 @@ class PrefixwiseCallback(_Base):
                     if tools:
                         body["tools"] = tools
                 body.setdefault("model", model)
-                shaped = {"prompt_tokens": prompt, "completion_tokens": completion,
-                          "prompt_tokens_details": {"cached_tokens": _int(details.get("cached_tokens"))}}
+                shaped = {"prompt_tokens": prompt, "completion_tokens": completion}
+                # only when the backend reported one: LiteLLM in front of Ollama sends no count
+                if details or usage.get("cached_tokens") is not None:
+                    shaped["prompt_tokens_details"] = {"cached_tokens": _int(details.get("cached_tokens")
+                                                                             or usage.get("cached_tokens"))}
                 self.recorder.record("openai", body, {"id": response.get("id"), "model": returned, "usage": shaped},
                                      **common)
         except Exception as exc:  # noqa: BLE001 - never break LiteLLM's logging

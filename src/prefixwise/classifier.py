@@ -120,6 +120,7 @@ class RequestSnapshot:
     # False when the usage is a placeholder (offline `explain` without usage): rules that read
     # the cache's response must not fire.
     usage_known: bool = True
+    cache_reported: bool = True  # False: the server's usage has no cached-token count at all
     # The compared turn is not the session's latest on this model: another conversation came
     # between (interleaved subagents), so this request was matched to its own conversation.
     interleaved: bool = False
@@ -170,11 +171,17 @@ def _role_unchanged(role: str, p: list[BlockFingerprint], c: list[BlockFingerpri
     return len(p) == len(c) and all(_same(a, b) for a, b in zip(p, c))
 
 
+CACHE_NOT_REPORTED = ("the prompt's reusable part did not change, but the server reports no cached-token count "
+                      "(no prompt_tokens_details in its usage), so a hit cannot be told from a miss")
+
+
 def _min_prefix(curr: RequestSnapshot) -> int | None:
     """The provider's minimum cacheable prefix for this request; None when there is
     none to apply (self-hosted engines)."""
     if curr.min_prefix_tokens is not None:
         return curr.min_prefix_tokens
+    if not curr.cache_reported:  # not the provider whose minimum this would be (Ollama, llama.cpp)
+        return None
     if curr.provider == "anthropic":
         return anthropic_min_prefix(curr.model)
     return {"openai": OPENAI_MIN_PREFIX, "gemini": GEMINI_MIN_PREFIX}.get(curr.provider)
@@ -461,6 +468,11 @@ def classify(prev: RequestSnapshot | None, curr: RequestSnapshot,
         return Classification(MissCause.UNKNOWN, None,
                               "blocks unchanged but the provider returned no usage; cannot tell hit from miss",
                               secondary, native_reason)
+    # A server that reports no cached-token count (Ollama, many llama.cpp builds) may have reused
+    # its cache: its 0 is "not reported", so no timing or routing rule can read it.
+    # KV events that saw the blocks removed, or the request served elsewhere, are evidence on their own.
+    if not curr.cache_reported and not curr.evicted_blocks and not curr.routed:
+        return Classification(MissCause.UNKNOWN, None, CACHE_NOT_REPORTED, secondary, native_reason)
 
     # Append-only turn: compare cache_read to the reusable prior prefix,
     # not to this turn's prompt, which includes the newly appended tail.

@@ -99,6 +99,20 @@ def normalize_usage(provider: str, usage: dict) -> tuple[int, int]:
     return prompt, cached
 
 
+def cache_reported(provider: str, usage: dict) -> bool:
+    """Whether the usage says anything about the cache. OpenAI always sends prompt_tokens_details
+    (input_tokens_details on the Responses API), cached_tokens 0 included; vLLM does with
+    --enable-prompt-tokens-details. Ollama and many llama.cpp builds send prompt_tokens only: their
+    0 cached is "not reported", not "nothing reused". Anthropic's usage always carries the cache
+    counts. An empty usage is decided elsewhere (no prompt tokens at all)."""
+    if provider == "anthropic" or not usage:
+        return True
+    # A null details object (vLLM without --enable-prompt-tokens-details) reports nothing either.
+    if "prompt_tokens" not in usage and "input_tokens" in usage:  # Responses API
+        return usage.get("input_tokens_details") is not None or usage.get("cached_tokens") is not None
+    return usage.get("prompt_tokens_details") is not None or usage.get("cached_tokens") is not None
+
+
 def completion_tokens_of(provider: str, usage: dict) -> int:
     if provider == "anthropic" or ("completion_tokens" not in usage and "output_tokens" in usage):
         return int(usage.get("output_tokens", 0) or 0)

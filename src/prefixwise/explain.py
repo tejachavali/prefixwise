@@ -19,7 +19,7 @@ from pathlib import Path
 
 from .classifier import RequestSnapshot, classify, first_divergence
 from .fingerprint import BlockFingerprint, Fingerprinter
-from .pricing import breakdown
+from .pricing import breakdown, cache_reported
 from .records import PARAM_KEYS as _PARAM_KEYS, param_fingerprint
 from .proxy import (cache_ttl_seconds, completion_tokens_of, extract_blocks, has_cache_breakpoint,
                     normalize_usage)
@@ -125,7 +125,8 @@ def _snapshot(turn: Turn, provider: str, fp: Fingerprinter) -> RequestSnapshot:
                                    if turn.body.get(k) is not None},
                            has_breakpoint=has_cache_breakpoint(turn.body),
                            ttl_seconds=cache_ttl_seconds(provider, turn.body),
-                           min_prefix_tokens=min_prefix, usage_known=turn.usage is not None)
+                           min_prefix_tokens=min_prefix, usage_known=turn.usage is not None,
+                           cache_reported=cache_reported(provider, turn.usage) if turn.usage else True)
 
 
 def explain_pair(prev: Turn | None, curr: Turn, provider: str | None = None,

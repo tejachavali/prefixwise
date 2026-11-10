@@ -145,6 +145,7 @@ Prometheus metrics with an alert rule and a Grafana dashboard ([docs](docs/prome
 - **A change is located per block, not per token.** An edit at the end of a long system prompt is reported for the whole block.
 - **Long sessions and many agents at once** are less tested than short ones.
 - **Dollars need a price.** Models in the dated table are priced; others show a dash until you add rates.
+- **Ollama and llama.cpp report no cached tokens** (most builds): Prefixwise names every change to the prompt, but cannot tell a hit from a miss there, and says so.
 - **API keys only.** An agent signed in with a subscription cannot be routed through a proxy; use `prefixwise import` for those.
 
 The full list, with what was and was not verified live: [guide](docs/GUIDE.md#limits).

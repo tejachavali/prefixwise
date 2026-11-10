@@ -184,6 +184,14 @@ def findings(ledger, since: float | None = None, until: float | None = None,
         key, rates, approx = table.resolve(model)
         if approx:
             approximate.append((model, key))
+    from .classifier import CACHE_NOT_REPORTED
+    clauses, args = ["cause = 'unknown'", "evidence = ?"], [CACHE_NOT_REPORTED]
+    for col, op, val in (("recorded_at", ">=", since), ("recorded_at", "<", until)):
+        if val is not None:
+            clauses.append(f"{col} {op} ?")
+            args.append(val)
+    with ledger.reader() as conn:
+        not_reported = conn.execute("SELECT COUNT(*) FROM entries WHERE " + " AND ".join(clauses), args).fetchone()[0]
     errors = metrics.query(ledger, ["requests_failed"], by="error", **window)
     statuses = metrics.query(ledger, ["requests_failed"], by="status", **window)
     return {"summary": {k: s[k] for k in ("requests", "requests_failed", "prompt_tokens", "cached_tokens",
@@ -196,7 +204,8 @@ def findings(ledger, since: float | None = None, until: float | None = None,
                          for e in errors if e["error"] and e["requests_failed"]],
             "ttl": ttl_advice(ledger, prices=table, **window),
             "unread_writes": unread_writes(ledger, **window),
-            "unpriced_models": sorted(unpriced), "approximate_prices": sorted(approximate)}
+            "unpriced_models": sorted(unpriced), "approximate_prices": sorted(approximate),
+            "cache_not_reported": not_reported}
 
 
 def _usd(x) -> str:
@@ -257,12 +266,20 @@ def render(f: dict, command: str = "serve") -> str:
                 if w.get("proxy_fix"):
                     lines.append(f"     Prefixwise can do it for you: prefixwise {command} --fix {w['proxy_fix']}"
                                  + (f" ({w['fix_status']})" if w.get("fix_status") else ""))
-        elif f["unexplained"]:
+        elif f["unexplained"] and sum(u["requests"] for u in f["unexplained"]) > (f.get("cache_not_reported") or 0):
             lines.append("No avoidable waste found among the misses whose cause is known.")
+        elif f["unexplained"]:
+            lines.append("No avoidable waste found in the prompts.")
         else:
             lines.append("No avoidable waste found: every miss had a legitimate cause.")
-    if f["unexplained"]:
-        n = sum(u["requests"] for u in f["unexplained"])
+    blind = f.get("cache_not_reported") or 0
+    if blind:
+        lines.append(f"This server does not report cached tokens ({_req(blind)} with an unchanged prompt): Ollama "
+                     "and many llama.cpp builds leave the count out, so the share served from cache above is not "
+                     "known, not zero. Prefixwise still names every change to the prompt. With vLLM, start it with "
+                     "--enable-prompt-tokens-details.")
+    if f["unexplained"] and sum(u["requests"] for u in f["unexplained"]) > blind:
+        n = sum(u["requests"] for u in f["unexplained"]) - blind
         lines.append(f"Cause not determined for {n} request{'s' if n != 1 else ''} "
                      "(`prefixwise report --detail` shows the evidence).")
     if f["expected"]:
@@ -337,10 +354,14 @@ def render_share(f: dict, since_label: str | None = None) -> str:
         lines.append(f"top cause: {w['what']} ({_req(w['requests'])})")
         if w.get("fix"):
             lines.append(f"fix: {w['fix']}")
-    elif f["unexplained"]:
+    elif f["unexplained"] and sum(u["requests"] for u in f["unexplained"]) > (f.get("cache_not_reported") or 0):
         lines.append("no avoidable waste among the misses whose cause is known")
+    elif f["unexplained"]:
+        lines.append("no avoidable waste in the prompts")
     else:
         lines.append("no avoidable waste: every miss had a legitimate cause")
+    if f.get("cache_not_reported"):
+        lines.append("this server does not report cached tokens: the share served from cache is not known")
     unread = f.get("unread_writes") or []
     if unread:
         tok = sum(u["tokens"] or 0 for u in unread)
