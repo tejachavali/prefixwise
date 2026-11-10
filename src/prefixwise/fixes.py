@@ -4,7 +4,9 @@ A toggle is a rewrite the proxy can apply to a request before forwarding
 it, opt-in and reversible (turn it off and requests go through unchanged).
 Only rewrites that cannot change what the prompt means are toggles:
 
-- canonical_tools: tools sorted by name, each tool's keys sorted. The
+- canonical_tools: tools sorted by name, each tool's keys sorted at every
+  depth, and the schema arrays that are sets (`required`, a list `type`)
+  sorted; enum, anyOf and other arrays keep their order. The
   provider caches by exact prefix, and tools come first in every
   provider's prefix, so a tool list whose order or key order drifts
   between turns (plugin load order, dict/set iteration, a framework
@@ -39,6 +41,8 @@ with task success flat.
 from __future__ import annotations
 
 import json
+
+from .fingerprint import schema_sets
 
 AVAILABLE_FIXES = ("canonical_tools", "auto_breakpoints")
 PROVEN_FIXES = ("canonical_tools", "auto_breakpoints")  # what --optimize turns on; a fix joins after an E4 run (FIX_STATUS)
@@ -147,10 +151,11 @@ def _sorted_keys(value: object) -> object:
 
 def canonical_tools(tools: list) -> list:
     """Tools sorted by name (unnamed tools keep their order, at the end),
-    with every tool's keys sorted. Same set in, same bytes out."""
+    with every tool's keys sorted and its schema's set arrays (`required`, a
+    list `type`) sorted. Same set in, same bytes out."""
     named = sorted((t for t in tools if _tool_name(t) is not None), key=_tool_name)
     unnamed = [t for t in tools if _tool_name(t) is None]
-    return [_sorted_keys(t) for t in named] + [_sorted_keys(t) for t in unnamed]
+    return [_sorted_keys(schema_sets(t)) for t in named] + [_sorted_keys(schema_sets(t)) for t in unnamed]
 
 
 def apply_fixes(body: dict, fixes: tuple[str, ...] | list[str]) -> tuple[dict, list[str]]:

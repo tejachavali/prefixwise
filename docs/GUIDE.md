@@ -260,7 +260,7 @@ One cause per request: the first thing, in prefix order, that broke reuse. Each 
 | `first_write` | First request of a session | no | - |
 | `volatile_system` | Only dates, times, ids or numbers changed in the system prompt (a timestamp in any common format, whatever its format last turn) | **yes** | Move volatile values to the end of the prompt, in one fixed format; the evidence names which kinds the prompt carries, and whether it also carries a file path, which other sessions cannot share |
 | `system_edit` | The system prompt's wording changed | depends | Batch prompt edits; avoid per-turn rewording |
-| `tool_reserialize` | Same tools, different order or bytes | **yes** | Sort tools; serialize deterministically |
+| `tool_reserialize` | Same tools, different order or bytes (key order at any depth, or a schema's `required` or `type` list in another order) | **yes** | Sort tools; serialize deterministically; build `required` from a list, not a set |
 | `tool_catalog_change` | A tool was added or removed | no | Mask tools instead of removing them, if frequent |
 | `history_edit` | Earlier messages were rewritten without a compaction | **yes** | Append, do not rewrite history |
 | `tool_result_mutation` | An earlier tool result was re-rendered or removed | **yes** | Freeze tool output once sent |
@@ -292,7 +292,7 @@ The verdict is the first block, in the provider's prefix order (tools, then syst
 
 | what differs | verdict | why it is proof |
 |---|---|---|
-| tools: `raw` differs, the multiset of `canonical` hashes is equal | `tool_reserialize` | the same tools reached the provider in different bytes or order; nothing else could have produced that pattern |
+| tools: `raw` differs, the multiset of `canonical` hashes is equal | `tool_reserialize` | the same tools reached the provider in different bytes or order; nothing else could have produced that pattern. The canonical hash sorts keys at every depth, and the JSON Schema arrays that are sets (`required`, a list `type`); `enum`, `anyOf` and every other array keep their order, and `--fix canonical_tools` sorts exactly the same |
 | tools: the multiset of `canonical` hashes differs | `tool_catalog_change` | a tool was added, removed or edited |
 | system: `raw` differs, `masked` equal | `volatile_system` | every character that changed was inside a date, time, id or number |
 | system: `masked` differs | `system_edit` | the wording changed |

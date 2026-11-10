@@ -7,7 +7,9 @@ hashes per block:
   only hash that can see TOOL_RESERIALIZE, which is defined as
   canonical-equal, raw-different.
 - ``canonical``: SHA-256 (or HMAC) over canonicalised bytes (sorted keys,
-  fixed separators, NFC unicode, no trailing-whitespace variance).
+  fixed separators, NFC unicode, no trailing-whitespace variance). In a
+  tool block, the JSON Schema arrays that are sets (``required``, a list
+  ``type``) are sorted too (``schema_sets``).
 - ``masked``: hash over canonical bytes with volatile values masked out
   (dates, times, numbers, UUIDs, ids). A system block whose raw hash
   changed but whose masked hash is equal is VOLATILE_SYSTEM, not a
@@ -143,6 +145,38 @@ def mask_only(text: str, kinds: frozenset) -> str:
     return text
 
 
+# JSON Schema arrays that are sets: their order means nothing, and a client that builds them from a
+# Python set sends them in a different order after a restart. Everything else keeps its order: enum,
+# anyOf, items and the rest can mean something in order, and literal values are never touched.
+_SCHEMA_TYPES = frozenset(("array", "boolean", "integer", "null", "number", "object", "string"))
+_SCHEMA_LITERALS = frozenset(("default", "examples", "example", "const", "enum"))
+_SCHEMA_NAME_MAPS = frozenset(("properties", "patternProperties", "$defs", "definitions", "dependentSchemas"))
+
+
+def schema_sets(value: object) -> object:
+    """A tool definition with the JSON Schema arrays that are sets sorted: `required` (a list of
+    strings in a schema object, one with `properties` or type object) and `type` (a list of type
+    names). A copy; dict key order is left to the caller (canonical_bytes sorts it)."""
+    if isinstance(value, list):
+        return [schema_sets(v) for v in value]
+    if not isinstance(value, dict):
+        return value
+    is_schema = "properties" in value or value.get("type") == "object"
+    out = {}
+    for key, v in value.items():
+        if key in _SCHEMA_LITERALS:
+            out[key] = v
+        elif key in _SCHEMA_NAME_MAPS and isinstance(v, dict):
+            out[key] = {name: schema_sets(s) for name, s in v.items()}  # names map to schemas
+        elif key == "required" and is_schema and isinstance(v, list) and all(isinstance(x, str) for x in v):
+            out[key] = sorted(v)
+        elif key == "type" and isinstance(v, list) and v and all(x in _SCHEMA_TYPES for x in v):
+            out[key] = sorted(v)
+        else:
+            out[key] = schema_sets(v)
+    return out
+
+
 def canonical_bytes(value: object) -> bytes:
     text = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     text = unicodedata.normalize("NFC", text)
@@ -219,7 +253,8 @@ class Fingerprinter:
             return BlockFingerprint(role=role, index=index, raw=digest, canonical=digest,
                                     masked=digest, byte_length=len(payload), hmac=bool(self.hmac_key))
         raw = raw_bytes(value)
-        canon = canonical_bytes(value)
+        # A tool's schema sets (`required`, a `type` list) in another order are the same tool.
+        canon = canonical_bytes(schema_sets(value) if role == "tools" else value)
         # HMAC replaces bare hashing for short/predictable blocks entirely.
         key = self.hmac_key if self._is_short(raw) else None
         canon_hash = _hash(canon, key)

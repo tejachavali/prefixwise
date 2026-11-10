@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **A tool whose schema lists `required` in another order is the same tool.** JSON Schema's `required` (and a list `type`, such as `["string", "null"]`) is a set, and a schema built from a Python set lists it in a different order after a restart. Prefixwise called that `tool_catalog_change`, a legitimate change, and `--fix canonical_tools` sent it as it came, so the miss was neither counted as waste nor fixed. Now the detector names it `tool_reserialize` and the fix sorts those two arrays, at any depth; `enum`, `anyOf` and every other array keep their order, and default, example and const values are never touched. Key order was already sorted at every depth. From a Reddit question (r/LLMDevs) about nested tool schemas. An edge and a collector on different versions hash such a tool differently, so upgrade them together, or expect one tool change per conversation across the upgrade.
+
 ## 0.11.3: 2026-11-10
 
 One fix for anyone running Prefixwise in front of a router that routes by session: the client's
