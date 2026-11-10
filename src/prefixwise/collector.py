@@ -23,7 +23,7 @@ from .classifier import Classification, MissCause, RequestSnapshot, classify, fi
 from .details import Facts, detail_for
 from .diagnostics import AgreementScorer
 from .ledger import Ledger, LedgerEntry, avoidable_for_turn, unread_write
-from .pricing import PriceTable, breakdown, completion_tokens_of, normalize_usage
+from .pricing import PriceTable, breakdown, cache_reported, completion_tokens_of, normalize_usage
 from .prom import Metrics
 from .records import RecordError, TurnRecord
 
@@ -310,6 +310,7 @@ class Collector:
         curr.engine = rec.engine is not None
         curr.engine_caches = rec.engine_caches
         curr.block_size = rec.engine_block
+        curr.cache_reported = cache_reported(provider, usage)
         parts = breakdown(provider, usage)
         curr.cache_written = parts.cache_write_5m + parts.cache_write_1h + parts.cache_write
         curr.new_thread, curr.interleaved = new_thread, interleaved

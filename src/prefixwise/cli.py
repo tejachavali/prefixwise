@@ -32,7 +32,8 @@ def _open_existing_ledger(args):
 
     path = _ledger_path(args)
     if path != ":memory:" and not Path(path).exists():
-        sys.exit(f"prefixwise: no ledger at {path} (run `prefixwise serve` first, or pass --ledger)")
+        sys.exit(f"prefixwise: no ledger at {path} yet. Run an agent through Prefixwise first: "
+                 f"`prefixwise run -- <your agent>` (or `prefixwise serve`), or pass --ledger")
     return Ledger(path)
 
 
@@ -185,6 +186,8 @@ def _report_session(led, session: str, as_json: bool, since: float | None = None
     if as_json:
         print(json.dumps({"session_id": sid, "turns": turns}, indent=2, default=str))
         return 0
+    from .classifier import CACHE_NOT_REPORTED
+    blind = {t["turn"] for t in turns if t.get("evidence") == CACHE_NOT_REPORTED}  # the server gave no count
     prompt = sum(t["prompt_tokens"] or 0 for t in turns)
     cached = sum(t["cached_tokens"] or 0 for t in turns)
     avoidable = sum(t["avoidable_tokens"] or 0 for t in turns)
@@ -193,7 +196,7 @@ def _report_session(led, session: str, as_json: bool, since: float | None = None
     models = sorted({t["model"] for t in turns if t.get("model")})
     agents = sorted({t["agent_id"] for t in turns if t.get("agent_id")})
     print(f"Session {sid}: {len(turns)} requests, {_fmt_int(prompt)} prompt tokens, "
-          f"cache hit rate {_fmt_pct(cached / prompt) if prompt else '-'}, "
+          f"cache hit rate {'not reported by the server' if blind else _fmt_pct(cached / prompt) if prompt else '-'}, "
           f"{_fmt_int(avoidable)} avoidable" + (f", cost {_fmt_usd(cost)}" if priced else "")
           + (f" ({len(priced)} of {len(turns)} priced)" if priced and len(priced) < len(turns) else "")
           + (f"   ({', '.join(models)})" if len(models) == 1 else ""))
@@ -210,13 +213,18 @@ def _report_session(led, session: str, as_json: bool, since: float | None = None
         cause = t.get("cause") or "-"
         if t.get("detail"):
             cause += f" ({t['detail']})"
-        rows.append([t["turn"], *tag, _fmt_int(t["prompt_tokens"] or 0), _fmt_int(t["cached_tokens"] or 0),
-                     _fmt_pct(t["hit_rate"]) if t["hit_rate"] is not None else "-", cause,
+        known = t["turn"] not in blind
+        rows.append([t["turn"], *tag, _fmt_int(t["prompt_tokens"] or 0),
+                     _fmt_int(t["cached_tokens"] or 0) if known else "?",
+                     _fmt_pct(t["hit_rate"]) if t["hit_rate"] is not None and known else "?" if not known else "-", cause,
                      t["first_changed"] or "-", _fmt_usd(t["cost"]) if t.get("cost") is not None else "-",
                      _fmt_int(t["avoidable_tokens"] or 0),
                      _fmt_usd(t["avoidable_cost"]) if t.get("avoidable_cost") is not None else "-"])
     print(_table(rows, ["turn", *extra, "prompt", "cached", "hit", "cause", "first changed", "cost", "avoidable",
                         "avoidable $"]))
+    if blind:
+        print("\n?: the server reports no cached-token count, so a hit cannot be told from a miss "
+              "(Ollama and many llama.cpp builds leave it out; vLLM needs --enable-prompt-tokens-details).")
     print("\nfirst changed: the block where this request's prompt first differs from this session's previous request "
           "on the same model and conversation. The number is the block's position in the whole prompt, from 0: "
           "tools, then system, then the conversation (one position per tool, system prompt and message; "
@@ -818,7 +826,7 @@ def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog="prefixwise",
                                  description="Name why prompt caches miss, and price the miss.")
     ap.add_argument("--version", action="version", version=f"prefixwise {__version__}")
-    sub = ap.add_subparsers(dest="command", required=True)
+    sub = ap.add_subparsers(dest="command")
 
     def ledger_opt(p):
         p.add_argument("--ledger", help=f"SQLite ledger file (default: $PREFIXWISE_LEDGER_PATH or ./{DEFAULT_LEDGER})")
@@ -1030,8 +1038,24 @@ def build_parser() -> argparse.ArgumentParser:
     return ap
 
 
+GETTING_STARTED = """Prefixwise names why each LLM request missed the prompt cache, and what it cost.
+
+  prefixwise run -- <your agent>        run an agent through it, get a report when it exits
+  prefixwise report --session latest    that session, turn by turn
+  prefixwise run --optimize -- <agent>  the same, with the proven fixes applied
+
+  prefixwise serve --upstream <url>     a proxy for vLLM, SGLang or an API (detects the engine)
+  prefixwise import claude-code         no API key? read the logs already on disk
+
+All commands: prefixwise --help"""
+
+
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if getattr(args, "func", None) is None:
+        print(GETTING_STARTED)
+        return 0
     try:
         return args.func(args)
     except BrokenPipeError:

@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- **A server that reports no cached tokens is `unknown`, not a routing miss.** Ollama and many llama.cpp builds send `prompt_tokens` with no `prompt_tokens_details`, so their 0 cached means "not reported". Prefixwise read it as nothing reused and called every unchanged turn a `routing_miss` ("reached a machine without the cache"). Now such a turn is `unknown`, with that evidence; the report says the server leaves the count out and that the hit rate is not known rather than zero; the session view shows `?`. Changes to the prompt (tool order, a timestamp, an edited message) are still named, from the prompt alone. A server that reports 0 is unchanged. Found by running a new user's first session against an Ollama-style server.
+- **`prefixwise` with no command shows how to start**: the five commands most people need, instead of an argument error. A report before any run says to run an agent through Prefixwise first.
+
 - **Prefixwise inside vLLM works with LMCache, live.** One flag on `vllm serve`, no proxy: after a GPU flood every next turn was a hit labelled `host_restored`, 5 of 5, as through the proxy; the `canonical_tools` replay on the same server matched the vLLM-alone run to the token; and `prefixwise serve` detected vLLM and its event stream from the URL alone, its first live record ([record](experiments/e_evict/runs/2026-11-10-colab-l4-middleware-lmcache.md)). docs/LMCACHE.md gains the one-flag setup.
 
 ## 0.11.1: 2026-11-10
