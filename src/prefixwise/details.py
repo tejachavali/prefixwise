@@ -91,7 +91,7 @@ from dataclasses import dataclass, field
 import threading
 from collections import OrderedDict
 
-from .fingerprint import mask_only, mask_volatiles
+from .fingerprint import mask_only, mask_volatiles, schema_sets
 
 LOOKBACK_POSITIONS = 20  # Anthropic: positions checked per breakpoint, the breakpoint itself first
 LOOKBACK_CLAIM = LOOKBACK_POSITIONS + 2  # claim only this far out: block counting may differ slightly
@@ -189,7 +189,7 @@ def _prefix_keys(prefix_key: str, provider: str, model: str, credential: str, to
         if hit is not None:
             _PREFIX_KEYS.move_to_end(prefix_key)
             return hit
-    tools_c = json.dumps(_strip_markers(tools), sort_keys=True, default=str)
+    tools_c = json.dumps(schema_sets(_strip_markers(tools)), sort_keys=True, default=str)
     system_c = json.dumps(_strip_markers(system), sort_keys=True, default=str)
     head = [provider, model, credential, tools_c]
     keys = (_h(head + [system_c]), _h(head + [mask_volatiles(system_c)]),
