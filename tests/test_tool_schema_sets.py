@@ -91,3 +91,42 @@ def test_the_cross_session_prefix_key_agrees():
     assert fa.prefix_key_canonical == fb.prefix_key_canonical
     fc = body_facts("openai", {"model": "m", "tools": [tool(("lang",))], "messages": msgs}, model="m")
     assert fc.prefix_key_canonical != fa.prefix_key_canonical
+
+
+def test_a_type_list_holding_a_schema_is_kept_and_never_an_error():
+    """Review: a draft-03 union type (`[{"type": "string"}, "null"]`) made the type-name check raise, and
+    body_facts runs on every request, so the proxy answered 500 even with the fix off."""
+    union = {"type": [{"type": "string"}, "null"]}
+    t = tool(note=union)
+    body = {"model": "gpt-5", "tools": [t], "messages": [{"role": "user", "content": "hi"}]}
+    body_facts("openai", body)  # no error
+    assert canonical_tools([t])[0]["function"]["parameters"]["properties"]["note"] == union
+    assert schema_sets({"type": [["string"], "null"]}) == {"type": [["string"], "null"]}
+
+
+def test_an_anthropic_input_schema_is_the_same_tool_in_another_required_order():
+    def ant(required):
+        return {"name": "search", "description": "Search.",
+                "input_schema": {"type": "object", "properties": {"q": {"type": "string"}, "k": {"type": "integer"}},
+                                 "required": required}}
+    a, b = ant(["q", "k"]), ant(["k", "q"])
+    assert json.dumps(canonical_tools([a])) == json.dumps(canonical_tools([b]))
+    fp = Fingerprinter()
+    msgs = [{"role": "user", "content": "find it"}]
+
+    def blocks(t):
+        return fp.fingerprint_blocks(extract_blocks({"model": "claude-x", "tools": [t], "messages": msgs}, "anthropic"))
+    tools_a = [x for x in blocks(a) if x.role == "tools"]
+    tools_b = [x for x in blocks(b) if x.role == "tools"]
+    assert [x.canonical for x in tools_a] == [x.canonical for x in tools_b]
+    assert [x.raw for x in tools_a] != [x.raw for x in tools_b]
+
+
+def test_a_schema_too_deep_to_walk_is_left_as_it_is():
+    deep = {"type": "object", "properties": {}}
+    node = deep
+    for _ in range(5000):
+        nxt = {"type": "object", "properties": {}}
+        node["properties"]["x"] = nxt
+        node = nxt
+    assert schema_sets(deep) is deep  # returned unchanged, no RecursionError

@@ -133,3 +133,21 @@ def test_reordered_tools_are_waste_and_a_changed_catalog_is_not(tmp_path):
     assert by["r2"][4] is not None and by["r2"][4] > 0  # priced: gpt-5.6-luna is in the price table
     assert by["r3"][1] == "tool_catalog_change" and by["r3"][2] == 1 and by["r3"][3] == 0
     assert by["r4"][1] == "tool_catalog_change" and by["r4"][2] == 1 and by["r4"][3] == 0
+
+
+def test_a_codex_tool_whose_required_list_is_reordered_is_waste_as_in_the_proxy(tmp_path):
+    """The importer's tool-set hash treats JSON Schema's `required` as a set, as the proxy does."""
+    def t(required):
+        return {"name": "read_file", "parameters": {"type": "object", "properties": {"path": {}, "n": {}},
+                                                    "required": required}}
+    log = [line(0, "session_meta", {"id": "th8", "timestamp": ts(0)}), line(1, "turn_context", {"model": "gpt-5.6-luna"}),
+           line(2, "dynamic_tools_updated", {"thread_id": "th8", "tools": [t(["path", "n"])]}),
+           record(5, "r1", 12000, 0, 12000),
+           line(8, "dynamic_tools_updated", {"thread_id": "th8", "tools": [t(["n", "path"])]}),
+           record(10, "r2", 12400, 0)]
+    write_log(tmp_path / "sessions" / "rollout-2026-11-09T09-00-00-th8.jsonl", log)
+    led = Ledger()
+    import_codex(tmp_path, ledger=led)
+    with led.reader() as c:
+        by = dict(c.execute("SELECT request_id, cause FROM entries").fetchall())
+    assert by["r2"] == "tool_reserialize"

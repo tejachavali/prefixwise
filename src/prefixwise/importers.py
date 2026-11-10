@@ -43,6 +43,7 @@ from datetime import datetime
 from pathlib import Path
 
 from .diagnostics import NO_VERDICT, map_native_reason
+from .fingerprint import schema_sets
 from .ledger import Ledger, LedgerEntry, avoidable_for_turn, unread_write
 from .pricing import PriceTable, breakdown
 
@@ -383,7 +384,7 @@ def _codex_requests(path: Path) -> tuple[dict, list[_CodexRequest]]:
                 # Order-independent: the multiset of tools. Reported on Reddit (kantorcodes1): Codex rebuilds
                 # its dynamic tool list and sends the same tools in another order, which is waste
                 # (tool_reserialize), not a catalog change.
-                tools_set_hash = (hashlib.sha256(json.dumps(sorted(json.dumps(t, sort_keys=True) for t in tools))
+                tools_set_hash = (hashlib.sha256(json.dumps(sorted(json.dumps(schema_sets(t), sort_keys=True) for t in tools))
                                                  .encode()).hexdigest()[:16] if isinstance(tools, list) else None)
             elif kind == "token_usage_record" and isinstance(p.get("usage"), dict) and ts is not None:
                 shaped, prompt, cached = _codex_usage(p["usage"])

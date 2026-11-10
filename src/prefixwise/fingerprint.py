@@ -156,9 +156,17 @@ _SCHEMA_NAME_MAPS = frozenset(("properties", "patternProperties", "$defs", "defi
 def schema_sets(value: object) -> object:
     """A tool definition with the JSON Schema arrays that are sets sorted: `required` (a list of
     strings in a schema object, one with `properties` or type object) and `type` (a list of type
-    names). A copy; dict key order is left to the caller (canonical_bytes sorts it)."""
+    names). A copy; dict key order is left to the caller (canonical_bytes sorts it). A schema nested
+    too deep to walk is returned as it is: never an error on the request path."""
+    try:
+        return _schema_sets(value)
+    except RecursionError:
+        return value
+
+
+def _schema_sets(value: object) -> object:
     if isinstance(value, list):
-        return [schema_sets(v) for v in value]
+        return [_schema_sets(v) for v in value]
     if not isinstance(value, dict):
         return value
     is_schema = "properties" in value or value.get("type") == "object"
@@ -167,13 +175,13 @@ def schema_sets(value: object) -> object:
         if key in _SCHEMA_LITERALS:
             out[key] = v
         elif key in _SCHEMA_NAME_MAPS and isinstance(v, dict):
-            out[key] = {name: schema_sets(s) for name, s in v.items()}  # names map to schemas
+            out[key] = {name: _schema_sets(s) for name, s in v.items()}  # names map to schemas
         elif key == "required" and is_schema and isinstance(v, list) and all(isinstance(x, str) for x in v):
             out[key] = sorted(v)
-        elif key == "type" and isinstance(v, list) and v and all(x in _SCHEMA_TYPES for x in v):
+        elif key == "type" and isinstance(v, list) and v and all(isinstance(x, str) and x in _SCHEMA_TYPES for x in v):
             out[key] = sorted(v)
         else:
-            out[key] = schema_sets(v)
+            out[key] = _schema_sets(v)
     return out
 
 
