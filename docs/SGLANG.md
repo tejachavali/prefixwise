@@ -32,6 +32,13 @@ sglang --kv-events tcp://127.0.0.1:5557` is the explicit form. The SGLang model 
 workers' `/server_info`, so a router looks like one engine: behind one, pass `--engine none`
 (evictions cannot be told from routing there, and SGLang replicas behind a router are not joined).
 
+**In front of sgl-router with session routing.** A router that keeps each session on one worker
+routes on the client's `x-session-id` header. Prefixwise forwards that header unchanged and sends
+none of its own (since 0.11.3; earlier versions replaced it with their own session id, which put
+every session on one routing key). It also uses the client's value to group turns into sessions
+when no `X-Prefixwise-Session-Id` is given. Whether the router passes the header on to the worker
+is the router's business: an open SGLang proposal (sgl-project/sglang#47763) is about exactly that.
+
 - `--enable-cache-report` is required: it puts `usage.prompt_tokens_details.cached_tokens` in
   every response (and the final stream chunk). Without it every request looks like a miss, and
   Prefixwise warns once.

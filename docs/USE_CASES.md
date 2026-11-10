@@ -113,7 +113,7 @@ prefixwise serve --upstream http://127.0.0.1:8000
 The proxy forwards `X-Request-Id` and `X-Session-ID` (and `session_id` in the body for vLLM), so requests can be joined with vLLM's KV-cache events. In the report:
 
 - Mostly `none` means prefix caching works.
-- `routing_miss` with identical prompts across several replicas means your router has no session affinity: the same session lands on a replica that has never seen its prefix.
+- `routing_miss` with identical prompts across several replicas means your router has no session affinity (or it routes on a header your client does not send; Prefixwise forwards the client's `x-session-id` unchanged): the same session lands on a replica that has never seen its prefix.
 - `--enable-prompt-tokens-details` is required. Without it vLLM reports no cached tokens, and every turn looks like a miss.
 
 The repository's E1-open experiment (`experiments/e1_open/`) runs 120 controlled turns against vLLM to validate the classifier itself.
