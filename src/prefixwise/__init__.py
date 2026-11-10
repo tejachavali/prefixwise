@@ -1,6 +1,6 @@
 """Prefixwise: model-agnostic ledger of avoidable agent token spend."""
 
-__version__ = "0.11.0"
+__version__ = "0.11.1"
 
 from .classifier import MissCause, classify
 from .diagnostics import AgreementScorer
