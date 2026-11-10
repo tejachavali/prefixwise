@@ -1,6 +1,14 @@
 # Changelog
 
-## Unreleased
+## 0.11.0: 2026-11-10
+
+`--optimize` does more. `auto_breakpoints` passed its live test on Anthropic, so `--optimize` now places
+`cache_control` markers on an Anthropic request that carries none, once its tools and system prompt were
+seen within the cache window: 106.8% of the predicted savings realised and the prompt-side cost down 85.6%,
+write surcharge included, with tool choices unchanged. A request Prefixwise marked is never the reason for
+an error, and nothing is placed for a self-hosted engine. A minor version, not a patch, because a flag you
+may already use changes what it sends; `--fix canonical_tools` keeps the old behaviour. The GitHub Action's
+moving tag is now `v0.11` (`v0.10` stays at 0.10.7).
 
 - **`auto_breakpoints` is proven, and `--optimize` turns it on.** E4 live on Anthropic (Haiku 5.5), a client that sets no `cache_control`, 60 paired requests: 106.8% of the predicted savings realised, prompt-side cost down 85.6% with the write surcharge included, tool choices 59 of 60 right without the fix and 60 of 60 with it, no marker rejected ([record](experiments/e4/runs/2026-11-09-auto-breakpoints-live.md)). **What changes for you:** with `--optimize` (or `PREFIXWISE_OPTIMIZE=1`, or `optimize` in `PREFIXWISE_FIXES`), an Anthropic request that carries no marker now gets them once its tools and system prompt were seen within the cache window; requests with their own markers, one-shot requests, other providers and self-hosted engines (the vLLM middleware included) are untouched. To keep the old behaviour, name the fix you want: `--fix canonical_tools`. The limits are the run's: one model, multi-turn sessions seconds apart, Anthropic's own API.
 - **A request Prefixwise marked is never the reason for an error.** Any 400 or 422 on a request that carries placed markers is resent as the client sent it, whether or not the error names `cache_control` (a gateway may say only "extra inputs are not permitted"), together with any added field the error names; the markers count as refused only when the resend goes through, and after two such they are no longer placed. Before, only an error naming the field was resent.
