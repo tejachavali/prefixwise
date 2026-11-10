@@ -5,9 +5,9 @@
 Providers and engines report *how many* tokens missed the prompt cache, not *why*. Prefixwise sits between your agent and the model and does four things:
 
 - **Identify.** One named cause for every request, with its evidence, its cost and its fix.
-- **Fix.** `--optimize` repairs the request before it is sent. Only fixes proven on live traffic.
+- **Fix.** `--optimize` repairs the request before it is sent. Only fixes that passed a replay against live models.
 - **Prevent.** `prefixwise check` fails CI when a code change would break the cache.
-- **Auto-detect.** It recognises vLLM and SGLang behind a URL and reads their KV events on its own.
+- **Auto-detect.** It recognises vLLM and SGLang behind a URL and, when the engine publishes KV events, subscribes to them on its own.
 
 It stores hashes and counts, never your prompts.
 
@@ -60,12 +60,12 @@ Every number is from a live run against real models, and each links to its recor
 
 | Claim | Result |
 |---|---|
-| Agrees with Anthropic's own miss reason | **32 of 32** misses Anthropic named ([record](experiments/e1_hosted/runs/2026-11-06-anthropic-claude-haiku-5-5.md)) |
+| Agrees with Anthropic's own miss reason | **32 of 32** misses Anthropic named ([1](experiments/e1_hosted/runs/2026-11-06-anthropic-claude-haiku-5-5.md), [2](experiments/e1_hosted/runs/2026-11-06-round4.md)) |
 | Names injected causes on open models | **120 of 120** on vLLM, vLLM + LMCache and SGLang ([vLLM](experiments/e1_open/runs/2026-11-06-colab-l4-qwen3-4b.md), [LMCache and SGLang](experiments/e_evict/runs/2026-11-07-colab-l4.md)) |
-| Tells an engine eviction from everything else | **5 of 5**, confirmed from KV events; a prefix LMCache or HiCache restored counted as a hit **5 of 5** ([record](experiments/e_evict/runs/2026-11-08-colab-l4-host-restored.md)) |
-| The tool-order fix saves what was predicted | **99.9%** on Claude, **97.5%** on vLLM, task results unchanged ([record](experiments/e4/runs/2026-11-06-live.md)) |
-| The cache-marker fix pays for itself | **106.8%** of predicted savings, prompt cost down **85.6%** with the write surcharge included, task results unchanged ([record](experiments/e4/runs/2026-11-09-auto-breakpoints-live.md)) |
-| Works with real agents | Claude Code, Codex, opencode, the Anthropic and OpenAI SDKs ([record](experiments/compat/2026-11-07.md)) |
+| Tells an engine eviction from everything else | **5 of 5**, confirmed from KV events ([vLLM](experiments/e_evict/runs/2026-11-07-colab-l4.md), [SGLang](experiments/e_evict/runs/2026-11-07-colab-l4-sglang-events.md)); a prefix LMCache or HiCache restored counted as a hit **5 of 5** ([record](experiments/e_evict/runs/2026-11-08-colab-l4-host-restored.md)) |
+| The tool-order fix saves what was predicted | **99.9%** on Claude, **97.5%** on vLLM, task success flat (one of 60 turns changed on Qwen3-4B) ([record](experiments/e4/runs/2026-11-06-live.md)) |
+| The cache-marker fix pays for itself | **106.8%** of predicted savings, prompt cost down **85.6%** with the write surcharge included, task success flat ([record](experiments/e4/runs/2026-11-09-auto-breakpoints-live.md)) |
+| Works with real agents | Claude Code, Codex, opencode, the Anthropic and OpenAI SDKs ([record](experiments/compat/2026-11-07.md), [opencode](experiments/compat/2026-11-09-opencode-run.md)) |
 | Costs almost nothing | **3 ms** per request at 2k tokens, 13 ms at 120k ([record](benchmarks/runs/2026-11-07-vm.md)) |
 
 ## Ways in
@@ -95,16 +95,16 @@ Nineteen causes, each marked as waste or as a legitimate miss. The ones people m
 | `ttl_expired` | The gap since the last turn outlived the cache | A longer TTL, if the reads pay for it |
 | `evicted` | A self-hosted engine dropped the session's blocks | More KV memory, or an offload tier |
 
-Beyond the report: `prefixwise explain --diff a.json b.json` shows what changed between two requests, `prefixwise fixes` ranks fixes by dollars, and every response carries an `X-Prefixwise-Cause` header. All causes and details: [guide](docs/GUIDE.md#what-it-tells-you).
+Beyond the report: `prefixwise explain --diff a.json b.json` shows what changed between two requests, `prefixwise fixes` ranks fixes by dollars, and every non-streaming response carries an `X-Prefixwise-Cause` header (for a stream, look the request up by its id). All causes and details: [guide](docs/GUIDE.md#what-it-tells-you).
 
 ## Fix
 
-`--optimize` (on `serve` and `run`, or `PREFIXWISE_OPTIMIZE=1` for the vLLM middleware) applies every fix that has passed a live replay. A fix earns its place by realising at least half of what Prefixwise predicted with task results unchanged.
+`--optimize` (on `serve` and `run`, or `PREFIXWISE_OPTIMIZE=1` for the vLLM middleware) applies every fix that has passed a replay against a live model. A fix earns its place by realising at least half of what Prefixwise predicted with task success flat.
 
 - **`canonical_tools`** sorts the tool list and each tool's keys, so a list that drifts between turns stops breaking the cache.
 - **`auto_breakpoints`** (Anthropic's API only) adds `cache_control` markers to a request that has none, once the same prefix was seen within the cache window. A one-shot request never pays for a write nobody reads, and a client's own markers are never touched.
 
-Off by default. A request Prefixwise changed is never the reason for an error: if the upstream rejects it, the client's original is sent. `prefixwise fixes` says whether a fix paid off on your traffic. Fixes that would change what the model reads, such as moving a timestamp, stay advice.
+Off by default. If the upstream rejects a request carrying markers Prefixwise placed, the client's original is sent instead; `canonical_tools` changes only the order of tools and keys. `prefixwise fixes` says whether a fix paid off on your traffic. Fixes that would change what the model reads, such as moving a timestamp, stay advice.
 
 ## Prevent
 
@@ -112,7 +112,7 @@ Off by default. A request Prefixwise changed is never the reason for an error: i
 prefixwise check -- pytest tests/agent_scenarios      # exit 2 on a cache regression
 ```
 
-The costly regressions pass every functional test: a tool list built from a set, a timestamp added to the system prompt, a marker moved. `prefixwise check` runs your agent's scenarios against a local mock provider, with no API calls, and fails on the causes above. As a GitHub Action:
+The costly regressions pass every functional test: a tool list built from a set, a timestamp added to the system prompt, a marker moved. `prefixwise check` runs your agent's scenarios against a local mock provider, with no API calls, and fails on four: tools in a changed order, a volatile system prompt, a misplaced marker, a mutated tool result. As a GitHub Action:
 
 ```yaml
 - uses: tejachavali/prefixwise@v0.11
@@ -124,7 +124,7 @@ Details, allow-lists and baselines: [guide](docs/GUIDE.md#gate-it-in-ci).
 
 ## Self-hosted engines
 
-On vLLM and SGLang, Prefixwise reads the engine's own KV-cache events, so an eviction is confirmed and not guessed, and a prefix that LMCache or HiCache restored from CPU memory is labelled `host_restored`: a hit the GPU alone would have missed. It also names what a chat template costs, such as a reasoning model recomputing its previous answer every turn. Step by step: [vLLM](docs/VLLM.md), [LMCache](docs/LMCACHE.md), [SGLang](docs/SGLANG.md), [how the engine join works](docs/ENGINES.md).
+On vLLM and SGLang, with `pip install "prefixwise[engines]"` and the engine publishing its KV-cache events, Prefixwise reads them, so an eviction is confirmed and not inferred, and a prefix that LMCache or HiCache restored from CPU memory is labelled `host_restored`: a hit the GPU alone would have missed. It also names what a chat template costs, such as a reasoning model recomputing its previous answer every turn. Step by step: [vLLM](docs/VLLM.md), [LMCache](docs/LMCACHE.md), [SGLang](docs/SGLANG.md), [how the engine join works](docs/ENGINES.md).
 
 ## In production
 
@@ -132,7 +132,7 @@ Prometheus metrics with an alert rule and a Grafana dashboard ([docs](docs/prome
 
 ## Limits
 
-- **One model and one traffic shape per proof.** The fixes were proven on Claude Haiku 5.5 and Qwen3-4B, on multi-turn sessions seconds apart.
+- **One traffic shape per proof.** `canonical_tools` was proven on Claude Haiku 5.5 and Qwen3-4B, `auto_breakpoints` on Haiku 5.5 only; both on scripted multi-turn sessions seconds apart, not an agent's own traffic.
 - **OpenAI's own verdict is unchecked.** Its diagnostics answered `unavailable` on every call we made. Prefixwise still classifies OpenAI traffic.
 - **A change is located per block, not per token.** An edit at the end of a long system prompt is reported for the whole block.
 - **Long sessions and many agents at once** are less tested than short ones.
