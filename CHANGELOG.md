@@ -1,6 +1,9 @@
 # Changelog
 
-## Unreleased
+## 0.11.3: 2026-11-10
+
+One fix for anyone running Prefixwise in front of a router that routes by session: the client's
+`x-session-id` now reaches the router unchanged, and Prefixwise sends no session header of its own.
 
 - **The client's `x-session-id` is forwarded, and Prefixwise sends none of its own.** The proxy replaced it with its own session id on every request, `default` for traffic with no Prefixwise session, so behind a router that routes on that header (sgl-router, llm-d, AIBrix) every session shared one routing key and landed on one worker. Now the client's value goes through unchanged, groups turns into sessions when no Prefixwise id is given, and is the session SGLang's KV events are labelled with; with no client value, none is sent, as docs/ENGINES.md always said.
 
