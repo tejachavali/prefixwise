@@ -34,7 +34,7 @@ Avoidable: 3,375 tokens ($0.0116), 12.5% of prompt tokens. Fix these, biggest fi
 Expected misses (not waste): 1 x first request of a session: nothing to reuse yet.
 ```
 
-(Three lines of the output are left out here: the proxy's address, a note on 46 tokens written and never read, and the pointer to the ledger. The record has all of it.) `prefixwise report --session latest` shows where it happened:
+(Four lines of the output are left out here: the proxy's address, the `-- prefixwise: this run --` header, a note on 46 tokens written and never read, and the pointer to the ledger. The record has all of it.) `prefixwise report --ledger before.db --session latest` shows where it happened:
 
 ```
 Session run-20261110-010636: 8 requests, 26,932 prompt tokens, cache hit rate 74.6%, 3,375 avoidable, cost $0.0356   (claude-sonnet-4-6)

@@ -112,13 +112,14 @@ turn  prompt  cached    hit        cause  first changed     cost  avoidable  avo
 | Cost of the run | $0.0356 | $0.0250 |
 | Avoidable tokens | 3,375 | 0 |
 
-- **Turn 4 is the whole cost.** The reordered tool list read nothing and wrote the prompt again: $0.0132
+- **Turn 4 is nearly all of the waste** (3,329 of the 3,375 avoidable tokens). The reordered tool list read nothing and wrote the prompt again: $0.0132
   where a hit costs about $0.0017.
 - **Turn 6 was not a second full miss, and the mock had predicted one.** The list went back to its first
   order and read 3,329 of 3,401 tokens: exactly what turn 4 reads in the run with the fix, the prefix
   turn 3 had written under that order. So the older entry was still cached and within reach. Prefixwise still names the cause (the prompt changed at
-  `tools[0]` against turn 5) and counts 46 tokens as avoidable, not 3,375. A tool list that flips between
-  two orders costs one miss per new order while both entries live, not one per flip.
+  `tools[0]` against turn 5) and counts 46 tokens as avoidable, not 3,375. In this run, flipping back to an order whose entry
+  was still cached cost 46 tokens, not a second full miss. That is one observation, not a rule: it
+  depends on the older entry still being alive and within reach of the breakpoint.
 - **With `--optimize` every turn after the first is a hit.** The fix at work is `canonical_tools`; the
   agent sets its own `cache_control`, so `auto_breakpoints` placed nothing.
 - No screen recording was possible from the runtime, so the output is text.
