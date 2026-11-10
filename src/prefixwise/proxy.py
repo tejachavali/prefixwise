@@ -572,6 +572,9 @@ class PrefixwiseProxy:
         # SGLang (>= 0.5.20) reads a body session_id as the attribution label on its KV
         # events. Sent only once /server_info shows that is all it does (_check_sglang).
         self.sglang_join = False
+        # /server_info showed --enable-session-radix-cache: a body session_id then decides eviction order.
+        self.sglang_session_radix = False
+        self._unprotected_warned = False
         self.engine_caches = 1  # KV caches behind the upstream, as far as known (data-parallel ranks, replicas)
         self._kv_auto = kv_events == "auto"
         endpoints = [e.strip() for e in kv_events.split(",") if e.strip()] if kv_events and not self._kv_auto else []
@@ -770,8 +773,12 @@ class PrefixwiseProxy:
             problems.append(f"SGLang {version or '(version unknown)'} may put no session on its KV events "
                             "(needs >= 0.5.20)")
         if info.get("enable_session_radix_cache"):
+            self.sglang_session_radix = True
             problems.append("SGLang runs with --enable-session-radix-cache, where a session_id pins the "
                             "session's cache")
+            self.engine_notes.append("with --enable-session-radix-cache, send each conversation's id as a body "
+                                     "session_id: SGLang does not read an x-session-id header as the session "
+                                     "(sglang#47763). Prefixwise forwards a client's own session_id unchanged")
         events = info.get("kv_events") or {}
         if not events and not info.get("kv_events_config"):  # kv_events is None for ipc:// endpoints
             problems.append("SGLang is not publishing KV events: start it with --kv-events-config "
@@ -886,6 +893,22 @@ class PrefixwiseProxy:
                 # blocks of this session's previous request are known (docs/ENGINES.md).
                 inject("vllm_xargs", {**(xargs or {}), "kv_cache_report_mode": "full"})
                 engine_token = self.engine_events.request_sent(session_id)
+        if (engine == "sglang" and self.sglang_session_radix and "session_id" not in forward_body
+                and body.get("session_id") is not None):
+            # With --enable-session-radix-cache the body session_id is SGLang's own field: it decides what is
+            # evicted first, so the client's value reaches the engine as sent. Elsewhere it changes no cache
+            # hit (measured) and stays a Prefixwise field; inject() undoes it if the server refuses it.
+            inject("session_id", body["session_id"])
+        # The worker keeps this session's KV unprotected: it runs session radix cache, the client named the
+        # session only in an x-session-id header, and SGLang reads the session from the body alone (a router
+        # in front drops the header too; sglang#47763, #45620).
+        unprotected = (engine == "sglang" and self.sglang_session_radix and client_key is not None
+                       and "session_id" not in forward_body)
+        if unprotected and not self._unprotected_warned:
+            self._unprotected_warned = True
+            print("prefixwise: requests name their session only in an x-session-id header, which SGLang does not "
+                  "read: with --enable-session-radix-cache their KV is evicted first. Send the id as a body "
+                  "session_id too (sglang#47763)", file=sys.stderr)
         # Native diagnostics chaining. Anthropic: diagnostics object (GA,
         # no beta header). OpenAI: prompt_cache_options.comparison_response_id,
         # Responses API only (it does not exist on /v1/chat/completions). A
@@ -931,6 +954,7 @@ class PrefixwiseProxy:
         credential = hashlib.sha256((headers.get("x-api-key") or headers.get("authorization")
                                      or self.api_key or "").encode()).hexdigest()[:12]
         facts = body_facts(provider, forward_body, model=str(body.get("model", "")), credential=credential)
+        facts.session_unprotected = unprotected
         sent = time.time()
         unmarked = None
         # Anthropic's own cache only: a self-hosted engine caches prefixes by itself and may refuse the
@@ -1340,7 +1364,7 @@ class PrefixwiseProxy:
             old = ctx["facts"]
             facts = body_facts(ctx["provider"], ctx["forward_body"], model=old.model, credential=ctx.get("credential", ""))
             for name in ("sent_at", "fanout_age", "shared_age", "shared_write_pos", "volatile_shared_age",
-                         "volatile_shared_wrote", "volatile_shared_kind"):
+                         "volatile_shared_wrote", "volatile_shared_kind", "session_unprotected"):
                 setattr(facts, name, getattr(old, name))
             ctx["facts"] = facts
         # fields Prefixwise added that the error names go in the same pass: there is one resend

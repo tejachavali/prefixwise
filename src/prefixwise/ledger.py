@@ -69,7 +69,8 @@ class LedgerEntry:
     divergence_index: int | None = None  # block index of that first change
     # Schema 4: the why behind the cause, where the evidence allows (prefixwise.details):
     # ttl_shortened, lookback_exceeded, markers_ignored, sent_before_cache_written,
-    # shared_prefix_not_reused, thinking_stripped, cache_key_changed.
+    # shared_prefix_not_reused, thinking_stripped, cache_key_changed, host_restored,
+    # output_rerendered, volatile_prefix_at_start, session_header_dropped.
     detail: str | None = None
     # Schema 5: this request's own cache lifetime: what its write was granted or what it asked for
     # (Anthropic 300 or 3600; an X-Prefixwise-Cache-Ttl header; None when unknown, as on OpenAI).

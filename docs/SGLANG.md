@@ -32,12 +32,25 @@ sglang --kv-events tcp://127.0.0.1:5557` is the explicit form. The SGLang model 
 workers' `/server_info`, so a router looks like one engine: behind one, pass `--engine none`
 (evictions cannot be told from routing there, and SGLang replicas behind a router are not joined).
 
-**In front of sgl-router with session routing.** A router that keeps each session on one worker
-routes on the client's `x-session-id` header. Prefixwise forwards that header unchanged and sends
-none of its own (since 0.11.3; earlier versions replaced it with their own session id, which put
-every session on one routing key). It also uses the client's value to group turns into sessions
-when no `X-Prefixwise-Session-Id` is given. Whether the router passes the header on to the worker
-is the router's business: an open SGLang proposal (sgl-project/sglang#47763) is about exactly that.
+**Session ids: the `x-session-id` header and the body `session_id`.** Prefixwise forwards a
+client's `x-session-id` header unchanged and sends none of its own (since 0.11.3; earlier versions
+replaced it with their own session id, which put every session on one routing key). It also uses the
+client's value to group turns into sessions when no `X-Prefixwise-Session-Id` is given. With
+`--enable-session-radix-cache`, a client's own body `session_id` reaches SGLang unchanged (before
+0.11.4 it was removed, since Prefixwise's KV-event join is off with that flag); otherwise it stays a
+Prefixwise field, as before.
+
+The SGLang worker reads the session only from the body `session_id`, and per
+sgl-project/sglang#47763 sgl-router does not pass the header on (#45620 would make the worker read it;
+it is not merged). Measured on SGLang 0.5.23 with a 16,384-token KV pool flooded between two turns
+([record](../experiments/e_route/runs/2026-11-10-colab-l4-sglang-session-header.md)): in the default
+configuration the session id changes nothing (3 of 4,012 tokens cached with or without it). With
+`--enable-session-radix-cache`, it decides what survives: 4,000 of 4,012 cached with a body
+`session_id`, 3 of 4,012 without. So with that flag, send each conversation's id as a body
+`session_id`. When the flag is on (read from `/server_info`) and a request names its session only in
+the header, an eviction of that conversation's prefix gets the detail `session_header_dropped`, and
+Prefixwise warns once. sglang-router 0.3.2 had no policy that routes by a session header; its
+`cache_aware` policy kept each conversation on one worker by matching the prompt.
 
 - `--enable-cache-report` is required: it puts `usage.prompt_tokens_details.cached_tokens` in
   every response (and the final stream chunk). Without it every request looks like a miss, and
