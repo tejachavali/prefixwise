@@ -35,4 +35,5 @@ What Prefixwise does with it: `session_header_dropped`, a detail under `evicted`
 claimed only when SGLang's `/server_info` shows `--enable-session-radix-cache`, the client sent
 `x-session-id`, and no body `session_id` reached the worker. Before this, Prefixwise itself removed a
 client's body `session_id` on its way to SGLang unless its own KV-event join was on (never the case with
-this flag), which is the "none" row above; with the flag on it now passes it through.
+this flag), so a client sending one through Prefixwise got the equivalent of the "none" row above (this run
+went straight to the worker); with the flag on it now passes it through.

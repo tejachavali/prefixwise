@@ -14,6 +14,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from prefixwise.details import Facts, detail_for
 from prefixwise.findings import findings, render
 from prefixwise.proxy import PrefixwiseProxy
+from prefixwise.records import TurnRecord
 
 SYSTEM = "You are a careful assistant. " * 400
 
@@ -93,7 +94,7 @@ def test_the_header_is_forwarded_and_a_header_only_session_after_a_flood_is_evic
 
 def test_a_clients_body_session_id_reaches_sglang_unchanged_even_with_the_join_off():
     """Before: stripped as a Prefixwise field unless the join was on, which it never is with session
-    radix cache. That alone is the live run's 3-of-4,012 row."""
+    radix cache: the equivalent of the live run's 3-of-4,012 row."""
     up = Upstream([TURN1, (4012, 4000)])
     p = _sglang(up)
     try:
@@ -223,3 +224,27 @@ def test_warned_once_and_the_report_gives_the_fix(capsys):
         assert "body session_id" in text and "#45620" in text
     finally:
         up.server.shutdown()
+
+
+def test_once_the_server_refuses_the_clients_session_id_it_is_not_told_to_send_one(capsys):
+    up = Upstream([TURN1] * 3 + [MISS], refuse_session=True)
+    p = _sglang(up)
+    try:
+        _turn(p, 1, {"x-session-id": "conv-1"}, session_id="s-1")
+        _turn(p, 1, {"x-session-id": "conv-2"}, session_id="s-2")  # refused twice: no longer sent
+        _, entry = _turn(p, 2, {"x-session-id": "conv-2"}, session_id="s-2")
+        assert "session_id" not in up.seen[-1]["body"]
+        assert entry.cause == "evicted" and entry.detail is None
+        assert "SGLang does not read" not in capsys.readouterr().err
+    finally:
+        up.server.shutdown()
+
+
+def test_the_new_fact_is_on_the_wire_only_when_set():
+    """A 0.11.3 collector refuses unknown facts: every other record must stay readable by it."""
+    rec = TurnRecord(provider="openai", api="chat", model="m", session_id="s", agent_id="a", request_id="r")
+    assert "session_unprotected" not in rec.to_dict()["facts"]
+    rec.facts.session_unprotected = True
+    d = rec.to_dict()
+    assert d["facts"]["session_unprotected"] is True
+    assert TurnRecord.from_dict(d).facts.session_unprotected is True

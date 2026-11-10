@@ -893,19 +893,24 @@ class PrefixwiseProxy:
                 # blocks of this session's previous request are known (docs/ENGINES.md).
                 inject("vllm_xargs", {**(xargs or {}), "kv_cache_report_mode": "full"})
                 engine_token = self.engine_events.request_sent(session_id)
-        if (engine == "sglang" and self.sglang_session_radix and "session_id" not in forward_body
-                and body.get("session_id") is not None):
+        if engine == "sglang" and self.sglang_session_radix and "session_id" not in forward_body \
+                and body.get("session_id"):
             # With --enable-session-radix-cache the body session_id is SGLang's own field: it decides what is
             # evicted first, so the client's value reaches the engine as sent. Elsewhere it changes no cache
-            # hit (measured) and stays a Prefixwise field; inject() undoes it if the server refuses it.
+            # hit (measured) and stays a Prefixwise field; inject() undoes it if the server refuses it. Any API:
+            # SGLang reads it on chat, completions, responses and /generate alike.
             inject("session_id", body["session_id"])
         # The worker keeps this session's KV unprotected: it runs session radix cache, the client named the
-        # session only in an x-session-id header, and SGLang reads the session from the body alone (a router
-        # in front drops the header too; sglang#47763, #45620).
+        # session only in an x-session-id header, and SGLang reads the session from the body alone (per
+        # sglang#47763 sgl-router does not forward the header either; #45620 would read it). A client that sent
+        # a body session_id the server then refused is not told to send one.
         unprotected = (engine == "sglang" and self.sglang_session_radix and client_key is not None
-                       and "session_id" not in forward_body)
-        if unprotected and not self._unprotected_warned:
-            self._unprotected_warned = True
+                       and not body.get("session_id") and "session_id" not in forward_body)
+        warn = False
+        if unprotected:
+            with self._lock:
+                warn, self._unprotected_warned = not self._unprotected_warned, True
+        if warn:
             print("prefixwise: requests name their session only in an x-session-id header, which SGLang does not "
                   "read: with --enable-session-radix-cache their KV is evicted first. Send the id as a body "
                   "session_id too (sglang#47763)", file=sys.stderr)
@@ -1381,8 +1386,8 @@ class PrefixwiseProxy:
                 if n >= 2:  # twice: the upstream does not take it (once could be a bad id)
                     self.rejected_fields.add(key)
             if n == 2:
-                print(f"prefixwise: the {ctx['provider']} upstream rejects the `{field}` field Prefixwise adds; "
-                      "requests are resent without it, and it is no longer added", file=sys.stderr)
+                print(f"prefixwise: the {ctx['provider']} upstream rejects the `{field}` field Prefixwise adds "
+                      "or passes on; requests are resent without it, and it is no longer sent", file=sys.stderr)
             if field in ("session_id", "vllm_xargs") and self.engine_events is not None:
                 self.engine_events.discard(ctx.get("engine_token"))
                 ctx["engine_token"] = None

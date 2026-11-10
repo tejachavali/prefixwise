@@ -206,8 +206,8 @@ FIX_ADVICE: dict[str, dict] = {
 DETAIL_ADVICE: dict[str, str] = {
     "session_header_dropped": (
         "Send the conversation's id as a body session_id as well as the x-session-id header: SGLang reads the "
-        "session from the body only, and a body field passes through sgl-router, which forwards only an allowlist "
-        "of headers (should_forward_request_header, without x-session-id; sglang#47763). SGLang PR #45620 would "
+        "session from the body only, and a body field passes through sgl-router, which per sglang#47763 forwards "
+        "only an allowlist of headers (should_forward_request_header), without x-session-id. SGLang PR #45620 would "
         "read the header when the body has no session_id; it is not merged."),
 }
 

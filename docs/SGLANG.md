@@ -37,7 +37,7 @@ client's `x-session-id` header unchanged and sends none of its own (since 0.11.3
 replaced it with their own session id, which put every session on one routing key). It also uses the
 client's value to group turns into sessions when no `X-Prefixwise-Session-Id` is given. With
 `--enable-session-radix-cache`, a client's own body `session_id` reaches SGLang unchanged (before
-0.11.4 it was removed, since Prefixwise's KV-event join is off with that flag); otherwise it stays a
+this release it was removed, since Prefixwise's KV-event join is off with that flag); otherwise it stays a
 Prefixwise field, as before.
 
 The SGLang worker reads the session only from the body `session_id`, and per
