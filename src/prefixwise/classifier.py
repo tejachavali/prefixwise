@@ -180,6 +180,8 @@ def _min_prefix(curr: RequestSnapshot) -> int | None:
     none to apply (self-hosted engines)."""
     if curr.min_prefix_tokens is not None:
         return curr.min_prefix_tokens
+    if not curr.cache_reported:  # not the provider whose minimum this would be (Ollama, llama.cpp)
+        return None
     if curr.provider == "anthropic":
         return anthropic_min_prefix(curr.model)
     return {"openai": OPENAI_MIN_PREFIX, "gemini": GEMINI_MIN_PREFIX}.get(curr.provider)
@@ -468,7 +470,8 @@ def classify(prev: RequestSnapshot | None, curr: RequestSnapshot,
                               secondary, native_reason)
     # A server that reports no cached-token count (Ollama, many llama.cpp builds) may have reused
     # its cache: its 0 is "not reported", so no timing or routing rule can read it.
-    if not curr.cache_reported:
+    # KV events that saw the blocks removed, or the request served elsewhere, are evidence on their own.
+    if not curr.cache_reported and not curr.evicted_blocks and not curr.routed:
         return Classification(MissCause.UNKNOWN, None, CACHE_NOT_REPORTED, secondary, native_reason)
 
     # Append-only turn: compare cache_read to the reusable prior prefix,

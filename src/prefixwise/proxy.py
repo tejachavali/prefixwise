@@ -67,7 +67,7 @@ from .diagnostics import anthropic_diagnostics
 from .fingerprint import Fingerprinter
 from .fixes import apply_fixes, auto_breakpoints, parse_fixes
 from . import api
-from .pricing import PriceTable, breakdown, completion_tokens_of, normalize_usage  # noqa: F401 (re-exported)
+from .pricing import PriceTable, breakdown, cache_reported, completion_tokens_of, normalize_usage  # noqa: F401 (re-exported)
 from .ledger import Ledger, LedgerEntry
 from .collector import (Collector, LANE_THREADS, MAX_SESSIONS, _CONVERSATION, _Lane,  # noqa: F401 (re-exported)
                         _SessionMap, _best_parent, _identity)
@@ -1002,7 +1002,7 @@ class PrefixwiseProxy:
         fps = self.fingerprinter.fingerprint_blocks(extract_blocks(ctx["forward_body"], provider))
         verdict = None
         if ctx.get("engine_token") is not None:  # may wait a few ms for events
-            reported = "prompt_tokens_details" in usage  # vLLM needs --enable-prompt-tokens-details
+            reported = cache_reported(provider, usage)  # vLLM needs --enable-prompt-tokens-details
             if not reported and not getattr(self, "_warned_details", False):
                 self._warned_details = True
                 flag = "--enable-cache-report" if self.engine == "sglang" else "--enable-prompt-tokens-details"

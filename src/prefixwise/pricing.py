@@ -107,9 +107,10 @@ def cache_reported(provider: str, usage: dict) -> bool:
     counts. An empty usage is decided elsewhere (no prompt tokens at all)."""
     if provider == "anthropic" or not usage:
         return True
+    # A null details object (vLLM without --enable-prompt-tokens-details) reports nothing either.
     if "prompt_tokens" not in usage and "input_tokens" in usage:  # Responses API
-        return "input_tokens_details" in usage or "cached_tokens" in usage
-    return "prompt_tokens_details" in usage or "cached_tokens" in usage
+        return usage.get("input_tokens_details") is not None or usage.get("cached_tokens") is not None
+    return usage.get("prompt_tokens_details") is not None or usage.get("cached_tokens") is not None
 
 
 def completion_tokens_of(provider: str, usage: dict) -> int:

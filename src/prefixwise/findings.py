@@ -354,10 +354,14 @@ def render_share(f: dict, since_label: str | None = None) -> str:
         lines.append(f"top cause: {w['what']} ({_req(w['requests'])})")
         if w.get("fix"):
             lines.append(f"fix: {w['fix']}")
-    elif f["unexplained"]:
+    elif f["unexplained"] and sum(u["requests"] for u in f["unexplained"]) > (f.get("cache_not_reported") or 0):
         lines.append("no avoidable waste among the misses whose cause is known")
+    elif f["unexplained"]:
+        lines.append("no avoidable waste in the prompts")
     else:
         lines.append("no avoidable waste: every miss had a legitimate cause")
+    if f.get("cache_not_reported"):
+        lines.append("this server does not report cached tokens: the share served from cache is not known")
     unread = f.get("unread_writes") or []
     if unread:
         tok = sum(u["tokens"] or 0 for u in unread)

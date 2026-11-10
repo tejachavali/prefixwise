@@ -81,3 +81,40 @@ def test_the_bare_command_shows_how_to_start_and_a_missing_ledger_points_to_run(
         assert "prefixwise run -- <your agent>" in str(exc)
     else:
         raise AssertionError("expected an exit")
+
+
+def test_a_null_details_object_is_no_count_and_kv_confirmed_evictions_still_win():
+    from prefixwise.classifier import MissCause, RequestSnapshot, classify
+    assert not cache_reported("openai", {"prompt_tokens": 10, "prompt_tokens_details": None})  # vLLM without the flag
+    from prefixwise.fingerprint import Fingerprinter
+    blocks = Fingerprinter().fingerprint_blocks([("system", "s" * 4000), ("messages", "q")])
+    prev = RequestSnapshot(model="m", provider="openai", blocks=blocks, prompt_tokens=1200, cached_tokens=0)
+    curr = RequestSnapshot(model="m", provider="openai", blocks=blocks, prompt_tokens=1200, cached_tokens=0,
+                           gap_seconds=2.0)
+    curr.cache_reported = False
+    assert classify(prev, curr).cause == MissCause.UNKNOWN
+    curr.engine, curr.evicted_blocks = True, 50
+    assert classify(prev, curr).cause == MissCause.EVICTED  # the events saw the blocks go
+
+
+def test_no_provider_minimum_is_applied_to_a_server_that_reports_no_count(tmp_path):
+    p = _proxy(str(tmp_path / "l.db"), lambda b: {"prompt_tokens": 40, "completion_tokens": 2})
+    short = [{"model": "llama3.2:3b", "session_id": "s", "messages": [{"role": "user", "content": "hi"}]},
+             {"model": "llama3.2:3b", "session_id": "s", "messages": [{"role": "user", "content": "hi"},
+                                                                      {"role": "assistant", "content": "ok"},
+                                                                      {"role": "user", "content": "more"}]}]
+    assert [p.handle("openai", t)[0]["cause"] for t in short] == ["first_write", "unknown"]  # not below_min_prefix
+
+
+def test_explain_reads_the_count_the_same_way(tmp_path, capsys):
+    a = {"request": {"model": "llama3.2:3b", "messages": [SYSTEM, {"role": "user", "content": "hi"}]},
+         "usage": {"prompt_tokens": 900}}
+    b = {"request": {"model": "llama3.2:3b", "messages": [SYSTEM, {"role": "user", "content": "hi"},
+                                                         {"role": "assistant", "content": "ok"},
+                                                         {"role": "user", "content": "more"}]},
+         "usage": {"prompt_tokens": 920}}
+    f = tmp_path / "s.jsonl"
+    f.write_text(json.dumps(a) + "\n" + json.dumps(b) + "\n")
+    main(["explain", str(f), "--json"])
+    out = capsys.readouterr().out
+    assert "unknown" in out.lower() and "routing_miss" not in out.lower()
