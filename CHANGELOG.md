@@ -1,6 +1,11 @@
 # Changelog
 
-## Unreleased
+## 0.11.2: 2026-11-10
+
+For local models. On Ollama and most llama.cpp builds, which do not report cached tokens, Prefixwise no
+longer calls every unchanged turn a routing miss: it says the count is missing and still names every
+change to the prompt. Prefixwise inside vLLM with LMCache is validated live, and `prefixwise` on its
+own shows how to start.
 
 - **A server that reports no cached tokens is `unknown`, not a routing miss.** Ollama and many llama.cpp builds send `prompt_tokens` with no `prompt_tokens_details`, so their 0 cached means "not reported". Prefixwise read it as nothing reused and called every unchanged turn a `routing_miss` ("reached a machine without the cache"). Now such a turn is `unknown`, with that evidence; the report says the server leaves the count out and that the hit rate is not known rather than zero; the session view shows `?`. Changes to the prompt (tool order, a timestamp, an edited message) are still named, from the prompt alone. A server that reports 0 is unchanged. Found by running a new user's first session against an Ollama-style server.
 - **`prefixwise` with no command shows how to start**: the five commands most people need, instead of an argument error. A report before any run says to run an agent through Prefixwise first.
