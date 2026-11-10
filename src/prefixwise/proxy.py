@@ -27,8 +27,8 @@ X-Prefixwise-Cause, X-Prefixwise-Legit, X-Prefixwise-Avoidable-Tokens.
 Session/agent identity: X-Prefixwise-Session-Id / X-Prefixwise-Agent-Id
 headers, or session_id / agent_id body fields (stripped before
 forwarding), or the client's own x-session-id (forwarded unchanged: routers
-route on it). Prefixwise sends no x-session-id of its own. Client auth headers are passed through; PREFIXWISE_API_KEY,
-if set, overrides them. stream=true is relayed as SSE unchanged; its verdict is recorded when
+route on it). Prefixwise sends no x-session-id of its own. Client auth
+headers are passed through; PREFIXWISE_API_KEY, if set, overrides them. stream=true is relayed as SSE unchanged; its verdict is recorded when
 the stream ends and served at GET /requests/<X-Prefixwise-Request-Id>.
 Task outcomes: POST /tasks {"task_id": ..., "success": bool}; requests
 join a task via X-Prefixwise-Task-Id or a task_id body field.
@@ -843,18 +843,18 @@ class PrefixwiseProxy:
                 raise ClientError(f"{h} is longer than {MAX_ID_CHARS} characters")
         client_key = headers.get("x-session-id")  # the client's routing key, forwarded unchanged
         client_key = client_key if client_key and len(client_key) <= MAX_ID_CHARS else None
-        given = headers.get("x-prefixwise-session-id") or body.get("session_id") or client_key
+        # Known conversation ids first (Codex's own headers among them); the generic x-session-id after
+        # them, since its meaning is up to each client; a user id last.
+        given = (headers.get("x-prefixwise-session-id") or body.get("session_id")
+                 or headers.get("thread-id") or headers.get("session-id")  # Codex
+                 or client_key)
         session_is_user = not given and bool((body.get("metadata") or {}).get("user_id"))
-        session_id = str(given
-                         or (body.get("metadata") or {}).get("user_id")
-                         or headers.get("thread-id") or headers.get("session-id")  # Codex
-                         or self.default_session)
+        session_id = str(given or (body.get("metadata") or {}).get("user_id") or self.default_session)
         task_id = headers.get("x-prefixwise-task-id") or body.get("task_id")
         forward_body = {k: v for k, v in body.items() if k not in PREFIXWISE_FIELDS}
-        # E1-open retry turns: a harness-only upstream session id.
-        # The proxy's own session (snapshot chain, gap_seconds) stays
-        # session_id; only the identity sent upstream changes, so the
-        # engine sees the retry as a new session. The retry turn also
+        # E1-open retry turns: a harness-only session id, used for the mock provider's cache lane.
+        # The proxy's own session (snapshot chain, gap_seconds) stays session_id, and nothing
+        # sent upstream changes (Prefixwise sends no session header). The retry turn also
         # carries a fresh cache_salt, which is what actually makes the
         # vLLM prefix cold (session_id alone is event metadata, not a
         # cache partition; cache_salt is mixed into the first block's

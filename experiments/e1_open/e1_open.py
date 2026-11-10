@@ -340,9 +340,9 @@ def retry_upstream_ids(session_id: str, turn_no: int) -> tuple[str, str]:
     """Fresh upstream identity for a RETRY_REPLAY turn.
 
     Returns (upstream_session_id, cache_salt): a new session id and
-    a new salt per retry turn, so the vLLM prefix is cold. The
-    proxy session is unchanged; only the identity sent upstream
-    changes. See the RETRY_REPLAY note in the module docstring.
+    a new salt per retry turn, so the vLLM prefix is cold (the salt
+    does that). The proxy session is unchanged; the id only picks the
+    mock provider's cache lane. See the RETRY_REPLAY note in the module docstring.
     """
     fresh = f"{session_id}-retry-{turn_no}"
     return fresh, fresh

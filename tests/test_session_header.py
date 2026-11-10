@@ -97,3 +97,12 @@ def test_sglang_body_session_carries_the_clients_key():
     ctx = p.prepare("openai", {"model": "m", "messages": [{"role": "user", "content": "hi"}]}, {"x-session-id": "conv-9"})
     assert ctx["forward_body"]["session_id"] == "conv-9" and p.engine_events.sent == ["conv-9"]
     p.response_started(ctx)
+
+
+def test_codex_conversation_headers_rank_above_a_generic_session_key():
+    """x-session-id means what each client makes it mean; Codex's thread-id is a known conversation id."""
+    p = PrefixwiseProxy(mock=True)
+    _, entry = _ask(p, {"x-session-id": "per-request-123", "thread-id": "codex-thread"})
+    assert entry.session_id == "codex-thread"
+    _, entry = _ask(p, {"x-session-id": "conv-5"}, metadata={"user_id": "u-1"})
+    assert entry.session_id == "conv-5"  # a session key beats a user id
