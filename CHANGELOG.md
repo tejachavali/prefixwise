@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **A shorter README.** 150 lines where there were 510: what Prefixwise does (identify, fix, prevent, auto-detect), the three commands, real output, the results with their records, the ways in, and the limits. Everything it held before is kept whole in [docs/GUIDE.md](docs/GUIDE.md).
+
 ## 0.11.0: 2026-11-10
 
 `--optimize` does more. `auto_breakpoints` passed its live test on Anthropic, so `--optimize` now places
