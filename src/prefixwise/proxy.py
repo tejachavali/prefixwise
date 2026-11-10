@@ -26,7 +26,8 @@ verdict rides in response headers: X-Prefixwise-Request-Id,
 X-Prefixwise-Cause, X-Prefixwise-Legit, X-Prefixwise-Avoidable-Tokens.
 Session/agent identity: X-Prefixwise-Session-Id / X-Prefixwise-Agent-Id
 headers, or session_id / agent_id body fields (stripped before
-forwarding). Client auth headers are passed through; PREFIXWISE_API_KEY,
+forwarding), or the client's own x-session-id (forwarded unchanged: routers
+route on it). Prefixwise sends no x-session-id of its own. Client auth headers are passed through; PREFIXWISE_API_KEY,
 if set, overrides them. stream=true is relayed as SSE unchanged; its verdict is recorded when
 the stream ends and served at GET /requests/<X-Prefixwise-Request-Id>.
 Task outcomes: POST /tasks {"task_id": ..., "success": bool}; requests
@@ -237,7 +238,10 @@ PASSTHROUGH_HEADERS = ("authorization", "x-api-key", "anthropic-version", "anthr
                        "session-id", "thread-id", "originator", "version", "x-openai-subagent",
                        "x-client-request-id", "chatgpt-account-id",
                        # W3C trace context: the upstream (a traced vLLM or gateway) joins the trace.
-                       "traceparent", "tracestate")
+                       "traceparent", "tracestate",
+                       # The client's own session key: routers with session affinity (sgl-router,
+                       # llm-d, AIBrix) route on it. Prefixwise never sends one of its own.
+                       "x-session-id")
 PASSTHROUGH_PREFIXES = ("x-codex-",)
 ANTHROPIC_VERSION = "2023-06-01"
 UPSTREAM_TIMEOUT = 600  # seconds; long generations stream for minutes
@@ -837,7 +841,9 @@ class PrefixwiseProxy:
         for h in ("x-prefixwise-session-id", "x-prefixwise-agent-id", "x-prefixwise-task-id"):
             if headers.get(h) and len(headers[h]) > MAX_ID_CHARS:
                 raise ClientError(f"{h} is longer than {MAX_ID_CHARS} characters")
-        given = headers.get("x-prefixwise-session-id") or body.get("session_id")
+        client_key = headers.get("x-session-id")  # the client's routing key, forwarded unchanged
+        client_key = client_key if client_key and len(client_key) <= MAX_ID_CHARS else None
+        given = headers.get("x-prefixwise-session-id") or body.get("session_id") or client_key
         session_is_user = not given and bool((body.get("metadata") or {}).get("user_id"))
         session_id = str(given
                          or (body.get("metadata") or {}).get("user_id")
@@ -1241,8 +1247,10 @@ class PrefixwiseProxy:
     def _upstream_request(self, provider: str, body: dict, request_id: str, session_id: str,
                           client_headers: dict[str, str], api: str = "chat") -> urllib.request.Request:
         headers = {k: v for k, v in client_headers.items() if k in PASSTHROUGH_HEADERS or k.startswith(PASSTHROUGH_PREFIXES)}
-        headers.update({"content-type": "application/json",
-                        "x-request-id": request_id, "x-session-id": session_id})
+        # No x-session-id of Prefixwise's own: a router with session affinity routes on it, and a
+        # value Prefixwise invented ("default" for traffic with no session) would put every session
+        # on one key. The client's own, if it sent one, is in PASSTHROUGH_HEADERS.
+        headers.update({"content-type": "application/json", "x-request-id": request_id})
         if provider == "anthropic":
             if self.api_key:
                 headers["x-api-key"] = self.api_key
