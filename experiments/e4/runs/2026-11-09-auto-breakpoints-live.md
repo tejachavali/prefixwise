@@ -2,7 +2,10 @@
 
 Run by Muse on a Colab runtime, code at 9a94405272618d725cee8659b9fa3f556b422d71, model
 `claude-haiku-5-5`, 3:32 to 3:35 PM PT, first run. The mock harness passed first (59 of 60 rewritten).
-Transcribed by Claude from Muse's report; the printed report below is verbatim.
+Transcribed by Claude from Muse's report; the printed report below is verbatim. The per-request rows
+(causes, token counts, tool names, costs; no prompt text, no key) are beside this file:
+[`2026-11-09-auto-breakpoints-live.json`](2026-11-09-auto-breakpoints-live.json). Muse checked the report and
+the log against them; the figures under "Reading it" are recomputed from the rows.
 
     python experiments/e4/e4.py --fix auto_breakpoints --provider anthropic --model claude-haiku-5-5 --max-input-tokens 900000
 
@@ -34,11 +37,14 @@ Markers rejected by the provider: no
   sessions 2 to 6 also reads the tools and system prompt that session 1 wrote.
 - **The bill: prompt-side cost down 85.6%, surcharge included.** By hand from Haiku 5.5's rates ($0.10
   input, $0.01 read, $0.125 five-minute write per million): OFF is 226,115 tokens at the input rate,
-  $0.0226; ON is 216,533 read, 5,716 written and 3,866 uncached, $0.0033. The report gives only the total
-  written; it is consistent with one write of a whole prompt (about 3,770 tokens) on session 1's second turn
-  and about 35 tokens per turn after, which is an inference, since the per-request rows were not kept.
-- **Tool choices: unchanged or better.** 59 of 60 right without the fix, 60 of 60 with it. One turn's
-  difference is chance, not an effect of the markers: they do not change what the model reads.
+  $0.0226; ON is 216,533 read, 5,716 written and 3,866 uncached, $0.0033. From the rows: one write of a
+  whole prompt, 3,654 tokens, on session 1's second turn (its first marked request); every other rewritten
+  request wrote only its new tail, 25 to 94 tokens, 36 on average.
+- **A new session reads what an earlier one wrote.** The first turn of sessions 2 to 6 was marked (the
+  proxy had seen the prefix) and read 3,539 tokens, the tools and system prompt, on its very first request.
+- **Tool choices: unchanged or better.** 59 of 60 right without the fix, 60 of 60 with it. The one miss
+  without the fix (session 4, turn 8: `calculator` where `git_log` was asked) is chance, not an effect of the
+  markers: they do not change what the model reads.
 - **No request rejected for its markers**; the one request not rewritten is the arm's first, when the
   proxy had seen nothing yet.
 - **The OFF arm cached nothing** (0 read, 0 written), so it is the client the experiment is about.
@@ -51,7 +57,6 @@ Markers rejected by the provider: no
   and that guard is pinned by unit tests, not by this run.
 - Scripted sessions, not an agent's own traffic. Anthropic's own API: the resend when an upstream rejects
   the markers was not exercised (none was rejected), and is pinned by unit tests.
-- The per-request rows (`.json`) and the log stayed in the Colab runtime.
 
 ## What follows
 
