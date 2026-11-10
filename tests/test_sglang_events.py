@@ -318,6 +318,9 @@ def test_session_radix_cache_and_old_engines_get_no_session_id(publisher):
     try:
         p.handle("openai", dict(BODY), {"x-prefixwise-session-id": "x"})
         assert "session_id" not in seen[0]
+        # /server_info's flag is what gates the pass-through and session_header_dropped
+        assert p.sglang_session_radix and not p.sglang_join
+        assert any("body session_id" in n and "#47763" in n for n in p.engine_notes)
     finally:
         p.engine_events.stop()
         p._srv.shutdown()

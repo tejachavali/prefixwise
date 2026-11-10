@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **SGLang with `--enable-session-radix-cache`: a client's body `session_id` reaches the engine, and a dropped session header is named.** That flag makes SGLang evict KV that no session holds first, and SGLang reads the session from the body `session_id` only. Prefixwise removed a client's body `session_id` on its way to SGLang unless its own KV-event join was on, which it never is with this flag, so the client's sessions lost their protection; with the flag on (read from `/server_info`) it now passes it through. Without the flag nothing changes: there it makes no difference to the cache. A client that names its session only in an `x-session-id` header (which SGLang does not read, and which per sglang#47763 sgl-router does not forward) gets a one-time warning, and an eviction of its prefix gets the detail `session_header_dropped`, with the fix: send the id as a body `session_id` too (SGLang PR #45620 would read the header; not merged). It is a detail of `evicted`, not a cause of its own: the miss is an eviction, and measured live it happens only with that flag on and memory full: 4,000 of 4,012 tokens cached with a body `session_id`, 3 without; with the flag off, 3 either way ([record](experiments/e_route/runs/2026-11-10-colab-l4-sglang-session-header.md)). Turn facts gain `session_unprotected`, sent only when true: a 0.11.3 `prefixwise collect` refuses those records as malformed, so upgrade the collector first if you run SGLang with that flag.
+
 ## 0.11.3: 2026-11-10
 
 One fix for anyone running Prefixwise in front of a router that routes by session: the client's
