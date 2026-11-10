@@ -68,6 +68,17 @@ extended-thinking docs (Nov 2026), Claude Code / Codex / opencode / LiteLLM issu
                      system prompt) that wrote an entry ending inside tools/system,
                      with a breakpoint here that could reach it, yet it read little.
   cache_key_changed  OpenAI prompt_cache_key differs from the previous turn's.
+  session_header_dropped
+                     An eviction (the cause stays evicted) on SGLang whose /server_info shows
+                     --enable-session-radix-cache, where the client sent x-session-id and no body
+                     session_id reached the worker. SGLang reads the session only from the body
+                     (sglang#47763; #45620 would read the header, and is not merged), and the RFC
+                     reports that sgl-router does not forward it. With the flag on, KV that no session holds is
+                     evicted first, so this conversation's prefix went before registered sessions'.
+                     Not a cause of its own: the miss is an eviction, and a session holds KV softly,
+                     so it might have been evicted anyway. Live (SGLang 0.5.23, Qwen2.5-1.5B, a
+                     16,384-token pool flooded between turns): turn 2 read 4,000 of 4,012 tokens with
+                     a body session_id and 3 of 4,012 without; with the flag off, 3 of 4,012 either way.
 """
 
 from __future__ import annotations
@@ -133,6 +144,9 @@ class Facts:
     #   tools+system equal this one's except for volatile values in the system prompt (a fresh timestamp)
     volatile_shared_wrote: bool = False  # that request wrote a cache entry ending inside tools+system
     volatile_shared_kind: str | None = None  # what differed: "date" (dates/times only), "id", or "mixed"
+    # SGLang with --enable-session-radix-cache, a client x-session-id, and no body session_id sent: the
+    # worker never registered this request's session, so its KV had no session protection.
+    session_unprotected: bool = False
 
 
 def _h(obj) -> str:
@@ -282,6 +296,12 @@ def detail_for(cause: str, prev: Facts | None, curr: Facts, *, prompt_tokens: in
         return None, None, ""
     cold = cached_tokens < 0.1 * prompt_tokens
     read = f"read {cached_tokens:,} of {prompt_tokens:,} prompt tokens from the cache"
+
+    if cause == "evicted" and curr.session_unprotected:
+        return None, "session_header_dropped", (
+            "the worker runs --enable-session-radix-cache, which evicts KV no session holds first, but this "
+            "conversation named its session only in an x-session-id header, which SGLang does not read "
+            "(sglang#47763): its KV was never held by a session")
 
     if cause == "none" and evicted_blocks and cached_tokens > 0:
         return None, "host_restored", (

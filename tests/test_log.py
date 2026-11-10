@@ -195,6 +195,8 @@ def test_an_unwritable_ledger_leaves_records_unacknowledged_for_a_retry(redis_ur
         assert c.stats["records"] == 0 or len(rows(c.ledger)) == 0
         c.ledger.record = real  # the disk is back
         wait_for(lambda: len(rows(c.ledger)) == 1, timeout=15)
+        # The row is written before the ack goes to Redis and is counted: wait for it, as for the row.
+        wait_for(lambda: lc.snapshot()["acked"] >= 1)
         assert lc.snapshot()["acked"] == 1
         # The failed attempt left no state behind: the retry is still the conversation's first turn.
         assert rows(c.ledger)[0][1] == "first_write" and c.stats["records"] == 1

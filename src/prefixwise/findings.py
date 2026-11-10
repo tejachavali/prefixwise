@@ -9,7 +9,7 @@ waste cost, the fix for each cause, and what was expected.
 from __future__ import annotations
 
 from . import metrics
-from .fixes import FIX_ADVICE, FIX_STATUS
+from .fixes import DETAIL_ADVICE, FIX_ADVICE, FIX_STATUS
 from .pricing import PriceTable
 
 # Anthropic cache lifetimes, seconds: the default, and the 1-hour option (cache_control ttl "1h").
@@ -54,6 +54,8 @@ DETAIL_PLAIN = {
                                 "this one recomputed a prefix it could have shared",
     "thinking_stripped": "thinking blocks were removed from earlier messages",
     "cache_key_changed": "prompt_cache_key changed between turns",
+    "session_header_dropped": "the worker runs session radix cache, but the session was sent only in an "
+                              "x-session-id header, which SGLang does not read, so its KV was evicted first",
 }
 
 
@@ -62,6 +64,7 @@ DETAIL_FIX = {
     "volatile_prefix_at_start": "Move the value that changes per session (a timestamp, an id) out of the system "
                                 "prompt to the end of the prompt; a timestamp can also be set once per day. Then a "
                                 "restarted or parallel session shares the cached tools and system prompt.",
+    **DETAIL_ADVICE,
 }
 
 

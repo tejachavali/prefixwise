@@ -207,6 +207,16 @@ FIX_ADVICE: dict[str, dict] = {
 }
 
 
+# Detail -> its fix, for details under a cause that is not waste (printed by findings.render).
+DETAIL_ADVICE: dict[str, str] = {
+    "session_header_dropped": (
+        "Send the conversation's id as a body session_id as well as the x-session-id header: SGLang reads the "
+        "session from the body only, and a body field passes through sgl-router, which per sglang#47763 forwards "
+        "only an allowlist of headers (should_forward_request_header), without x-session-id. SGLang PR #45620 would "
+        "read the header when the body has no session_id; it is not merged."),
+}
+
+
 # Anthropic's multipliers on the input rate: a 5-minute cache write 1.25x, a read 0.1x (docs.anthropic.com
 # prompt caching pricing, Nov 2026). auto_breakpoints places 5-minute markers only. Against a placed marker
 # counts the surcharge above sending the tokens uncached, 0.25 per token written; a read saves 0.9.

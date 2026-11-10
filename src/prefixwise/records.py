@@ -101,7 +101,11 @@ class TurnRecord:
     # -- wire form -------------------------------------------------------------------------
 
     def to_dict(self) -> dict:
-        return asdict(self)  # deep copies: nested lists are not shared with the record
+        d = asdict(self)  # deep copies: nested lists are not shared with the record
+        # Added in 0.11.4 and almost always False: left out then, so a 0.11.3 collector still reads the record.
+        if not d["facts"].get("session_unprotected"):
+            d["facts"].pop("session_unprotected", None)
+        return d
 
     @classmethod
     def from_dict(cls, d: dict) -> "TurnRecord":
