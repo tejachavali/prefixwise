@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- **The README shows a real run.** `--optimize` on the Anthropic API, before and after, on one small agent: 74.6% to 87.1% served from cache, $0.0356 to $0.0250, 3,375 avoidable tokens to none ([record](experiments/demo/2026-11-10-optimize-real-run.md)). It replaces the mock output.
 - **A shorter README.** 150 lines where there were 510: what Prefixwise does (identify, fix, prevent, auto-detect), the three commands, real output, the results with their records, the ways in, and the limits. Everything it held before is kept whole in [docs/GUIDE.md](docs/GUIDE.md).
 
 ## 0.11.0: 2026-11-10

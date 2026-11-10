@@ -22,37 +22,44 @@ No API key (Claude Code or Codex on a subscription)? `prefixwise import claude-c
 
 ## What you see
 
-After a run (this is `prefixwise run --mock` on an eight-turn agent whose tool list comes back in another order twice; the mock provider's token counts are flat, the verdicts and prices are the real logic):
+A real run against the Anthropic API (Claude Sonnet 4.6): an eight-turn agent whose tool list comes back in another order on turn 4 and returns on turn 6 ([the run, with the agent](experiments/demo/2026-11-10-optimize-real-run.md)).
 
 ```
--- prefixwise: this run --
-(mock: synthetic responses and usage, so the numbers below are illustrative)
-8 requests, 16,000 prompt tokens, 62% served from cache. Cost $0.0256.
-Avoidable: 4,000 tokens ($0.0138), 25.0% of prompt tokens. Fix these, biggest first:
-  1. The same tools were sent in a different order or format (2 requests, 4,000 tokens, $0.0138).
+$ prefixwise run --ledger before.db -- python agent.py
+8 requests, 26,932 prompt tokens, 75% served from cache. Cost $0.0356.
+Avoidable: 3,375 tokens ($0.0116), 12.5% of prompt tokens. Fix these, biggest first:
+  1. The same tools were sent in a different order or format (2 requests, 3,375 tokens, $0.0116).
      Fix: Send tools in a fixed order with deterministic serialization (or let the proxy do it: prefixwise serve --fix canonical_tools).
      Prefixwise can do it for you: prefixwise run --fix canonical_tools (proven)
 Expected misses (not waste): 1 x first request of a session: nothing to reuse yet.
 ```
 
-`prefixwise report --session latest` shows where it happened:
+(Three lines of the output are left out here: the proxy's address, a note on 46 tokens written and never read, and the pointer to the ledger. The record has all of it.) `prefixwise report --session latest` shows where it happened:
 
 ```
-Session run-20261110-000152: 8 requests, 16,000 prompt tokens, cache hit rate 62.5%, 4,000 avoidable, cost $0.0256   (claude-sonnet-4-6)
+Session run-20261110-010636: 8 requests, 26,932 prompt tokens, cache hit rate 74.6%, 3,375 avoidable, cost $0.0356   (claude-sonnet-4-6)
 
-turn  prompt  cached     hit             cause  first changed     cost  avoidable  avoidable $
-----  ------  ------  ------  ----------------  -------------  -------  ---------  -----------
-1      2,000       0    0.0%       first_write              -  $0.0075          0      $0.0000
-2      2,000   2,000  100.0%              none    messages[8]  $0.0006          0      $0.0000
-3      2,000   2,000  100.0%              none   messages[10]  $0.0006          0      $0.0000
-4      2,000       0    0.0%  tool_reserialize       tools[0]  $0.0075      2,000      $0.0069
-5      2,000   2,000  100.0%              none   messages[14]  $0.0006          0      $0.0000
-6      2,000       0    0.0%  tool_reserialize       tools[0]  $0.0075      2,000      $0.0069
-7      2,000   2,000  100.0%              none   messages[18]  $0.0006          0      $0.0000
-8      2,000   2,000  100.0%              none   messages[20]  $0.0006          0      $0.0000
+turn  prompt  cached    hit             cause  first changed     cost  avoidable  avoidable $
+----  ------  ------  -----  ----------------  -------------  -------  ---------  -----------
+1      3,286       0   0.0%       first_write              -  $0.0125          0      $0.0000
+2      3,309   3,283  99.2%              none    messages[8]  $0.0017          0      $0.0000
+3      3,332   3,306  99.2%              none   messages[10]  $0.0016          0      $0.0000
+4      3,355       0   0.0%  tool_reserialize       tools[0]  $0.0132      3,329      $0.0115
+5      3,378   3,352  99.2%              none   messages[14]  $0.0019          0      $0.0000
+6      3,401   3,329  97.9%  tool_reserialize       tools[0]  $0.0016         46      $0.0002
+7      3,424   3,398  99.2%              none   messages[18]  $0.0020          0      $0.0000
+8      3,447   3,421  99.2%              none   messages[20]  $0.0013          0      $0.0000
 ```
 
-"first changed" is the block where the prompt stopped matching the previous request, counted over the whole prompt: tools, then system, then messages. With `--optimize` the same agent reads the cache on every turn after the first: 87.5% served from cache instead of 62.5%, and no avoidable tokens.
+"first changed" is the block where the prompt stopped matching the previous request, counted over the whole prompt: tools, then system, then messages. Turn 4 paid for the whole prompt again. Turn 6 went back to the first order and read 3,329 tokens, the prefix turn 3 had written under that order: the older entry was still cached.
+
+With `--optimize`, same agent and same prompts:
+
+| | before | with `--optimize` |
+|---|---:|---:|
+| Served from cache | 74.6% | 87.1% |
+| Cost of the run | $0.0356 | $0.0250 |
+| Avoidable tokens | 3,375 | 0 |
 
 ## Results
 
