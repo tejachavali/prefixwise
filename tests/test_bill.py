@@ -1,6 +1,6 @@
 """Where the bill went: re-reading cached context is billed every turn, and on a long, well-cached session
-it is most of the bill though no miss caused it. From a gateway engineer on Reddit (r/LLMDevs), whose six
-DeepSeek calls at 99.67% hit rate split 59.5% cache re-reads, 10% new input, 30.5% output."""
+it is most of the bill though no miss caused it. From a gateway engineer on Reddit (r/LLMDevs): five calls
+from their DeepSeek dashboard, every one a near-total hit, split 62% cache re-reads, 9% new input, 28% output."""
 
 import json
 import threading
@@ -80,10 +80,13 @@ def test_a_well_cached_deepseek_session_shows_the_floor(tmp_path, capsys):
     assert "Where the bill went: cache re-reads" in text and "(62%)" in text
     assert "a better hit rate would not lower it" in text  # the re-read is the biggest part: say where the lever is
     assert "bill: 62% cache re-reads, 9% new input, 28% output" in render_share(f)
+    details = render(f, headline=False)  # import prints the short block first: the split once, the advice kept
+    assert "Where the bill went" not in details and "a better hit rate would not lower it" in details
     from prefixwise.cli import _report_session
     _report_session(p.ledger, "long", as_json=False)
     out = capsys.readouterr().out
-    assert "Where the bill went:" in out and "Re-read per turn:" in out and "at most 570,800" in out
+    assert "Where the bill went:" in out and "Re-read per turn: 5 turns read from the cache" in out
+    assert "at most 570,800" in out  # the first call read from the cache too: it counts
 
 
 def test_no_split_no_line_and_older_rows_are_counted_out():
@@ -91,5 +94,6 @@ def test_no_split_no_line_and_older_rows_are_counted_out():
     b = {"cache_read": 1.0, "input": 0.0, "cache_write": 0.0, "output": 1.5, "total": 2.5, "requests": 3,
          "requests_priced": 5}
     assert "(3 of 5 priced requests; older rows have no split)" in bill_line(b)
+    assert bill_line(b, short=True).startswith("bill (3 of 5 priced requests): ")  # a pasted block says it too
     assert floor_advice(b) is None  # output is the biggest part here, not the re-read
     assert "<1%" in bill_line({**b, "input": 0.001, "total": 2.501})

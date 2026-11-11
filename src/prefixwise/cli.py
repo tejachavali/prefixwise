@@ -208,11 +208,13 @@ def _report_session(led, session: str, as_json: bool, since: float | None = None
         for line in (bill_line(b), floor_advice(b)):
             if line:
                 print(line)
-    # The floor: each turn re-reads the context already cached; it grows with the conversation.
-    reread = [t["cached_tokens"] for t in turns[1:] if t.get("cached_tokens") and t["turn"] not in blind]
+    # The floor: a turn that hits re-reads the context already cached, and pays for it again at the
+    # cache rate; it grows with the conversation.
+    reread = [t["cached_tokens"] for t in turns if t.get("cached_tokens") and t["turn"] not in blind]
     if len(reread) >= 2:
-        print(f"Re-read per turn: {_fmt_int(sum(reread) // len(reread))} cached tokens on average, at most "
-              f"{_fmt_int(max(reread))}: every turn pays for the cached context again, at the cache rate.")
+        print(f"Re-read per turn: {len(reread)} turns read from the cache, {_fmt_int(sum(reread) // len(reread))} "
+              f"tokens on average, at most {_fmt_int(max(reread))}: each paid for that context again, at the "
+              f"cache rate.")
     print()
     # Each model has its own cache and each agent (a subagent) its own conversation: when a session
     # mixes them, say which row is which, since "first changed" compares within a model and conversation.

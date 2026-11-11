@@ -99,10 +99,12 @@ def bill_line(b: dict | None, short: bool = False) -> str | None:
     if not b or not b.get("total"):
         return None
     parts = [(label, b[key]) for key, label in BILL_PARTS if b[key]]
+    partial = b["requests"] < b["requests_priced"]
     if short:
-        return "bill: " + ", ".join(f"{_share(v, b['total'])} {label}" for label, v in parts)
+        return ("bill" + (f" ({b['requests']} of {b['requests_priced']} priced requests)" if partial else "") + ": "
+                + ", ".join(f"{_share(v, b['total'])} {label}" for label, v in parts))
     text = "Where the bill went: " + ", ".join(f"{label} {_usd(v)} ({_share(v, b['total'])})" for label, v in parts)
-    if b["requests"] < b["requests_priced"]:
+    if partial:
         text += f" ({b['requests']} of {b['requests_priced']} priced requests; older rows have no split)"
     return text + "."
 
@@ -299,7 +301,8 @@ def render(f: dict, command: str = "serve", headline: bool = True) -> str:
                 head += f" ({s['requests_priced']} of {s['requests']} requests priced)"
         if headline:
             lines.append(head + ".")
-        for extra in (bill_line(f.get("bill")), floor_advice(f.get("bill"))):
+        # Without the headline (import prints the short block first, with the split), the advice only.
+        for extra in ((bill_line(f.get("bill")) if headline else None), floor_advice(f.get("bill"))):
             if extra:
                 lines.append(extra)
         if f.get("approximate_prices"):
@@ -387,7 +390,7 @@ def render(f: dict, command: str = "serve", headline: bool = True) -> str:
 def render_share(f: dict, since_label: str | None = None) -> str:
     """A short block for pasting into a chat or a thread: the headline numbers, a pricing note when
     the dollars are partial or approximate, the top cause and its fix, the unread writes. Counts and
-    dollars only; no prompt text exists to leak. At most nine lines."""
+    dollars only; no prompt text exists to leak. At most ten lines."""
     s = f["summary"]
     if not s["requests"]:
         return "prefixwise: no requests recorded yet."

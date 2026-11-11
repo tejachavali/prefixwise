@@ -234,7 +234,8 @@ class PriceTable:
     def request_cost_parts(self, model: str, provider: str, usage: dict) -> dict | None:
         """Where one request's dollars went: {"cache_read", "input", "cache_write", "output"} in USD
         (input = prompt tokens neither read from nor written to the cache). None when a part that has
-        tokens has no rate: then the whole cost is unknown, not a partial sum."""
+        tokens has no rate: then the whole cost is unknown, not a partial sum. Unrounded: the cost is
+        rounded once, from their sum."""
         rates = self.rates_for(model)
         if rates is None:
             return None
@@ -254,7 +255,7 @@ class PriceTable:
             if not isinstance(rate, (int, float)):
                 return None  # a part we cannot price: unknown, not zero
             out[part] += tokens * rate / 1e6
-        return {k: round(v, 8) for k, v in out.items()}
+        return out
 
     def request_cost(self, model: str, provider: str, usage: dict) -> float | None:
         parts = self.request_cost_parts(model, provider, usage)
