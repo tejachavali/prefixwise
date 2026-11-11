@@ -241,8 +241,19 @@ PASSTHROUGH_HEADERS = ("authorization", "x-api-key", "anthropic-version", "anthr
                        "traceparent", "tracestate",
                        # The client's own session key: routers with session affinity (sgl-router,
                        # llm-d, AIBrix) route on it. Prefixwise never sends one of its own.
-                       "x-session-id")
-PASSTHROUGH_PREFIXES = ("x-codex-",)
+                       "x-session-id",
+                       # Routing keys. sgl-router's sticky policy reads x-sgl-routing-key; vLLM and
+                       # SGLang pin a data-parallel rank by x-data-parallel-rank. Without them a
+                       # session lands anywhere, and its misses would be blamed on routing.
+                       "x-sgl-routing-key", "x-data-parallel-rank",
+                       # NVIDIA Dynamo's vLLM worker takes the session from it.
+                       "x-dynamo-session-id",
+                       # SGLang Model Gateway's consistent hashing, with no routing key, hashes the
+                       # authorization, then x-forwarded-for, then the cookie.
+                       "x-forwarded-for", "cookie")
+# x-smg-routing-key and x-smg-target-worker: SGLang Model Gateway's routing (the worker schedules
+# by the routing key too).
+PASSTHROUGH_PREFIXES = ("x-codex-", "x-smg-")
 ANTHROPIC_VERSION = "2023-06-01"
 UPSTREAM_TIMEOUT = 600  # seconds; long generations stream for minutes
 # A client socket that sends nothing (or stops reading) for this long is
@@ -599,6 +610,10 @@ class PrefixwiseProxy:
         # requests go to <base>/chat/completions, exactly as the SDK would send them.
         self.versioned = set()
         self.api_key = api_key or os.environ.get("PREFIXWISE_API_KEY")
+        # More headers to pass through: a router's custom session header (sgl-router
+        # --session-id-header, a gateway's own key). PREFIXWISE_PASS_HEADERS, comma-separated.
+        self.pass_headers = {h.strip().lower() for h in os.environ.get("PREFIXWISE_PASS_HEADERS", "").split(",")
+                             if h.strip()}
         self.mock = mock if mock is not None else (
             not (self.upstream_url or self.upstreams) or os.environ.get("PREFIXWISE_MOCK_UPSTREAM") == "1")
         self.default_session = "default"  # for requests that carry no session id
@@ -625,6 +640,9 @@ class PrefixwiseProxy:
         self.prefix_seen: dict[str, tuple] = _SessionMap(MAX_SESSIONS)
         if self._kv_auto and self.engine == "vllm" and not self.mock:
             self._discover_vllm()
+        self.no_prefix_cache = False
+        if self.engine == "sglang" and not self.mock:
+            self._check_sglang_cache()
         if self.engine == "sglang" and (self.engine_events is not None or self._kv_auto) and not self.mock:
             self._check_sglang()
         # Per-session state, shared across the threaded server's handlers.
@@ -746,6 +764,33 @@ class PrefixwiseProxy:
         if len(sources) > 1:
             self.engine_notes.append(f"{len(sources)} data-parallel ranks: the KV events show which one served "
                                      "each request, so a request sent away from its cached prefix is a routing miss")
+
+    def _check_sglang_cache(self) -> None:
+        """What SGLang's /server_info says about its prefix cache, with or without KV events: the
+        radix cache off (--disable-radix-cache: HiSparse requires it, deterministic inference sets it
+        on most backends), so nothing is ever read back; or a Mamba model (uses_mamba_radix_cache),
+        whose state SGLang frees without events, so --full-attention would be wrong."""
+        headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
+        try:
+            req = urllib.request.Request(self._engine_base() + "/server_info", headers=headers)
+            with urllib.request.urlopen(req, timeout=5) as r:
+                info = json.loads(r.read())
+        except (OSError, ValueError):
+            return  # _check_sglang says why, when it runs
+        if not isinstance(info, dict):
+            return
+        if info.get("disable_radix_cache"):
+            self.no_prefix_cache = True
+            self.engine_notes.append("SGLang runs with its radix cache off (--disable-radix-cache; HiSparse "
+                                     "requires it, deterministic inference sets it on most backends): nothing is "
+                                     "ever read back from a cache, so every turn misses and no cause applies")
+        if info.get("uses_mamba_radix_cache") and self._full_attention:
+            self._full_attention = False
+            for source in _sources_of(self.engine_events) if self.engine_events is not None else ():
+                source.full_attention, source.hybrid = False, True  # started already (an explicit endpoint)
+            self.engine_notes.append("the model has Mamba layers (uses_mamba_radix_cache), whose state SGLang "
+                                     "frees without KV events: --full-attention is ignored, so an eviction is "
+                                     "never ruled out")
 
     def _check_sglang(self) -> None:
         """Read SGLang's /server_info once. Event verdicts stay off (session id not sent)
@@ -960,6 +1005,7 @@ class PrefixwiseProxy:
                                      or self.api_key or "").encode()).hexdigest()[:12]
         facts = body_facts(provider, forward_body, model=str(body.get("model", "")), credential=credential)
         facts.session_unprotected = unprotected
+        facts.no_prefix_cache = self.no_prefix_cache
         sent = time.time()
         unmarked = None
         # Anthropic's own cache only: a self-hosted engine caches prefixes by itself and may refuse the
@@ -1070,6 +1116,9 @@ class PrefixwiseProxy:
         if engine_verdict is not None:
             routed = engine_verdict[2] if len(engine_verdict) > 2 and engine_verdict[2] is not None else None
             verdict = [engine_verdict[0], engine_verdict[1], list(routed) if routed is not None else None]
+            from .engines import Restored  # loaded with the engine join
+            if isinstance(engine_verdict, Restored):  # a hit's restored blocks, not a miss's removed ones
+                verdict.append(True)
         return TurnRecord(
             provider=provider, api=ctx.get("api") or "chat", model=ctx["model"], session_id=ctx["session_id"],
             agent_id=ctx["agent_id"], request_id=ctx["request_id"], task_id=ctx["task_id"],
@@ -1273,9 +1322,30 @@ class PrefixwiseProxy:
                 "usage": {"prompt_tokens": 2000, "completion_tokens": 1, "total_tokens": 2001,
                           "prompt_tokens_details": {"cached_tokens": cached}}}
 
+    def _passed(self, client_headers: dict) -> dict:
+        """The client's headers that go upstream: the client's own credentials, versions, session and
+        routing keys, trace context (PASSTHROUGH_HEADERS, PASSTHROUGH_PREFIXES, PREFIXWISE_PASS_HEADERS)."""
+        extra = self.pass_headers
+        return {k: v for k, v in client_headers.items()
+                if k in PASSTHROUGH_HEADERS or k.startswith(PASSTHROUGH_PREFIXES) or k in extra}
+
+    def _warn_auth_replaced(self, client_headers: dict) -> None:
+        """In front of a self-hosted engine or its router, PREFIXWISE_API_KEY replaces each client's
+        authorization: a router that hashes it (SGLang Model Gateway's consistent hashing, with no
+        routing key) then puts every client on one worker. Said once."""
+        if (self.engine is None or getattr(self, "_warned_auth", False) or "authorization" not in client_headers
+                or client_headers.get("authorization") == f"Bearer {self.api_key}"
+                or any(k.startswith("x-smg-") or k in ("x-sgl-routing-key", "x-session-id") for k in client_headers)):
+            return
+        self._warned_auth = True
+        print("prefixwise: PREFIXWISE_API_KEY replaces each client's authorization header on its way to "
+              f"{self.engine}; a router that routes by it (SGLang Model Gateway's consistent hashing) would "
+              "put every client on one worker. Send a routing key (x-smg-routing-key or x-session-id), or "
+              "unset PREFIXWISE_API_KEY so each client's own key passes through.", file=sys.stderr)
+
     def _upstream_request(self, provider: str, body: dict, request_id: str, session_id: str,
                           client_headers: dict[str, str], api: str = "chat") -> urllib.request.Request:
-        headers = {k: v for k, v in client_headers.items() if k in PASSTHROUGH_HEADERS or k.startswith(PASSTHROUGH_PREFIXES)}
+        headers = self._passed(client_headers)
         # No x-session-id of Prefixwise's own: a router with session affinity routes on it, and a
         # value Prefixwise invented ("default" for traffic with no session) would put every session
         # on one key. The client's own, if it sent one, is in PASSTHROUGH_HEADERS.
@@ -1286,6 +1356,7 @@ class PrefixwiseProxy:
                 headers.pop("authorization", None)
             headers.setdefault("anthropic-version", ANTHROPIC_VERSION)
         elif self.api_key:
+            self._warn_auth_replaced(client_headers)
             headers["authorization"] = f"Bearer {self.api_key}"
         path = ("/v1/messages" if provider == "anthropic"
                 else "/v1/responses" if api == "responses" else "/v1/chat/completions")
@@ -1326,7 +1397,7 @@ class PrefixwiseProxy:
         if self.mock:
             return 404, "application/json", json.dumps(_error(
                 404, f"{raw_path} is not available in mock mode (no upstream)")).encode()
-        headers = {k: v for k, v in client_headers.items() if k in PASSTHROUGH_HEADERS or k.startswith(PASSTHROUGH_PREFIXES)}
+        headers = self._passed(client_headers)
         if body:
             headers["content-type"] = client_headers.get("content-type", "application/json")
         anthropic = raw_path.startswith("/v1/messages") or "anthropic-version" in client_headers \
@@ -1372,7 +1443,8 @@ class PrefixwiseProxy:
             old = ctx["facts"]
             facts = body_facts(ctx["provider"], ctx["forward_body"], model=old.model, credential=ctx.get("credential", ""))
             for name in ("sent_at", "fanout_age", "shared_age", "shared_write_pos", "volatile_shared_age",
-                         "volatile_shared_wrote", "volatile_shared_kind", "session_unprotected"):
+                         "volatile_shared_wrote", "volatile_shared_kind", "session_unprotected",
+                         "no_prefix_cache"):
                 setattr(facts, name, getattr(old, name))
             ctx["facts"] = facts
         # fields Prefixwise added that the error names go in the same pass: there is one resend

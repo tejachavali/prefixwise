@@ -65,8 +65,13 @@ Prefixwise warns once. sglang-router 0.3.2 had no policy that routes by a sessio
   Llama, most dense models). SGLang frees those layers without an event, so without the flag a
   removed block still *confirms* an eviction, but Prefixwise never says "not an eviction" and
   never claims a routing miss. On a hybrid model, leave it out; SGLang's `/server_info` shows a
-  sliding-window capacity, which turns the negative claim off anyway (it has nothing for Mamba,
-  hence the flag).
+  sliding-window capacity, which turns the negative claim off anyway. For a Mamba model it shows
+  `uses_mamba_radix_cache`, and Prefixwise then ignores `--full-attention`: SGLang frees Mamba
+  state without an event.
+- **The radix cache off** (`--disable-radix-cache`: HiSparse requires it, and deterministic
+  inference sets it on most attention backends): `/server_info` says so, and Prefixwise records
+  every miss as `unknown`, "the engine keeps no prefix cache", with nothing avoidable. Before
+  0.11.7 an unchanged prefix that missed was an inferred eviction on every turn.
 - At startup Prefixwise reads `/server_info` (with `PREFIXWISE_API_KEY` if SGLang has
   `--api-key`) and judges from events only when it is safe: version 0.5.20 or later, events
   published, no `--enable-session-radix-cache`, and the rank count known. `GET /engine` on the

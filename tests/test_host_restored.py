@@ -21,6 +21,8 @@ from test_sglang_events import removed as sg_removed  # noqa: E402
 from test_sglang_events import stored as sg_stored  # noqa: E402
 from test_sglang_events import turn as sg_turn  # noqa: E402
 
+from prefixwise.engines import Restored  # noqa: E402
+
 
 def offloading(ev):
     """The stream has shown an offload tier: a store on its own medium."""
@@ -156,7 +158,7 @@ def test_the_proxy_records_a_restored_hit_as_none_with_the_detail_one_cache_only
     body = {"model": "m", "messages": [{"role": "system", "content": "x " * 300}, {"role": "user", "content": "hi"}]}
     more = {**body, "messages": body["messages"] + [{"role": "assistant", "content": "ok"}, {"role": "user", "content": "go"}]}
     for caches, expected in ((1, "host_restored"), (2, None)):
-        p = _proxy([(None, None), (3, 0)], caches)
+        p = _proxy([(None, None), Restored((3, 0))], caches)
         p.handle("openai", body, {"x-prefixwise-session-id": "s"})
         e = p.handle("openai", more, {"x-prefixwise-session-id": "s"})[1]
         assert e.cause == "none" and e.detail == expected, (caches, e.cause, e.detail, e.evidence)
@@ -171,3 +173,56 @@ def test_classifier_still_calls_a_hit_a_hit_when_blocks_were_evicted():
     curr = RequestSnapshot(model="m", provider="openai", blocks=blocks, prompt_tokens=4200, cached_tokens=4000, engine=True,
                            evicted_blocks=3, resident_blocks=0)
     assert classify(prev, curr).cause is MissCause.NONE
+
+
+def test_a_miss_judged_by_the_join_is_never_a_restore_even_when_the_classifier_calls_it_a_hit():
+    """No offload tier at all. The previous prompt was 160 tokens and its tail blocks were evicted;
+    this turn appended a big tool result (400 tokens) and read 96. The classifier calls that a hit
+    (96 of the shorter prompt's 160); the join, judging by this prompt, took its miss path and
+    returned the removed blocks. Before, those became host_restored, claiming the tier's own stores
+    were seen. (Found by replaying the event sequence; vLLM and SGLang alike.)"""
+    ev = EngineEvents()
+    turn(ev, "s", 0, stored(list(range(1, 11)), "s"))
+    ev.handle(decoded(BlockRemoved(block_hashes=[7, 8, 9, 10], medium="GPU")))
+    v = turn(ev, "s", 96, prompt=400)
+    assert v == (4, 0) and not isinstance(v, Restored) and not ev.offload_seen
+    sg = SGLangEvents()
+    sg_turn(sg, "s", 0, sg_stored(100, 160, session="s"))
+    sg.handle(batch(sg_removed(196, 64)))
+    v = sg_turn(sg, "s", 96, prompt=400)
+    assert v[0] and not isinstance(v, Restored)
+    p = _proxy([(None, None), (4, 0)])  # through the proxy and collector: no detail
+    body = {"model": "m", "messages": [{"role": "system", "content": "x " * 300}, {"role": "user", "content": "hi"}]}
+    more = {**body, "messages": body["messages"] + [{"role": "assistant", "content": "ok"}, {"role": "user", "content": "go"}]}
+    p.handle("openai", body, {"x-prefixwise-session-id": "s"})
+    e = p.handle("openai", more, {"x-prefixwise-session-id": "s"})[1]
+    assert e.cause == "none" and e.detail is None
+
+
+def test_sglang_a_prefix_another_session_recomputed_is_not_a_restore():
+    """The docs said so; the SGLang join did not check. Load-back stores carry no session, so a
+    real restore still counts."""
+    ev = SGLangEvents(full_attention=True)
+    ev.handle(batch(sg_stored(900, 1, medium="CPU_PINNED")))  # a host tier exists
+    sg_turn(ev, "s", 0, sg_stored(100, 10, session="s"))
+    ev.handle(batch(sg_removed(100, 10)))
+    assert sg_turn(ev, "s", 10, sg_stored(100, 10, session="o"), prompt=12) == (None, None)
+    ev = SGLangEvents(full_attention=True)
+    ev.handle(batch(sg_stored(900, 1, medium="CPU_PINNED")))
+    sg_turn(ev, "s", 0, sg_stored(100, 10, session="s"))
+    ev.handle(batch(sg_removed(100, 10)))
+    v = sg_turn(ev, "s", 10, sg_stored(100, 10, session=None), prompt=12)  # a load-back
+    assert isinstance(v, Restored) and v[0] > 0
+
+
+def test_a_restart_forgets_the_tier():
+    ev = EngineEvents()
+    ev.handle(decoded(stored([900], None, medium="CPU")))
+    assert ev.offload_seen
+    ev._clear()
+    assert not ev.offload_seen
+    sg = SGLangEvents()
+    sg.handle(batch(sg_stored(900, 1, medium="CPU_PINNED")))
+    assert sg.offload_seen
+    sg._clear()
+    assert not sg.offload_seen

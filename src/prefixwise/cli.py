@@ -101,8 +101,18 @@ def _detect_engine(upstream: str | None, engine: str | None, kv_events: str | No
     return info["engine"], kv_events, lines
 
 
+def _pass_headers(args) -> None:
+    """--pass-header NAME (repeatable): added to $PREFIXWISE_PASS_HEADERS, which the proxy reads."""
+    names = [n for n in (getattr(args, "pass_header", None) or []) if n.strip()]
+    if names:
+        old = [n for n in os.environ.get("PREFIXWISE_PASS_HEADERS", "").split(",") if n.strip()]
+        os.environ["PREFIXWISE_PASS_HEADERS"] = ",".join(old + names)
+
+
 def cmd_serve(args) -> int:
     from .proxy import serve
+
+    _pass_headers(args)
 
     ledger = args.ledger or os.environ.get("PREFIXWISE_LEDGER_PATH") or DEFAULT_LEDGER
     engine, kv_events, lines = _detect_engine(args.upstream or os.environ.get("PREFIXWISE_UPSTREAM_URL"), args.engine,
@@ -423,6 +433,7 @@ def _codex_args(base: str) -> list[str]:
 
 def cmd_run(args) -> int:
     """Run an agent through Prefixwise and report on that run when it exits."""
+    _pass_headers(args)
     import signal
     import subprocess
     import threading
@@ -895,6 +906,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--sink", action="append", metavar="URL",
                    help="also send every row to a sink (repeatable): file:///path.jsonl, or "
                         "clickhouse://user:pass@host:8123/db.table (default: $PREFIXWISE_SINKS)")
+    p.add_argument("--pass-header", action="append", metavar="NAME",
+                   help="also pass this request header upstream (repeatable): a router's custom session or "
+                        "routing header (default: $PREFIXWISE_PASS_HEADERS, comma-separated). Routing keys that "
+                        "sgl-router, SGLang Model Gateway, vLLM and SGLang read pass already")
     ledger_opt(p)
     p.add_argument("--engine", choices=["vllm", "sglang", "none"],
                    help="one self-hosted engine behind --upstream: no routing, so an unchanged prefix "
@@ -959,6 +974,10 @@ def build_parser() -> argparse.ArgumentParser:
                                    "and prints what this run's cache did when the agent exits.")
     p.add_argument("--port", type=int, default=0, help="default: any free port")
     p.add_argument("--mock", action="store_true", help="synthetic responses, no API calls")
+    p.add_argument("--pass-header", action="append", metavar="NAME",
+                   help="also pass this request header upstream (repeatable): a router's custom session or "
+                        "routing header (default: $PREFIXWISE_PASS_HEADERS, comma-separated). Routing keys that "
+                        "sgl-router, SGLang Model Gateway, vLLM and SGLang read pass already")
     p.add_argument("--engine", choices=("vllm", "sglang", "none"),
                    help="what is behind the agent's base URL (default: detected; none: a hosted API or a router)")
     p.add_argument("--full-attention", action="store_true", default=None,

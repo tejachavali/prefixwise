@@ -206,8 +206,16 @@ prefixwise serve --upstream http://router:8080 --engine vllm \
   | SGLang model gateway, the older copy in the sglang repo | **no** | re-serializes a typed request without unknown fields, in every mode (tested): no claim behind it |
   | NVIDIA Dynamo | **no** | its vLLM worker takes the session from `x-dynamo-session-id` / agent headers, not the body (`components/src/dynamo/vllm/handlers.py`): no claim behind it |
 
-  Prefixwise never sends a session header itself: llm-d, the SGLang router and AIBrix route by
-  `x-session-id` when session affinity is on, and Prefixwise does not change routing.
+  Prefixwise never sends a session header itself, and passes the client's routing keys through
+  unchanged: `x-session-id` (llm-d, AIBrix, sgl-router's session-aware policy), `x-sgl-routing-key`
+  (sgl-router's sticky policy), `x-smg-routing-key` and `x-smg-target-worker` (SGLang Model
+  Gateway), `x-dynamo-session-id` (Dynamo), `x-data-parallel-rank` (vLLM and SGLang pin a rank by
+  it), and `x-forwarded-for` and `cookie`, which the Gateway's consistent hashing falls back to.
+  A router with its own header name (sgl-router `--session-id-header`): `--pass-header NAME` or
+  `PREFIXWISE_PASS_HEADERS`. Before 0.11.7 these keys were dropped, so a session could land on any
+  worker and its misses were then confirmed as routing misses Prefixwise had caused.
+  `PREFIXWISE_API_KEY` replaces each client's `authorization`; in front of an engine Prefixwise
+  warns once, since the Gateway hashes that header when no routing key is sent.
 - **Prefill/decode disaggregation:** the prefill and the decode worker both report a request's
   blocks, so with both listed no request can be attributed and nothing is claimed.
 - **Verdicts at the response:**

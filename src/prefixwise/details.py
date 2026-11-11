@@ -147,6 +147,9 @@ class Facts:
     # SGLang with --enable-session-radix-cache, a client x-session-id, and no body session_id sent: the
     # worker never registered this request's session, so its KV had no session protection.
     session_unprotected: bool = False
+    # The engine keeps no prefix cache (SGLang --disable-radix-cache, which HiSparse requires and
+    # deterministic inference sets on most backends): nothing can be read back, so no cause applies.
+    no_prefix_cache: bool = False
 
 
 def _h(obj) -> str:
@@ -214,6 +217,9 @@ def body_facts(provider: str, body: dict, model: str = "", credential: str = "")
     if system is None:  # OpenAI chat: the system prompt is the first system/developer message
         system = next((m.get("content") for m in items or []
                        if isinstance(m, dict) and m.get("role") in ("system", "developer")), None)
+    salt = body.get("cache_salt")
+    if salt:  # vLLM and SGLang isolate caches by it: another salt could never have shared the prefix
+        credential = f"{credential}:{hashlib.sha256(str(salt).encode()).hexdigest()[:12]}"
     if tools or system:
         f.prefix_key = _h([provider, f.model, credential, _strip_markers(tools), _strip_markers(system)])
         (f.prefix_key_canonical, f.prefix_key_masked, f.prefix_key_masked_time,
