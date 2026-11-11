@@ -75,6 +75,13 @@ def test_a_short_deepseek_prompt_that_missed_is_not_below_the_minimum():
     short = turn2("deepseek-flash", 500)
     # its minimum is not known here: neither below_min_prefix nor a routing miss
     assert short.cause is MissCause.UNKNOWN and "minimum cacheable length is not known" in short.evidence
+    # an identical repeat seconds later: not a retry (waste) either. Live, DeepSeek cached nothing of a
+    # 239-token prompt sent three times, and the third was called retry_replay with 239 avoidable tokens
+    same = classify(s("deepseek-flash", 239, 0, turn=2), s("deepseek-flash", 239, 0, turn=2))
+    assert same.cause is MissCause.UNKNOWN and not same.legit
+    assert classify(s("gpt-5", 239, 0, turn=2), s("gpt-5", 239, 0, turn=2)).cause is MissCause.BELOW_MIN_PREFIX
+    assert classify(s("deepseek-flash", 3000, 0, turn=2), s("deepseek-flash", 3000, 0, turn=2)).cause \
+        is MissCause.RETRY_REPLAY  # a long identical retry is still one
     # a long prompt that read nothing within the shortest TTL is still a routing miss on any provider
     assert turn2("deepseek-flash", 3000).cause is MissCause.ROUTING_MISS
     assert turn2("gpt-5", 3000).cause is MissCause.ROUTING_MISS

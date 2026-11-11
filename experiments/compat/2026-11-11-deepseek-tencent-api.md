@@ -23,9 +23,23 @@ Both replies were empty: all 16 completion tokens were reasoning tokens.
 
 ## Through Prefixwise
 
-Every request returned 404: `prefixwise serve --upstream https://api.deepseek.com/v1` forwarded to
-`/v1/v1/chat/completions`. Reproduced locally and fixed in PR #117 (`PrefixwiseProxy.target`); the
-proxy legs are to be re-run on the fixed branch.
+First run: every request returned 404: `prefixwise serve --upstream https://api.deepseek.com/v1`
+forwarded to `/v1/v1/chat/completions`. Reproduced locally and fixed in PR #117
+(`PrefixwiseProxy.target`). Re-run on the fixed branch, all six turns went through:
+
+| Session | Turn | prompt | cached | cause |
+|---|---|---|---|---|
+| deepseek-1 (~3,000-token system prompt) | 1 | 3,032 | 2,816 | first_write (the prefix was warm from the raw run) |
+| | 2 | 3,039 | 2,816 | none |
+| | 3 (streamed) | 3,039 | 2,816 | none |
+| deepseek-short (~200-token system prompt) | 1 | 232 | 0 | first_write |
+| | 2 | 239 | 0 | unknown |
+| | 3 (streamed) | 239 | 0 | retry_replay, 239 avoidable |
+
+DeepSeek cached nothing of the short prompt on any turn, so it does not cache a prompt that short (its
+minimum is not documented on the pages read). Turn 3 was an identical repeat and fell to the retry rule,
+which claimed waste for a request that could not have been cached: fixed on the branch, a short prompt
+on an OpenAI-compatible API whose minimum is unknown is `unknown` before the retry rule is tried.
 
 ## Tencent Hy4
 

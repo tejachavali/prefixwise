@@ -523,6 +523,15 @@ def classify(prev: RequestSnapshot | None, curr: RequestSnapshot,
                               "Route each session to the same cache",
                               secondary, native_reason)
 
+    if (curr.provider == "openai" and not curr.engine and curr.min_prefix_tokens is None
+            and not openai_model(curr.model) and 0 < curr.prompt_tokens < OPENAI_MIN_PREFIX):
+        # Another API in OpenAI's shape (DeepSeek, Tencent, a gateway) caches by its own minimum, unknown here:
+        # a short prompt that missed may simply be below it, so no retry, routing miss or minimum is claimed (live: DeepSeek cached nothing of a 239-token prompt
+        # repeated three times).
+        return Classification(MissCause.UNKNOWN, None,
+                              f"a {curr.prompt_tokens}-token prompt on an OpenAI-compatible API whose minimum "
+                              "cacheable length is not known: it may be below that minimum",
+                              secondary, native_reason)
     # Identical replay within a short window is a retry, not a cache miss.
     if prev.blocks and curr.blocks and \
        [b.raw for b in prev.blocks] == [b.raw for b in curr.blocks] and \
@@ -561,14 +570,6 @@ def classify(prev: RequestSnapshot | None, curr: RequestSnapshot,
                               f"gap {gap:.0f}s since last turn exceeds the cache TTL {ttl:.0f}s",
                               secondary, native_reason)
 
-    if (curr.provider == "openai" and not curr.engine and curr.min_prefix_tokens is None
-            and not openai_model(curr.model) and 0 < curr.prompt_tokens < OPENAI_MIN_PREFIX):
-        # Another API in OpenAI's shape (DeepSeek, Tencent, a gateway) caches by its own minimum, unknown here:
-        # a short prompt that missed may simply be below it, so neither a routing miss nor a minimum is claimed.
-        return Classification(MissCause.UNKNOWN, None,
-                              f"a {curr.prompt_tokens}-token prompt on an OpenAI-compatible API whose minimum "
-                              "cacheable length is not known: it may be below that minimum",
-                              secondary, native_reason)
     if curr.cached_tokens == 0 and curr.prompt_tokens > 0 and gap is not None and \
        (gap <= (ttl if ttl is not None else MIN_PROVIDER_TTL_SECONDS)):
         window = f"TTL {ttl:.0f}s" if ttl is not None else f"shortest provider TTL {MIN_PROVIDER_TTL_SECONDS}s"
