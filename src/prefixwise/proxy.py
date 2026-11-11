@@ -1305,9 +1305,12 @@ class PrefixwiseProxy:
     def target(self, provider: str, path: str) -> str:
         """The upstream URL for a request path like /v1/chat/completions."""
         key = "anthropic" if provider == "anthropic" else "openai"
-        if key in self.versioned and path.startswith("/v1/"):
+        base = self.upstreams.get(key, self.upstream_url)
+        # A base that already ends in /v1 (DeepSeek, Tencent TokenHub, Together and most OpenAI-compatible
+        # APIs document theirs that way) takes the path without its own /v1, never /v1/v1/...
+        if (key in self.versioned or base.rstrip("/").endswith("/v1")) and path.startswith("/v1/"):
             path = path[3:]
-        return self.upstreams.get(key, self.upstream_url) + path
+        return base.rstrip("/") + path
 
     def passthrough(self, method: str, raw_path: str, body: bytes | None,
                     client_headers: dict[str, str]) -> tuple[int, str, bytes]:

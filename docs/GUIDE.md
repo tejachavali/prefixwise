@@ -269,7 +269,7 @@ One cause per request: the first thing, in prefix order, that broke reuse. Each 
 | `model_switch` | First call to a different model in the session | no | - |
 | `retry_replay` | Identical request within 60 s with nothing cached | **yes** | Check retry logic |
 | `breakpoint_misplaced` | Anthropic: no `cache_control` breakpoint, or one that stays early while the stable prompt grows past it (the tail after it is paid uncached every turn) | **yes** | Add `cache_control` after the stable prefix |
-| `below_min_prefix` | Prompt below the provider's minimum cacheable length | depends | - |
+| `below_min_prefix` | Prompt below the provider's minimum cacheable length (Anthropic per model; OpenAI's 1,024 for OpenAI model ids only; Gemini). Not claimed for other OpenAI-compatible APIs or self-hosted engines | depends | - |
 | `ttl_expired` | Gap since the last turn exceeded the cache TTL | no | Longer TTL (e.g. Anthropic `ttl: "1h"`) if gaps are common |
 | `routing_miss` | Prompt and timing fine, still nothing cached | no | Set a stable `prompt_cache_key` / session affinity |
 | `fork_boundary` | First turn of a forked session (`X-Prefixwise-Fork-Of`) | no | - |

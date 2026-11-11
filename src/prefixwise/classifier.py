@@ -21,6 +21,7 @@ coarse taxonomy, and neither names TTL expiry, routing, or eviction.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from enum import Enum
 
@@ -63,6 +64,17 @@ OPENAI_MIN_PREFIX = 1024
 # last turn is not explained by expiry.
 MIN_PROVIDER_TTL_SECONDS = 300
 GEMINI_MIN_PREFIX = 4096  # Gemini 3.x; 2,048 on 2.5. ai.google.dev, Nov 2026.
+
+
+# Optional route prefixes (openai/, openrouter/openai/) and a fine-tune prefix (ft:); gpt-oss is an
+# open-weight model other hosts serve under their own caching rules.
+_OPENAI_MODEL = re.compile(r"^(?:[\w.-]+/)*(?:ft:)?(?:gpt-(?!oss)|chatgpt-|o\d|codex-|computer-use-)")
+
+
+def openai_model(model: str) -> bool:
+    """An OpenAI model id (gpt-*, o1/o3/o4*, chatgpt-*, codex-*): OpenAI's own caching rules apply.
+    Anything else sent in OpenAI's request shape is another provider's model."""
+    return bool(_OPENAI_MODEL.match((model or "").lower()))
 
 
 def anthropic_min_prefix(model: str) -> int:
@@ -180,11 +192,15 @@ def _min_prefix(curr: RequestSnapshot) -> int | None:
     none to apply (self-hosted engines)."""
     if curr.min_prefix_tokens is not None:
         return curr.min_prefix_tokens
-    if not curr.cache_reported:  # not the provider whose minimum this would be (Ollama, llama.cpp)
+    if not curr.cache_reported or curr.engine:  # Ollama, llama.cpp; vLLM and SGLang cache from one block
         return None
     if curr.provider == "anthropic":
         return anthropic_min_prefix(curr.model)
-    return {"openai": OPENAI_MIN_PREFIX, "gemini": GEMINI_MIN_PREFIX}.get(curr.provider)
+    if curr.provider == "openai":
+        # OpenAI's own minimum: another API behind the same request shape (DeepSeek, Tencent, OpenRouter,
+        # Together) caches by its own rules, so no minimum is claimed there.
+        return OPENAI_MIN_PREFIX if openai_model(curr.model) else None
+    return {"gemini": GEMINI_MIN_PREFIX}.get(curr.provider)
 
 
 def _reusable(prev: RequestSnapshot, curr: RequestSnapshot) -> int:
@@ -507,6 +523,15 @@ def classify(prev: RequestSnapshot | None, curr: RequestSnapshot,
                               "Route each session to the same cache",
                               secondary, native_reason)
 
+    if (curr.provider == "openai" and not curr.engine and curr.min_prefix_tokens is None
+            and not openai_model(curr.model) and 0 < curr.prompt_tokens < OPENAI_MIN_PREFIX):
+        # Another API in OpenAI's shape (DeepSeek, Tencent, a gateway) caches by its own minimum, unknown here:
+        # a short prompt that missed may simply be below it, so no retry, routing miss or minimum is claimed (live: DeepSeek cached nothing of a 239-token prompt
+        # repeated three times).
+        return Classification(MissCause.UNKNOWN, None,
+                              f"a {curr.prompt_tokens}-token prompt on an OpenAI-compatible API whose minimum "
+                              "cacheable length is not known: it may be below that minimum",
+                              secondary, native_reason)
     # Identical replay within a short window is a retry, not a cache miss.
     if prev.blocks and curr.blocks and \
        [b.raw for b in prev.blocks] == [b.raw for b in curr.blocks] and \

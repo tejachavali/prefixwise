@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- **`prefixwise serve --upstream <base>/v1` works.** Most OpenAI-compatible APIs document a base URL ending in `/v1` (DeepSeek, Tencent TokenHub, Together), and `serve` added a second one: every request went to `/v1/v1/chat/completions` and came back 404. `prefixwise run` already handled it. Found by the live DeepSeek run below.
+- **DeepSeek, checked live.** Through its API (`deepseek-flash`), a repeated 3,000-token prompt read 2,816 tokens from the cache on turns 2 and 3, reported both as OpenAI's `prompt_tokens_details.cached_tokens` and as DeepSeek's own `prompt_cache_hit_tokens`, the same number. Prefixwise now also reads DeepSeek's field when the standard one is absent, with `prompt_cache_miss_tokens` filling in a missing `prompt_tokens`.
+- **OpenAI's 1,024-token minimum applies to OpenAI's models only.** Any API in OpenAI's request shape was judged by it, so a short prompt that missed on DeepSeek, Tencent, OpenRouter or Together was called `below_min_prefix`, and so was one on vLLM or SGLang, which cache from a single block. Now the minimum applies to OpenAI model ids (`gpt-*` except the open-weight `gpt-oss`, `o1`/`o3`/`o4`, `chatgpt-*`, `codex-*`, `computer-use-*`, fine-tuned `ft:` ids, and route prefixes such as `openrouter/openai/`) on a hosted API. On another OpenAI-compatible API, whose minimum Prefixwise does not know, a prompt under 1,024 tokens that missed is `unknown`, said to be possibly below that API's minimum, not a routing miss or a retry (live, DeepSeek cached nothing of a 239-token prompt sent three times); on an engine no minimum is claimed. From a review of what Tencent's Hy4 (OpenAI-compatible, a cache hit at about 5% of the input price) would get through Prefixwise.
+
 ## 0.11.4: 2026-11-10
 
 Two fixes from real questions. With SGLang's `--enable-session-radix-cache`, a client's own body

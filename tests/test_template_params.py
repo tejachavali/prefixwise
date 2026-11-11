@@ -3,7 +3,7 @@ prompt through the template, so `chat_template_kwargs` (enable_thinking on Qwen3
 `chat_template` changes the rendered prefix although no block changed. Before, such a turn had
 nothing to blame and read as `unknown` ("not an eviction") behind an engine with KV events."""
 
-from prefixwise.classifier import MissCause, RequestSnapshot, classify
+from prefixwise.classifier import MissCause, RequestSnapshot, classify, served_all
 from prefixwise.explain import Turn, explain_pair
 from prefixwise.fingerprint import Fingerprinter
 from prefixwise.records import PARAM_KEYS, param_fingerprint
@@ -57,7 +57,9 @@ def test_rounded_read_with_a_param_change_is_a_hit():
     short = classify(prev, snap(489, 16, chat_template_kwargs={"enable_thinking": False}))
     assert short.cause is MissCause.PARAM_RENDERED
     assert classify(snap(50, 0), snap(70, 16)).cause is not MissCause.NONE
-    assert classify(snap(240, 0), snap(300, 128)).cause is not MissCause.NONE  # 112 tokens recomputed
+    # 112 tokens recomputed: never rounded up as a whole-block read (it still passes the general
+    # half-read rule; OpenAI's 1,024-token minimum, wrongly applied to engines, used to make it a miss)
+    assert not served_all(snap(240, 0), snap(300, 128))
     # a count a whole block short is not a full read: OpenAI reports a full 2,048 as 2,048, not 1,920
     assert classify(snap(2048, 0, thinking="a"), snap(2300, 1920, thinking="b")).cause is MissCause.PARAM_RENDERED
     assert classify(snap(2048, 0), snap(2300, 1920)).cause is not MissCause.NONE or \
