@@ -200,6 +200,19 @@ def _report_session(led, session: str, as_json: bool, since: float | None = None
           f"{_fmt_int(avoidable)} avoidable" + (f", cost {_fmt_usd(cost)}" if priced else "")
           + (f" ({len(priced)} of {len(turns)} priced)" if priced and len(priced) < len(turns) else "")
           + (f"   ({', '.join(models)})" if len(models) == 1 else ""))
+    from .findings import BILL_PARTS, bill_line, floor_advice
+    split = [t for t in turns if t.get("cost_cache_read") is not None]
+    if split:
+        b = {k: sum(t[f"cost_{k}"] or 0 for t in split) for k, _ in BILL_PARTS}
+        b.update(total=sum(b.values()), requests=len(split), requests_priced=len(priced))
+        for line in (bill_line(b), floor_advice(b)):
+            if line:
+                print(line)
+    # The floor: each turn re-reads the context already cached; it grows with the conversation.
+    reread = [t["cached_tokens"] for t in turns[1:] if t.get("cached_tokens") and t["turn"] not in blind]
+    if len(reread) >= 2:
+        print(f"Re-read per turn: {_fmt_int(sum(reread) // len(reread))} cached tokens on average, at most "
+              f"{_fmt_int(max(reread))}: every turn pays for the cached context again, at the cache rate.")
     print()
     # Each model has its own cache and each agent (a subagent) its own conversation: when a session
     # mixes them, say which row is which, since "first changed" compares within a model and conversation.

@@ -294,7 +294,7 @@ def import_claude_code(root: str | os.PathLike | None = None, ledger: Ledger | N
                     session_id=session, agent_id=agent, provider="anthropic", model=r.model, cause=cause,
                     prompt_tokens=prompt, cached_tokens=read, avoidable_tokens=avoidable, avoidable_cost=None,
                     legit=legit, request_id=r.request_id, completion_tokens=_int(u.get("output_tokens")),
-                    cost=prices.request_cost(r.model, "anthropic", u), api="messages",
+                    **prices.cost_fields(r.model, "anthropic", u), api="messages",
                     uncached_tokens=parts.uncached_input,
                     cache_write_tokens=parts.cache_write_5m + parts.cache_write_1h + parts.cache_write,
                     gap_seconds=gap, evidence=f"from the log: {why}", detail=detail, native_reason=r.native,
@@ -485,7 +485,7 @@ def import_codex(root: str | os.PathLike | None = None, ledger: Ledger | None = 
                 session_id=session, agent_id=agent, provider="openai", model=r.model, cause=cause,
                 prompt_tokens=r.prompt, cached_tokens=r.cached, avoidable_tokens=avoidable, avoidable_cost=None,
                 legit=legit, request_id=r.request_id, completion_tokens=_int(r.usage.get("output_tokens")),
-                cost=prices.request_cost(r.model, "openai", r.usage), api="responses",
+                **prices.cost_fields(r.model, "openai", r.usage), api="responses",
                 uncached_tokens=parts.uncached_input, cache_write_tokens=parts.cache_write,
                 gap_seconds=gap, evidence=f"from the log: {why}", classifier_version="codex-log-2")
             entry.avoidable_cost = prices.avoidable_cost(r.model, avoidable, r.prompt, "openai", r.usage)

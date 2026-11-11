@@ -29,7 +29,7 @@ import sqlite3
 import sys
 from dataclasses import astuple, dataclass, fields
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 
 @dataclass
@@ -80,6 +80,12 @@ class LedgerEntry:
     # for writing them above sending them uncached; None when unpriced or not applicable.
     unread_write_tokens: int | None = None
     unread_write_cost: float | None = None
+    # Schema 7: where `cost` went (USD, summing to it; None on unpriced and older rows). cache_read is the
+    # re-read of what was already cached: on a well-cached long session, most of the bill.
+    cost_cache_read: float | None = None
+    cost_input: float | None = None
+    cost_cache_write: float | None = None
+    cost_output: float | None = None
     schema_version: int = SCHEMA_VERSION
 
 
@@ -174,7 +180,9 @@ _MIGRATIONS = {"task_id": "TEXT", "request_id": "TEXT", "completion_tokens": "IN
                "divergence_index": "INTEGER", "schema_version": "INTEGER",
                "detail": "TEXT",  # schema 4
                "cache_ttl_seconds": "REAL",  # schema 5
-               "unread_write_tokens": "INTEGER", "unread_write_cost": "REAL"}  # schema 6
+               "unread_write_tokens": "INTEGER", "unread_write_cost": "REAL",  # schema 6
+               "cost_cache_read": "REAL", "cost_input": "REAL", "cost_cache_write": "REAL",
+               "cost_output": "REAL"}  # schema 7
 
 _COLUMNS = [f.name for f in fields(LedgerEntry)]
 
