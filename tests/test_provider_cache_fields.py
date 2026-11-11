@@ -39,9 +39,11 @@ def test_ollama_style_usage_is_still_not_reported():
 
 
 def test_openai_models_are_recognised():
-    for m in ("gpt-5", "gpt-4o-mini", "o3", "o4-mini", "chatgpt-4o-latest", "codex-mini-latest", "openai/gpt-5"):
+    for m in ("gpt-5", "gpt-4o-mini", "o3", "o4-mini", "chatgpt-4o-latest", "codex-mini-latest", "openai/gpt-5",
+              "openrouter/openai/gpt-4o", "ft:gpt-4o-mini:org::abc123", "computer-use-preview"):
         assert openai_model(m), m
-    for m in ("deepseek-chat", "deepseek-reasoner", "hy4", "hunyuan-turbos", "Qwen/Qwen3-4B", "kimi-k2", "m", ""):
+    for m in ("deepseek-chat", "deepseek-flash", "hy4", "hunyuan-turbos", "Qwen/Qwen3-4B", "kimi-k2", "m", "",
+              "gpt-oss-120b", "openai/gpt-oss-20b"):
         assert not openai_model(m), m
 
 
@@ -61,12 +63,21 @@ def test_a_short_deepseek_prompt_that_missed_is_not_below_the_minimum():
     fp = Fingerprinter()
     msgs = [{"role": "system", "content": "You are terse."}, {"role": "user", "content": "hi"}]
 
-    def s(model, prompt, cached):
-        body = {"model": model, "messages": msgs}
+    def s(model, prompt, cached, turn=1):
+        body = {"model": model, "messages": msgs if turn == 1 else
+                msgs + [{"role": "assistant", "content": "ok"}, {"role": "user", "content": "and then?"}]}
         return RequestSnapshot(model=model, provider="openai", blocks=fp.fingerprint_blocks(extract_blocks(body, "openai")),
                                prompt_tokens=prompt, cached_tokens=cached, gap_seconds=5.0)
-    assert classify(s("gpt-5", 500, 0), s("gpt-5", 520, 0)).cause is MissCause.BELOW_MIN_PREFIX
-    assert classify(s("deepseek-chat", 500, 0), s("deepseek-chat", 520, 0)).cause is not MissCause.BELOW_MIN_PREFIX
+
+    def turn2(model, prompt):  # an append-only second turn, 5 s later, that read nothing
+        return classify(s(model, prompt, 0), s(model, prompt + 20, 0, turn=2))
+    assert turn2("gpt-5", 500).cause is MissCause.BELOW_MIN_PREFIX
+    short = turn2("deepseek-flash", 500)
+    # its minimum is not known here: neither below_min_prefix nor a routing miss
+    assert short.cause is MissCause.UNKNOWN and "minimum cacheable length is not known" in short.evidence
+    # a long prompt that read nothing within the shortest TTL is still a routing miss on any provider
+    assert turn2("deepseek-flash", 3000).cause is MissCause.ROUTING_MISS
+    assert turn2("gpt-5", 3000).cause is MissCause.ROUTING_MISS
 
 
 class Upstream:

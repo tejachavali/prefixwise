@@ -66,7 +66,9 @@ MIN_PROVIDER_TTL_SECONDS = 300
 GEMINI_MIN_PREFIX = 4096  # Gemini 3.x; 2,048 on 2.5. ai.google.dev, Nov 2026.
 
 
-_OPENAI_MODEL = re.compile(r"^(?:openai/)?(?:gpt-|chatgpt-|o\d|codex-|computer-use-)")
+# Optional route prefixes (openai/, openrouter/openai/) and a fine-tune prefix (ft:); gpt-oss is an
+# open-weight model other hosts serve under their own caching rules.
+_OPENAI_MODEL = re.compile(r"^(?:[\w.-]+/)*(?:ft:)?(?:gpt-(?!oss)|chatgpt-|o\d|codex-|computer-use-)")
 
 
 def openai_model(model: str) -> bool:
@@ -559,6 +561,14 @@ def classify(prev: RequestSnapshot | None, curr: RequestSnapshot,
                               f"gap {gap:.0f}s since last turn exceeds the cache TTL {ttl:.0f}s",
                               secondary, native_reason)
 
+    if (curr.provider == "openai" and not curr.engine and curr.min_prefix_tokens is None
+            and not openai_model(curr.model) and 0 < curr.prompt_tokens < OPENAI_MIN_PREFIX):
+        # Another API in OpenAI's shape (DeepSeek, Tencent, a gateway) caches by its own minimum, unknown here:
+        # a short prompt that missed may simply be below it, so neither a routing miss nor a minimum is claimed.
+        return Classification(MissCause.UNKNOWN, None,
+                              f"a {curr.prompt_tokens}-token prompt on an OpenAI-compatible API whose minimum "
+                              "cacheable length is not known: it may be below that minimum",
+                              secondary, native_reason)
     if curr.cached_tokens == 0 and curr.prompt_tokens > 0 and gap is not None and \
        (gap <= (ttl if ttl is not None else MIN_PROVIDER_TTL_SECONDS)):
         window = f"TTL {ttl:.0f}s" if ttl is not None else f"shortest provider TTL {MIN_PROVIDER_TTL_SECONDS}s"
