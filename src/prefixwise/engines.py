@@ -108,7 +108,6 @@ class EngineEvents:
         only removals actually seen; their negative claims stop (errors changed)."""
         self._alive.clear()
         self._windows.clear()
-        self.offload_seen = False  # possibly another engine now: its tier must show itself again
 
     # -- events ----------------------------------------------------------------------
 
@@ -750,7 +749,6 @@ class SGLangEvents(EngineEvents):
         for t in list(self._tails.values()):
             self._hold(t[0], -1)
         self._tails.clear()
-        self.offload_seen = False
         for check in self._checks.values():
             check["overflowed"] = True
 
@@ -801,7 +799,9 @@ class SGLangEvents(EngineEvents):
             window = self._tails[session_id] = [None, concurrent, {}]
             token = next(self._tokens)
             tail = prev[0] if prev else None
-            chain_hashes = {h for seg, last in _chain(tail) for h in seg.hashes[:last + 1]} if tail else set()
+            # Only a tier makes a restore claim possible: no tier, no set to build (it can be large).
+            chain_hashes = ({h for seg, last in _chain(tail) for h in seg.hashes[:last + 1]}
+                            if tail and self.offload_seen else set())
             self._checks[token] = {"session": session_id, "tail": tail, "chain": chain_hashes,
                                    "restored_elsewhere": False,
                                    "window": window, "sent": next(self._born) if prev else 0,
@@ -832,7 +832,7 @@ class SGLangEvents(EngineEvents):
         tier (details: host_restored). 0 when nothing can be said (an unplaced or ambiguous
         chain, a concurrent request, an overflow or a cut stream)."""
         if (not self.offload_seen or check["tail"] is None or check["overflowed"] or check["concurrent"]
-                or check["restored_elsewhere"] or self._errors() != check["errors"]):
+                or check["restored_elsewhere"] or not check["chain"] or self._errors() != check["errors"]):
             return 0
         chain = _chain(check["tail"])
         if any(seg.start is None or seg.ambiguous for seg, _ in chain):

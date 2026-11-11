@@ -247,10 +247,15 @@ PASSTHROUGH_HEADERS = ("authorization", "x-api-key", "anthropic-version", "anthr
                        # session lands anywhere, and its misses would be blamed on routing.
                        "x-sgl-routing-key", "x-data-parallel-rank",
                        # NVIDIA Dynamo's vLLM worker takes the session from it.
-                       "x-dynamo-session-id",
-                       # SGLang Model Gateway's consistent hashing, with no routing key, hashes the
-                       # authorization, then x-forwarded-for, then the cookie.
-                       "x-forwarded-for", "cookie")
+                       "x-dynamo-session-id")
+# SGLang Model Gateway's consistent hashing, with no routing key, hashes the authorization, then
+# x-forwarded-for, then the cookie. Passed to a self-hosted engine (or its router) only: to a hosted
+# API they could carry a login cookie or an internal address meant for Prefixwise's own ingress.
+ENGINE_ONLY_HEADERS = ("x-forwarded-for", "cookie")
+# Never passed, even when named in PREFIXWISE_PASS_HEADERS: Prefixwise's own headers, and headers
+# urllib sets for the body Prefixwise sends.
+NEVER_PASSED = ("host", "content-length", "transfer-encoding", "connection", "keep-alive", "upgrade",
+                "proxy-authorization", "te", "trailer")
 # x-smg-routing-key and x-smg-target-worker: SGLang Model Gateway's routing (the worker schedules
 # by the routing key too).
 PASSTHROUGH_PREFIXES = ("x-codex-", "x-smg-")
@@ -613,7 +618,8 @@ class PrefixwiseProxy:
         # More headers to pass through: a router's custom session header (sgl-router
         # --session-id-header, a gateway's own key). PREFIXWISE_PASS_HEADERS, comma-separated.
         self.pass_headers = {h.strip().lower() for h in os.environ.get("PREFIXWISE_PASS_HEADERS", "").split(",")
-                             if h.strip()}
+                             if h.strip() and not h.strip().lower().startswith("x-prefixwise-")
+                             and h.strip().lower() not in NEVER_PASSED}
         self.mock = mock if mock is not None else (
             not (self.upstream_url or self.upstreams) or os.environ.get("PREFIXWISE_MOCK_UPSTREAM") == "1")
         self.default_session = "default"  # for requests that carry no session id
@@ -770,9 +776,12 @@ class PrefixwiseProxy:
         radix cache off (--disable-radix-cache: HiSparse requires it, deterministic inference sets it
         on most backends), so nothing is ever read back; or a Mamba model (uses_mamba_radix_cache),
         whose state SGLang frees without events, so --full-attention would be wrong."""
+        base = self._engine_base()
+        if not base or ".invalid" in (urllib.parse.urlsplit(base).hostname or ".invalid"):
+            return  # the in-process middleware: no server to ask
         headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
         try:
-            req = urllib.request.Request(self._engine_base() + "/server_info", headers=headers)
+            req = urllib.request.Request(base + "/server_info", headers=headers)
             with urllib.request.urlopen(req, timeout=5) as r:
                 info = json.loads(r.read())
         except (OSError, ValueError):
@@ -1005,7 +1014,7 @@ class PrefixwiseProxy:
                                      or self.api_key or "").encode()).hexdigest()[:12]
         facts = body_facts(provider, forward_body, model=str(body.get("model", "")), credential=credential)
         facts.session_unprotected = unprotected
-        facts.no_prefix_cache = self.no_prefix_cache
+        facts.no_prefix_cache = self.no_prefix_cache and self.engine_for(provider) == "sglang"
         sent = time.time()
         unmarked = None
         # Anthropic's own cache only: a self-hosted engine caches prefixes by itself and may refuse the
@@ -1322,30 +1331,19 @@ class PrefixwiseProxy:
                 "usage": {"prompt_tokens": 2000, "completion_tokens": 1, "total_tokens": 2001,
                           "prompt_tokens_details": {"cached_tokens": cached}}}
 
-    def _passed(self, client_headers: dict) -> dict:
+    def _passed(self, client_headers: dict, provider: str) -> dict:
         """The client's headers that go upstream: the client's own credentials, versions, session and
-        routing keys, trace context (PASSTHROUGH_HEADERS, PASSTHROUGH_PREFIXES, PREFIXWISE_PASS_HEADERS)."""
+        routing keys, trace context (PASSTHROUGH_HEADERS, PASSTHROUGH_PREFIXES, PREFIXWISE_PASS_HEADERS),
+        and, to a self-hosted engine only, what a router hashes when there is no routing key."""
         extra = self.pass_headers
+        engine = self.engine_for(provider) is not None
         return {k: v for k, v in client_headers.items()
-                if k in PASSTHROUGH_HEADERS or k.startswith(PASSTHROUGH_PREFIXES) or k in extra}
-
-    def _warn_auth_replaced(self, client_headers: dict) -> None:
-        """In front of a self-hosted engine or its router, PREFIXWISE_API_KEY replaces each client's
-        authorization: a router that hashes it (SGLang Model Gateway's consistent hashing, with no
-        routing key) then puts every client on one worker. Said once."""
-        if (self.engine is None or getattr(self, "_warned_auth", False) or "authorization" not in client_headers
-                or client_headers.get("authorization") == f"Bearer {self.api_key}"
-                or any(k.startswith("x-smg-") or k in ("x-sgl-routing-key", "x-session-id") for k in client_headers)):
-            return
-        self._warned_auth = True
-        print("prefixwise: PREFIXWISE_API_KEY replaces each client's authorization header on its way to "
-              f"{self.engine}; a router that routes by it (SGLang Model Gateway's consistent hashing) would "
-              "put every client on one worker. Send a routing key (x-smg-routing-key or x-session-id), or "
-              "unset PREFIXWISE_API_KEY so each client's own key passes through.", file=sys.stderr)
+                if (k in PASSTHROUGH_HEADERS or k.startswith(PASSTHROUGH_PREFIXES) or k in extra
+                    or (engine and k in ENGINE_ONLY_HEADERS))}
 
     def _upstream_request(self, provider: str, body: dict, request_id: str, session_id: str,
                           client_headers: dict[str, str], api: str = "chat") -> urllib.request.Request:
-        headers = self._passed(client_headers)
+        headers = self._passed(client_headers, provider)
         # No x-session-id of Prefixwise's own: a router with session affinity routes on it, and a
         # value Prefixwise invented ("default" for traffic with no session) would put every session
         # on one key. The client's own, if it sent one, is in PASSTHROUGH_HEADERS.
@@ -1356,7 +1354,6 @@ class PrefixwiseProxy:
                 headers.pop("authorization", None)
             headers.setdefault("anthropic-version", ANTHROPIC_VERSION)
         elif self.api_key:
-            self._warn_auth_replaced(client_headers)
             headers["authorization"] = f"Bearer {self.api_key}"
         path = ("/v1/messages" if provider == "anthropic"
                 else "/v1/responses" if api == "responses" else "/v1/chat/completions")
@@ -1397,11 +1394,11 @@ class PrefixwiseProxy:
         if self.mock:
             return 404, "application/json", json.dumps(_error(
                 404, f"{raw_path} is not available in mock mode (no upstream)")).encode()
-        headers = self._passed(client_headers)
-        if body:
-            headers["content-type"] = client_headers.get("content-type", "application/json")
         anthropic = raw_path.startswith("/v1/messages") or "anthropic-version" in client_headers \
             or "x-api-key" in client_headers
+        headers = self._passed(client_headers, "anthropic" if anthropic else "openai")
+        if body:
+            headers["content-type"] = client_headers.get("content-type", "application/json")
         if self.api_key:
             if anthropic:
                 headers["x-api-key"] = self.api_key

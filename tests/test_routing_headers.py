@@ -14,6 +14,12 @@ CLIENT = {"x-smg-routing-key": "conv-7", "x-smg-target-worker": "w2", "x-sgl-rou
           "x-session-id": "conv-7", "x-my-router-session": "abc", "x-unrelated": "no"}
 
 
+def _engine(url="http://router:30000"):
+    p = PrefixwiseProxy(upstream_url=url, mock=False)
+    p.engine = "sglang"
+    return p
+
+
 def _sent(p, headers):
     req = p._upstream_request("openai", {"model": "m", "messages": []}, "rid", "conv-7", headers)
     return {k.lower(): v for k, v in req.header_items()}
@@ -22,7 +28,7 @@ def _sent(p, headers):
 def test_routing_keys_pass_through_and_nothing_else_new(monkeypatch):
     monkeypatch.delenv("PREFIXWISE_PASS_HEADERS", raising=False)
     monkeypatch.delenv("PREFIXWISE_API_KEY", raising=False)
-    sent = _sent(PrefixwiseProxy(upstream_url="http://router:30000", mock=False), CLIENT)
+    sent = _sent(_engine(), CLIENT)
     for k in ("x-smg-routing-key", "x-smg-target-worker", "x-sgl-routing-key", "x-data-parallel-rank",
               "x-forwarded-for", "cookie", "x-session-id", "x-dynamo-session-id"):
         assert sent.get(k) == CLIENT[k], k
@@ -45,19 +51,17 @@ def test_the_cli_flag_adds_to_the_env(monkeypatch):
     assert os.environ["PREFIXWISE_PASS_HEADERS"] == "a,b,c"
 
 
-def test_a_replaced_authorization_in_front_of_an_engine_is_warned_once(monkeypatch, capsys):
-    p = PrefixwiseProxy(upstream_url="http://router:30000", api_key="server-key", mock=False)
-    p.engine = "sglang"
-    for _ in range(2):
-        sent = _sent(p, {"authorization": "Bearer client-a"})
-        assert sent["authorization"] == "Bearer server-key"
-    assert capsys.readouterr().err.count("replaces each client's authorization") == 1
+def test_cookie_and_forwarded_for_go_to_an_engine_only(monkeypatch):
+    """To a hosted API they could carry a login cookie or an internal address meant for the ingress
+    in front of Prefixwise."""
+    monkeypatch.delenv("PREFIXWISE_PASS_HEADERS", raising=False)
+    hosted = _sent(PrefixwiseProxy(upstream_url="https://api.openai.com", mock=False), CLIENT)
+    assert "cookie" not in hosted and "x-forwarded-for" not in hosted
+    assert hosted.get("x-session-id") == "conv-7"  # routing keys still pass
+    assert "cookie" not in PrefixwiseProxy(upstream_url="https://api.openai.com", mock=False)._passed(CLIENT, "openai")
 
 
-def test_no_warning_for_a_hosted_api_or_a_client_with_a_routing_key(monkeypatch, capsys):
-    p = PrefixwiseProxy(upstream_url="https://api.openai.com", api_key="server-key", mock=False)
-    _sent(p, {"authorization": "Bearer client-a"})  # no engine: a hosted API
-    p2 = PrefixwiseProxy(upstream_url="http://router:30000", api_key="server-key", mock=False)
-    p2.engine = "sglang"
-    _sent(p2, {"authorization": "Bearer client-a", "x-smg-routing-key": "conv-1"})
-    assert "replaces each client's authorization" not in capsys.readouterr().err
+def test_prefixwise_and_body_headers_are_never_passed_even_when_named(monkeypatch):
+    monkeypatch.setenv("PREFIXWISE_PASS_HEADERS", "x-prefixwise-token,Content-Length,host,x-ok")
+    p = PrefixwiseProxy(upstream_url="http://router:30000", mock=False)
+    assert p.pass_headers == {"x-ok"}

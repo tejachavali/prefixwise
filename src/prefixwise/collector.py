@@ -357,7 +357,9 @@ class Collector:
         elif why:
             result.evidence = f"{result.evidence}; {why}"
         if facts.no_prefix_cache and result.cause is not MissCause.NONE:
-            # Nothing could have been read back: not an eviction, not routing, not the client's edit.
+            # Nothing could have been read back: not an eviction, not routing, not the client's edit,
+            # and no detail's advice (move a timestamp, stagger requests) would change that.
+            detail = None
             result = Classification(MissCause.UNKNOWN, True,
                                     "the engine keeps no prefix cache (SGLang --disable-radix-cache), so every "
                                     f"turn recomputes its prompt; no cause applies (classifier: {result.cause.value})",

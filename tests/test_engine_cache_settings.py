@@ -98,3 +98,31 @@ def test_a_cache_salt_keeps_tenants_out_of_each_others_shared_prefix():
     assert a.prefix_key != b.prefix_key and a.prefix_key == same.prefix_key
     assert body_facts("openai", BODY, model="m", credential="k").prefix_key == \
         body_facts("openai", BODY, model="m", credential="k").prefix_key
+
+
+def test_radix_cache_off_applies_to_the_engines_provider_only():
+    """prefixwise run with SGLang behind the OpenAI URL and Anthropic's API behind the other: a
+    hosted Anthropic miss keeps its own cause."""
+    p, srv = _proxy({**INFO, "disable_radix_cache": True})
+    try:
+        p.engine_providers = {"openai"}
+        ctx = p.prepare("anthropic", {"model": "claude-x", "max_tokens": 5, "system": "s",
+                                      "messages": [{"role": "user", "content": "hi"}]}, {})
+        assert ctx["facts"].no_prefix_cache is False
+    finally:
+        srv.shutdown()
+
+
+def test_radix_cache_off_drops_a_details_advice():
+    """Two conversations whose system prompts differ only in a timestamp: with a cache, the second
+    gets volatile_prefix_at_start and advice to move the timestamp; with none, there is nothing to
+    move it for."""
+    p, srv = _proxy({**INFO, "disable_radix_cache": True})
+    try:
+        for i, stamp in enumerate(("2026-11-11T10:00:00Z", "2026-11-11T10:05:00Z")):
+            body = {"model": "m", "messages": [{"role": "system", "content": "You are careful. " * 200 + stamp},
+                                               {"role": "user", "content": "hi"}]}
+            e = p.handle("openai", body, {"x-prefixwise-session-id": f"s{i}"})[1]
+        assert e.detail is None
+    finally:
+        srv.shutdown()
