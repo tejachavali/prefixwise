@@ -1,6 +1,10 @@
 # Changelog
 
-## Unreleased
+## 0.11.6: 2026-11-11
+
+The report now says where the whole bill went, not only what was avoidable: cache re-reads, new input,
+cache writes and output. On a long, well-cached session the re-reads are the largest part, and no hit-rate
+fix lowers them; the report says so and names the lever. `prefixwise import` opens with the headline.
 
 - **Where the bill went, and the re-read floor.** The report showed what was avoidable, and not what the rest of the bill was. It now splits the cost into cache re-reads, new input, cache writes and output (`prefixwise report`, the shareable block and `report --session`), and when re-reads are the largest part it says so plainly: that part re-reads context the cache already holds, so a better hit rate would not lower it; the lever is how much context each turn re-reads. `report --session` also gives the cached tokens each turn that hit re-read, average and largest. From a gateway engineer's question on Reddit, with a DeepSeek session at a 99.7% hit rate where re-reads were 62% of the bill. Ledger schema 7 adds `cost_cache_read`, `cost_input`, `cost_cache_write` and `cost_output`; rows recorded before it have no split, and the line says how many requests it covers. If you send rows to ClickHouse, add the four columns before upgrading (`ALTER TABLE ... ADD COLUMN cost_cache_read Nullable(Float64)`, and so on; `docs/DATA.md`): a server that refuses unknown fields drops every batch until then, and one that skips them stores no split.
 - **`prefixwise import` opens with the headline.** The first screen after importing Claude Code or Codex logs was two paragraphs of caveats before any number. Now it opens with the short block made for pasting into a chat (requests, share served from cache, cost, the top avoidable cause and its fix, unread writes, how to install), then the details, with the caveats at the end. The totals appear once.
