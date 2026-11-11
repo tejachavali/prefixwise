@@ -137,7 +137,7 @@ def test_reimport_adds_only_new_requests_and_since_filters(tmp_path):
     assert [r[1] for r in rows(later)] == ["ttl_expired", "unknown"]  # still judged against earlier turns
 
 
-ENV = {"PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src")}
+ENV = {"PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src"), "TZ": "UTC"}  # dates in the output: one zone everywhere
 
 
 def test_cli_import_prints_the_report(tmp_path):
@@ -149,6 +149,11 @@ def test_cli_import_prints_the_report(tmp_path):
     assert "Imported 10 requests from 2 Claude Code logs" in out.stdout
     assert "asked for a 1-hour cache but the entry was kept for 5 minutes" in out.stdout
     assert "subagent:Explore" in out.stdout and "API prices" in out.stdout
+    # The shareable headline comes first (the totals once, then the details, then the caveats)
+    o = out.stdout
+    assert o.index("prefixwise (Claude Code, 2026-11-07)") < o.index("% from cache") < o.index("Details:") \
+        < o.index("About these numbers")
+    assert o.count("132,450 prompt tokens") == 1 and "pip install prefixwise" in o
     out = subprocess.run([sys.executable, "-m", "prefixwise", "import", "claude-code", "--path", str(tmp_path / "nope"),
                           "--ledger", str(db)], capture_output=True, text=True, env=ENV)
     assert out.returncode == 1 and "no Claude Code logs" in out.stderr
