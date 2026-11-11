@@ -68,6 +68,58 @@ DETAIL_FIX = {
 }
 
 
+BILL_PARTS = (("cache_read", "cache re-reads"), ("input", "new input"), ("cache_write", "cache writes"),
+              ("output", "output"))
+
+
+def bill(ledger, since: float | None = None, until: float | None = None) -> dict | None:
+    """Where the dollars went, over priced requests that carry the cost split (ledger schema 7
+    or later): {"cache_read", "input", "cache_write", "output"} in USD, "total", "requests" (with a
+    split) and "requests_priced". None when no request has a split. cache_read is the floor: on a
+    long, well-cached session it is most of the bill, though no miss caused it."""
+    row = metrics.query(ledger, ["cost_cache_read_usd", "cost_input_usd", "cost_cache_write_usd", "cost_output_usd",
+                                 "requests_cost_split", "requests_priced"], since=since, until=until)
+    r = row[0] if row else {}
+    if not r.get("requests_cost_split"):
+        return None
+    out = {"cache_read": r["cost_cache_read_usd"] or 0.0, "input": r["cost_input_usd"] or 0.0,
+           "cache_write": r["cost_cache_write_usd"] or 0.0, "output": r["cost_output_usd"] or 0.0}
+    out["total"] = sum(out.values())
+    out["requests"], out["requests_priced"] = r["requests_cost_split"], r["requests_priced"] or 0
+    return out
+
+
+def _share(v: float, total: float) -> str:
+    p = v / total
+    return "<1%" if 0 < p < 0.005 else f"{p:.0%}"
+
+
+def bill_line(b: dict | None, short: bool = False) -> str | None:
+    """One sentence on where the dollars went; None without a split or with nothing billed."""
+    if not b or not b.get("total"):
+        return None
+    parts = [(label, b[key]) for key, label in BILL_PARTS if b[key]]
+    partial = b["requests"] < b["requests_priced"]
+    if short:
+        return ("bill" + (f" ({b['requests']} of {b['requests_priced']} priced requests)" if partial else "") + ": "
+                + ", ".join(f"{_share(v, b['total'])} {label}" for label, v in parts))
+    text = "Where the bill went: " + ", ".join(f"{label} {_usd(v)} ({_share(v, b['total'])})" for label, v in parts)
+    if partial:
+        text += f" ({b['requests']} of {b['requests_priced']} priced requests; older rows have no split)"
+    return text + "."
+
+
+def floor_advice(b: dict | None) -> str | None:
+    """When re-reading cached context is the biggest part of the bill, say where the lever is."""
+    if not b or not b.get("total"):
+        return None
+    if b["cache_read"] >= max(b["input"], b["cache_write"], b["output"]) and b["cache_read"] > 0:
+        return ("The largest part re-reads context the cache already holds, so a better hit rate would not lower it: "
+                "the lever is how much context each turn re-reads (a new session for a new task, compacting at "
+                "task boundaries, shorter tool results).")
+    return None
+
+
 def _details(ledger, cause: str, window: dict) -> list[dict]:
     rows = metrics.query(ledger, ["requests"], by="detail", filters={"cause": cause}, **window)
     return sorted(({"detail": r["detail"], "what": DETAIL_PLAIN.get(r["detail"], r["detail"]),
@@ -208,6 +260,7 @@ def findings(ledger, since: float | None = None, until: float | None = None,
             "ttl": ttl_advice(ledger, prices=table, **window),
             "unread_writes": unread_writes(ledger, **window),
             "unpriced_models": sorted(unpriced), "approximate_prices": sorted(approximate),
+            "bill": bill(ledger, **window),
             "cache_not_reported": not_reported}
 
 
@@ -248,6 +301,10 @@ def render(f: dict, command: str = "serve", headline: bool = True) -> str:
                 head += f" ({s['requests_priced']} of {s['requests']} requests priced)"
         if headline:
             lines.append(head + ".")
+        # Without the headline (import prints the short block first, with the split), the advice only.
+        for extra in ((bill_line(f.get("bill")) if headline else None), floor_advice(f.get("bill"))):
+            if extra:
+                lines.append(extra)
         if f.get("approximate_prices"):
             lines.append("Priced at a related model's rate: " + "; ".join(f"{m} as {k}" for m, k in f["approximate_prices"])
                          + " (add the exact rates with --prices FILE).")
@@ -333,7 +390,7 @@ def render(f: dict, command: str = "serve", headline: bool = True) -> str:
 def render_share(f: dict, since_label: str | None = None) -> str:
     """A short block for pasting into a chat or a thread: the headline numbers, a pricing note when
     the dollars are partial or approximate, the top cause and its fix, the unread writes. Counts and
-    dollars only; no prompt text exists to leak. At most eight lines."""
+    dollars only; no prompt text exists to leak. At most ten lines."""
     s = f["summary"]
     if not s["requests"]:
         return "prefixwise: no requests recorded yet."
@@ -343,6 +400,9 @@ def render_share(f: dict, since_label: str | None = None) -> str:
     if s["requests_priced"]:
         head += f", {_usd(s['cost_usd'])}"
     lines.append(head)
+    split = bill_line(f.get("bill"), short=True)
+    if split:
+        lines.append(split)
     notes = []
     if s["requests_priced"] and s["requests_priced"] < s["requests"]:
         notes.append(f"{s['requests_priced']} of {s['requests']} requests priced")

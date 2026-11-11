@@ -369,7 +369,7 @@ class Collector:
             avoidable_tokens=avoidable_for_turn(result.legit, prompt_tokens, cached,
                                                 prev.prompt_tokens if prev else None, held),
             avoidable_cost=None, legit=result.legit, native_reason=native_reason,
-            cost=self.prices.request_cost(priced_model, provider, usage),
+            **self.prices.cost_fields(priced_model, provider, usage),
             task_id=rec.task_id, request_id=rec.request_id,
             completion_tokens=completion_tokens_of(provider, usage),
             fixes=",".join(rec.fixes_applied) or None,

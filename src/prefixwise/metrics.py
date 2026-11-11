@@ -59,6 +59,17 @@ CATALOG: tuple[Metric, ...] = (
     Metric("requests_priced", "{request}", "Requests with a known price; the dollar metrics cover these only.",
            f"SUM(CASE WHEN {OK} AND cost IS NOT NULL THEN 1 ELSE 0 END)"),
     Metric("cost_usd", "USD", "Dollars for priced requests.", f"SUM(CASE WHEN {OK} THEN cost END)"),
+    Metric("cost_cache_read_usd", "USD", "Dollars for re-reading prompt tokens already in the cache, at the "
+           "cache-read rate: the floor a long, well-cached session pays every turn (requests with a cost split).",
+           f"SUM(CASE WHEN {OK} THEN cost_cache_read END)"),
+    Metric("cost_input_usd", "USD", "Dollars for prompt tokens neither read from nor written to the cache "
+           "(requests with a cost split).", f"SUM(CASE WHEN {OK} THEN cost_input END)"),
+    Metric("cost_cache_write_usd", "USD", "Dollars for prompt tokens written to the cache "
+           "(requests with a cost split).", f"SUM(CASE WHEN {OK} THEN cost_cache_write END)"),
+    Metric("cost_output_usd", "USD", "Dollars for output tokens (requests with a cost split).",
+           f"SUM(CASE WHEN {OK} THEN cost_output END)"),
+    Metric("requests_cost_split", "{request}", "Priced requests whose cost is split by part (recorded "
+           "by 0.11.6 or later).", f"SUM(CASE WHEN {OK} AND cost_cache_read IS NOT NULL THEN 1 ELSE 0 END)"),
     Metric("avoidable_cost_usd", "USD", "What the avoidable tokens cost as uncached input rather than "
            "cache reads (priced requests).", f"SUM(CASE WHEN {OK} THEN avoidable_cost END)"),
     Metric("latency_ms_p50", "ms", "Median upstream latency of requests with a verdict (streams: to the "

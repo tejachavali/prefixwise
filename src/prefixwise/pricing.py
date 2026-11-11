@@ -231,25 +231,44 @@ class PriceTable:
             return {**rates, **{k: v for k, v in lp.items() if k in RATE_FIELDS}}
         return rates
 
-    def request_cost(self, model: str, provider: str, usage: dict) -> float | None:
+    def request_cost_parts(self, model: str, provider: str, usage: dict) -> dict | None:
+        """Where one request's dollars went: {"cache_read", "input", "cache_write", "output"} in USD
+        (input = prompt tokens neither read from nor written to the cache). None when a part that has
+        tokens has no rate: then the whole cost is unknown, not a partial sum. Unrounded: the cost is
+        rounded once, from their sum."""
         rates = self.rates_for(model)
         if rates is None:
             return None
         b = breakdown(provider, usage)
         r = self._tier(rates, b.prompt)
-        parts = [(b.uncached_input, r.get("input")), (b.cache_read, r.get("cache_read")),
-                 (b.output, r.get("output")), (b.cache_write_5m, r.get("cache_write_5m", r.get("cache_write"))),
-                 (b.cache_write_1h, r.get("cache_write_1h")), (b.cache_write, r.get("cache_write"))]
-        total = 0.0
-        for tokens, rate in parts:
+        parts = [("input", b.uncached_input, r.get("input")), ("cache_read", b.cache_read, r.get("cache_read")),
+                 ("output", b.output, r.get("output")),
+                 ("cache_write", b.cache_write_5m, r.get("cache_write_5m", r.get("cache_write"))),
+                 ("cache_write", b.cache_write_1h, r.get("cache_write_1h")),
+                 ("cache_write", b.cache_write, r.get("cache_write"))]
+        out = {"cache_read": 0.0, "input": 0.0, "cache_write": 0.0, "output": 0.0}
+        for part, tokens, rate in parts:
             if not tokens:
                 continue
             if rate == "input":
                 rate = r.get("input")
             if not isinstance(rate, (int, float)):
                 return None  # a part we cannot price: unknown, not zero
-            total += tokens * rate / 1e6
-        return round(total, 8)
+            out[part] += tokens * rate / 1e6
+        return out
+
+    def request_cost(self, model: str, provider: str, usage: dict) -> float | None:
+        parts = self.request_cost_parts(model, provider, usage)
+        return None if parts is None else round(sum(parts.values()), 8)
+
+    def cost_fields(self, model: str, provider: str, usage: dict) -> dict:
+        """A ledger row's cost columns: the total and its parts (all None when unpriced)."""
+        parts = self.request_cost_parts(model, provider, usage)
+        if parts is None:
+            return {"cost": None, "cost_cache_read": None, "cost_input": None, "cost_cache_write": None,
+                    "cost_output": None}
+        return {"cost": round(sum(parts.values()), 8), "cost_cache_read": parts["cache_read"],
+                "cost_input": parts["input"], "cost_cache_write": parts["cache_write"], "cost_output": parts["output"]}
 
     def avoidable_cost(self, model: str, avoidable_tokens: int, prompt_tokens: int,
                        provider: str | None = None, usage: dict | None = None) -> float | None:
