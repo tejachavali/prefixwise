@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **`prefixwise import` opens with the headline.** The first screen after importing Claude Code or Codex logs was two paragraphs of caveats before any number. Now it opens with the short block made for pasting into a chat (requests, share served from cache, cost, the top avoidable cause and its fix, unread writes, how to install), then the details, with the caveats at the end. The totals appear once.
+
 ## 0.11.5: 2026-11-11
 
 For anyone using an OpenAI-compatible API that is not OpenAI (DeepSeek, Tencent, Together, OpenRouter) or

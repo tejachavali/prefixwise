@@ -149,6 +149,11 @@ def test_cli_import_prints_the_report(tmp_path):
     assert "Imported 10 requests from 2 Claude Code logs" in out.stdout
     assert "asked for a 1-hour cache but the entry was kept for 5 minutes" in out.stdout
     assert "subagent:Explore" in out.stdout and "API prices" in out.stdout
+    # The shareable headline comes first (the totals once, then the details, then the caveats)
+    o = out.stdout
+    assert o.index("prefixwise (Claude Code, 2026-11-07)") < o.index("% from cache") < o.index("Details:") \
+        < o.index("About these numbers")
+    assert o.count("132,450 prompt tokens") == 1 and "pip install prefixwise" in o
     out = subprocess.run([sys.executable, "-m", "prefixwise", "import", "claude-code", "--path", str(tmp_path / "nope"),
                           "--ledger", str(db)], capture_output=True, text=True, env=ENV)
     assert out.returncode == 1 and "no Claude Code logs" in out.stderr

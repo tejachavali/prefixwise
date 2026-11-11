@@ -225,9 +225,10 @@ def _n(x) -> str:
     return "-" if x is None else f"{x:,.0f}"
 
 
-def render(f: dict, command: str = "serve") -> str:
+def render(f: dict, command: str = "serve", headline: bool = True) -> str:
     """Plain sentences from findings(). `command` is how the user runs the proxy
-    (serve or run), so the advice names a command they can type."""
+    (serve or run), so the advice names a command they can type. `headline=False` leaves out the
+    totals line, for a caller that has printed them already (render_share)."""
     s = f["summary"]
     if not s["requests"] and not s["requests_failed"]:
         return ("No requests recorded yet. Point your agent's base URL at the proxy, or run it with "
@@ -245,7 +246,8 @@ def render(f: dict, command: str = "serve") -> str:
             head += f". Cost {_usd(s['cost_usd'])}"
             if partial:
                 head += f" ({s['requests_priced']} of {s['requests']} requests priced)"
-        lines.append(head + ".")
+        if headline:
+            lines.append(head + ".")
         if f.get("approximate_prices"):
             lines.append("Priced at a related model's rate: " + "; ".join(f"{m} as {k}" for m, k in f["approximate_prices"])
                          + " (add the exact rates with --prices FILE).")

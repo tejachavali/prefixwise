@@ -728,16 +728,16 @@ def cmd_import(args) -> int:
             print(f"Nothing new: the {stats['logs']} logs hold {stats['skipped_known']:,} requests already in {path}.")
         return 0
     day = lambda t: time.strftime("%Y-%m-%d", time.localtime(t))  # noqa: E731
-    print(f"Imported {stats['imported']:,} requests from {stats['logs']} {name} logs "
-          f"({day(stats['first'])} to {day(stats['last'])})"
+    span = day(stats["first"]) if day(stats["first"]) == day(stats["last"]) else \
+        f"{day(stats['first'])} to {day(stats['last'])}"
+    print(f"Imported {stats['imported']:,} requests from {stats['logs']} {name} logs ({span})"
           + (f"; {stats['skipped_known']:,} were already in {path}" if stats["skipped_known"] else "")
-          + (f"; {stats['duplicates']:,} logged twice were counted once" if stats["duplicates"] else "") + ".")
-    print("Read from the logs, which hold each response's usage and what changed between requests, not the "
-          "prompt itself: causes are inferred, and a miss the log cannot explain is `unknown`.")
-    print("Dollars are API prices: on a subscription (Claude Pro/Max, ChatGPT plans) they show what the usage "
-          "is worth, not what you paid.\n")
+          + (f"; {stats['duplicates']:,} logged twice were counted once" if stats["duplicates"] else "") + ".\n")
     window = {"since": stats["first"], "until": stats["last"] + 1}
-    print(findings.render(findings.findings(led, **window), command="serve"))
+    found = findings.findings(led, **window)
+    # The headline first, in the short form made for pasting into a chat; the full report after it.
+    print(findings.render_share(found, since_label=f"{name}, {span}"))
+    print("\nDetails:\n" + findings.render(found, command="serve", headline=False))
     rows = metrics.query(led, ["requests", "prompt_tokens", "cache_hit_rate", "cost_usd", "avoidable_tokens"],
                          by="agent", order="-prompt_tokens", **window)
     if len(rows) > 1:
@@ -752,6 +752,10 @@ def cmd_import(args) -> int:
             (window["since"], window["until"]))]
     if unpriced:
         print(f"\nNo prices for {', '.join(unpriced)}: add rates with PREFIXWISE_PRICES (see `prefixwise prices`).")
+    print("\nAbout these numbers: they come from the logs, which hold each response's usage and what changed "
+          "between requests, not the prompt itself, so causes are inferred and a miss the log cannot explain is "
+          "`unknown`. Dollars are API prices: on a subscription (Claude Pro/Max, ChatGPT plans) they show what the "
+          "usage is worth, not what you paid.")
     print(f"\nLedger: {path}  (prefixwise report --ledger {path} --detail, or prefixwise serve to browse /api/v1)")
     return 0
 
