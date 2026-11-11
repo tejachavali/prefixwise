@@ -137,7 +137,7 @@ def test_reimport_adds_only_new_requests_and_since_filters(tmp_path):
     assert [r[1] for r in rows(later)] == ["ttl_expired", "unknown"]  # still judged against earlier turns
 
 
-ENV = {"PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src")}
+ENV = {"PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src"), "TZ": "UTC"}  # dates in the output: one zone everywhere
 
 
 def test_cli_import_prints_the_report(tmp_path):
