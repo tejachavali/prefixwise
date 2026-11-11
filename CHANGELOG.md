@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **Docs: `host_restored` with an SGLang L3 storage backend.** `docs/SGLANG.md` said the detail means a restore from host memory. With `--hicache-storage-backend` in the default host memory mode, SGLang publishes a refill from storage as a host (`CPU_PINNED`) store and does not yet emit storage-tier events (sglang#29709), so there `host_restored` also covers a restore from storage; in `buffer_only` mode such a restore is a plain `none`. The page now says so, and that SGLang's per-request `return_cached_tokens_details` (not read by Prefixwise yet) is what would tell the two apart. Raised by an SGLang contributor reviewing the HiCache docs recipe (sglang PR #49194), and checked in SGLang's source.
+
 ## 0.11.6: 2026-11-11
 
 The report now says where the whole bill went, not only what was avoidable: cache re-reads, new input,
