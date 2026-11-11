@@ -1,6 +1,10 @@
 # Changelog
 
-## Unreleased
+## 0.11.5: 2026-11-11
+
+For anyone using an OpenAI-compatible API that is not OpenAI (DeepSeek, Tencent, Together, OpenRouter) or
+a self-hosted engine: `prefixwise serve` works with a base URL ending in `/v1`, and OpenAI's own caching
+minimum is no longer applied to them. Checked live on DeepSeek.
 
 - **`prefixwise serve --upstream <base>/v1` works.** Most OpenAI-compatible APIs document a base URL ending in `/v1` (DeepSeek, Tencent TokenHub, Together), and `serve` added a second one: every request went to `/v1/v1/chat/completions` and came back 404. `prefixwise run` already handled it. Found by the live DeepSeek run below.
 - **DeepSeek, checked live.** Through its API (`deepseek-flash`), a repeated 3,000-token prompt read 2,816 tokens from the cache on turns 2 and 3, reported both as OpenAI's `prompt_tokens_details.cached_tokens` and as DeepSeek's own `prompt_cache_hit_tokens`, the same number. Prefixwise now also reads DeepSeek's field when the standard one is absent, with `prompt_cache_miss_tokens` filling in a missing `prompt_tokens`.
