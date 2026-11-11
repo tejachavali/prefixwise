@@ -10,7 +10,7 @@ from prefixwise.findings import bill_line, findings, floor_advice, render, rende
 from prefixwise.pricing import PriceTable
 from prefixwise.proxy import PrefixwiseProxy
 
-# Her rates (USD per 1M tokens) and five calls from her dashboard, oldest first: (input, cached, output).
+# The rates (USD per 1M tokens) and five calls from a real DeepSeek dashboard, oldest first: (input, cached, output).
 # The dashboard billed the first at $0.004736; these rates give $0.004741.
 RATES = {"models": {"deepseek-v4.1-flash": {"input": 0.204619, "cache_read": 0.004094, "output": 0.818476}}}
 CALLS = [(565800, 563500, 2400), (568200, 565800, 816), (569200, 568200, 1400), (570800, 569100, 782),
@@ -56,7 +56,7 @@ class Upstream:
         self.url = f"http://127.0.0.1:{self.server.server_port}"
 
 
-def test_her_session_shows_the_floor(tmp_path, capsys):
+def test_a_well_cached_deepseek_session_shows_the_floor(tmp_path, capsys):
     prices = tmp_path / "rates.json"
     prices.write_text(json.dumps(RATES))
     up = Upstream(CALLS)
@@ -75,7 +75,7 @@ def test_her_session_shows_the_floor(tmp_path, capsys):
     assert abs(share["cache_read"] - 0.622) < 0.002 and abs(share["input"] - 0.093) < 0.002
     assert abs(share["output"] - 0.285) < 0.002 and b["cache_write"] == 0
     first = p.ledger.turns("long")[0]["cost"]
-    assert abs(first - 0.004736) / 0.004736 < 0.002  # her dashboard's bill for that call
+    assert abs(first - 0.004736) / 0.004736 < 0.002  # the dashboard's bill for that call
     text = render(f)
     assert "Where the bill went: cache re-reads" in text and "(62%)" in text
     assert "a better hit rate would not lower it" in text  # the re-read is the biggest part: say where the lever is
