@@ -120,3 +120,18 @@ def test_through_the_proxy_a_deepseek_hit_is_a_hit():
         assert entry.cached_tokens == 2944 and entry.cause == "none"  # before: 0 cached, an unknown miss
     finally:
         up.server.shutdown()
+
+
+def test_an_upstream_that_ends_in_v1_is_not_given_a_second_v1():
+    """Live (Muse, DeepSeek): `serve --upstream https://api.deepseek.com/v1` sent /v1/v1/chat/completions
+    and every request came back 404. Most OpenAI-compatible APIs document a base URL ending in /v1."""
+    for base in ("https://api.deepseek.com/v1", "https://api.deepseek.com/v1/",
+                 "https://tokenhub-intl.tencentcloudmaas.com/v1"):
+        p = PrefixwiseProxy(upstream_url=base, mock=False)
+        host = base.rstrip("/").removesuffix("/v1")
+        assert p.target("openai", "/v1/chat/completions") == host + "/v1/chat/completions"
+        assert p.target("openai", "/v1/models") == host + "/v1/models"
+    p = PrefixwiseProxy(upstream_url="https://api.deepseek.com", mock=False)
+    assert p.target("openai", "/v1/chat/completions") == "https://api.deepseek.com/v1/chat/completions"
+    p = PrefixwiseProxy(upstream_url="https://api.anthropic.com", mock=False)
+    assert p.target("anthropic", "/v1/messages") == "https://api.anthropic.com/v1/messages"
