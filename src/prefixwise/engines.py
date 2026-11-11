@@ -53,6 +53,13 @@ FULL_KINDS = (None, "full_attention", "mla_attention", "sink_full_attention")
 NOTHING = (None, None)
 
 
+class Restored(tuple):
+    """A hit's verdict: (blocks restored from another tier, 0). Only this may become the detail
+    host_restored. A miss's (blocks removed, 0) has the same shape: when the classifier calls a
+    turn a hit that the join judged a miss (its threshold is half the shorter of the two prompts,
+    the join's half of this one), those removed blocks were never restored from anywhere."""
+
+
 class _Window:
     """Blocks one session's requests reported since its last send, by position."""
 
@@ -183,6 +190,7 @@ class EngineEvents:
             check["lost"].update(check["keys"])
         self._alive.clear()
         self.block_size = None  # a restarted engine may have another block size
+        self.offload_seen = False  # a restarted engine may run without its tier: seen again if it has one
 
     def _window(self, session: str) -> _Window:
         w = self._windows.get(session)
@@ -242,7 +250,7 @@ class EngineEvents:
                 clean = (self.offload_seen and not check["concurrent"] and not check["restored_elsewhere"]
                          and self._errors() == check["errors"])
                 self._checks.pop(token, None)
-                return (restored, 0) if restored and clean else NOTHING
+                return Restored((restored, 0)) if restored and clean else NOTHING
             key = check["at"].get(max(0, cached_tokens) // check["block_size"])
         if key is None:
             self._checks.pop(token, None)
@@ -707,6 +715,11 @@ class SGLangEvents(EngineEvents):
             i = len(p.hashes) - 1 if p.hashes[-1] == parent_hash else p.hashes.index(parent_hash)
             seg = _Seg(p, i, None if p.start is None else p.end(i), block, tokens, packed, born)
         alive = self._alive
+        session = ev.get("session_id")
+        if session:  # another request recomputed this chain's blocks: a hit then is no tier restore
+            for check in self._checks.values():  # in flight: few
+                if session != check["session"] and check["chain"] and not check["chain"].isdisjoint(hashes):
+                    check["restored_elsewhere"] = True
         for h in hashes:
             old = alive.get(h)
             if old is not None and old is not seg:
@@ -715,7 +728,6 @@ class SGLangEvents(EngineEvents):
                 old.ambiguous = seg.ambiguous = True
                 self.stats["duplicate_hashes"] += 1
             alive[h] = seg
-        session = ev.get("session_id")
         if session:
             tail = self._tails.get(session)
             if tail is None:  # no window opened by request_sent (dropped, or another client): mixed
@@ -766,6 +778,7 @@ class SGLangEvents(EngineEvents):
             seg.cut = 0
         self._alive.clear()
         self.block_size = None
+        self.offload_seen = False  # a restarted engine may run without HiCache: seen again if it has it
         for check in self._checks.values():  # chains not indexed any more (stored long ago) too
             check["cleared"] = True
 
@@ -785,7 +798,12 @@ class SGLangEvents(EngineEvents):
             prev = self._tails.pop(session_id, None)  # its held tokens move to the check
             window = self._tails[session_id] = [None, concurrent, {}]
             token = next(self._tokens)
-            self._checks[token] = {"session": session_id, "tail": prev[0] if prev else None,
+            tail = prev[0] if prev else None
+            # Only a tier makes a restore claim possible: no tier, no set to build (it can be large).
+            chain_hashes = ({h for seg, last in _chain(tail) for h in seg.hashes[:last + 1]}
+                            if tail and self.offload_seen else set())
+            self._checks[token] = {"session": session_id, "tail": tail, "chain": chain_hashes,
+                                   "restored_elsewhere": False,
                                    "window": window, "sent": next(self._born) if prev else 0,
                                    "concurrent": concurrent or bool(prev and prev[1]),
                                    "cleared": False, "overflowed": False, "errors": self._errors()}
@@ -814,7 +832,7 @@ class SGLangEvents(EngineEvents):
         tier (details: host_restored). 0 when nothing can be said (an unplaced or ambiguous
         chain, a concurrent request, an overflow or a cut stream)."""
         if (not self.offload_seen or check["tail"] is None or check["overflowed"] or check["concurrent"]
-                or self._errors() != check["errors"]):
+                or check["restored_elsewhere"] or not check["chain"] or self._errors() != check["errors"]):
             return 0
         chain = _chain(check["tail"])
         if any(seg.start is None or seg.ambiguous for seg, _ in chain):
@@ -859,7 +877,7 @@ class SGLangEvents(EngineEvents):
             if prompt_tokens and cached_tokens >= prompt_tokens * 0.5:  # a hit: restored blocks only
                 restored = self._restored(check, max(0, cached_tokens))
                 self._drop_check(token)
-                return (restored, 0) if restored else NOTHING
+                return Restored((restored, 0)) if restored else NOTHING
             judged = self._judge(check, max(0, cached_tokens))
             if judged is None:
                 self._drop_check(token)

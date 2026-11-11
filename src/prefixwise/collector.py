@@ -318,6 +318,9 @@ class Collector:
             verdict = rec.engine_verdict
             curr.evicted_blocks, curr.resident_blocks = verdict[0], verdict[1]
             curr.routed = tuple(verdict[2]) if len(verdict) > 2 and verdict[2] is not None else None
+        # Only a verdict the join made on a hit counts as restored (engines.Restored, sent as a 4th
+        # element): a miss's removed blocks on a turn the classifier calls a hit were never restored.
+        restored = bool(rec.engine_verdict and len(rec.engine_verdict) > 3 and rec.engine_verdict[3] is True)
         if unknown_parent:
             result = Classification(MissCause.UNKNOWN, None,
                                     "previous_response_id points to a response this proxy never saw;"
@@ -343,7 +346,7 @@ class Collector:
             prev_facts = None  # a stitched branch: the lane's latest request may be another branch
         new_cause, detail, why = detail_for(result.cause.value, prev_facts, facts,
                                             prompt_tokens=prompt_tokens, cached_tokens=cached,
-                                            evicted_blocks=curr.evicted_blocks if rec.engine_caches == 1 else None,
+                                            evicted_blocks=curr.evicted_blocks if rec.engine_caches == 1 and restored else None,
                                             engine=rec.engine is not None,
                                             prompt_served=prev is not None and served_all(prev, curr))
         if new_cause:
@@ -353,6 +356,14 @@ class Collector:
                                     result.secondary + [result.cause], native_reason)
         elif why:
             result.evidence = f"{result.evidence}; {why}"
+        if facts.no_prefix_cache and result.cause is not MissCause.NONE:
+            # Nothing could have been read back: not an eviction, not routing, not the client's edit,
+            # and no detail's advice (move a timestamp, stagger requests) would change that.
+            detail = None
+            result = Classification(MissCause.UNKNOWN, True,
+                                    "the engine keeps no prefix cache (SGLang --disable-radix-cache), so every "
+                                    f"turn recomputes its prompt; no cause applies (classifier: {result.cause.value})",
+                                    [], native_reason)
 
         div = first_divergence(prev.blocks, curr.blocks) if prev is not None else None
         priced_model = str(rec.response_model or rec.model)

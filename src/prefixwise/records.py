@@ -39,7 +39,16 @@ PARAM_KEYS = ("tool_choice", "thinking", "reasoning", "output_format",
               # (enable_thinking on Qwen3) and a per-request template change the rendered prompt
               # (on Qwen3 a 4-token tail; on others possibly the prefix). Compared as a whole: a
               # client that sends the same kwargs every turn sees no change
-              "chat_template_kwargs", "chat_template")
+              "chat_template_kwargs", "chat_template",
+              # Fields that change the engine's cache key or the rendered prompt while every block
+              # stays the same: reasoning_effort (vLLM passes it to the chat template, and writes it
+              # into gpt-oss's system message); image and video processing options (token counts,
+              # media hashes); SGLang's LoRA adapter (its radix key); RAG documents and
+              # continue_final_message (rendered by the template). Not cache_salt yet: the E1 harness
+              # forces its retry misses with a fresh salt, so comparing it needs that harness changed
+              # and re-run live first.
+              "reasoning_effort", "mm_processor_kwargs", "media_io_kwargs", "lora_path",
+              "documents", "continue_final_message")
 
 
 def param_fingerprint(value) -> str:
@@ -103,8 +112,10 @@ class TurnRecord:
     def to_dict(self) -> dict:
         d = asdict(self)  # deep copies: nested lists are not shared with the record
         # Added in 0.11.4 and almost always False: left out then, so a 0.11.3 collector still reads the record.
-        if not d["facts"].get("session_unprotected"):
-            d["facts"].pop("session_unprotected", None)
+        # no_prefix_cache (0.11.7) likewise.
+        for name in ("session_unprotected", "no_prefix_cache"):
+            if not d["facts"].get(name):
+                d["facts"].pop(name, None)
         return d
 
     @classmethod
