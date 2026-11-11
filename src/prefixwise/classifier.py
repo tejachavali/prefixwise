@@ -21,6 +21,7 @@ coarse taxonomy, and neither names TTL expiry, routing, or eviction.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from enum import Enum
 
@@ -63,6 +64,15 @@ OPENAI_MIN_PREFIX = 1024
 # last turn is not explained by expiry.
 MIN_PROVIDER_TTL_SECONDS = 300
 GEMINI_MIN_PREFIX = 4096  # Gemini 3.x; 2,048 on 2.5. ai.google.dev, Nov 2026.
+
+
+_OPENAI_MODEL = re.compile(r"^(?:openai/)?(?:gpt-|chatgpt-|o\d|codex-|computer-use-)")
+
+
+def openai_model(model: str) -> bool:
+    """An OpenAI model id (gpt-*, o1/o3/o4*, chatgpt-*, codex-*): OpenAI's own caching rules apply.
+    Anything else sent in OpenAI's request shape is another provider's model."""
+    return bool(_OPENAI_MODEL.match((model or "").lower()))
 
 
 def anthropic_min_prefix(model: str) -> int:
@@ -180,11 +190,15 @@ def _min_prefix(curr: RequestSnapshot) -> int | None:
     none to apply (self-hosted engines)."""
     if curr.min_prefix_tokens is not None:
         return curr.min_prefix_tokens
-    if not curr.cache_reported:  # not the provider whose minimum this would be (Ollama, llama.cpp)
+    if not curr.cache_reported or curr.engine:  # Ollama, llama.cpp; vLLM and SGLang cache from one block
         return None
     if curr.provider == "anthropic":
         return anthropic_min_prefix(curr.model)
-    return {"openai": OPENAI_MIN_PREFIX, "gemini": GEMINI_MIN_PREFIX}.get(curr.provider)
+    if curr.provider == "openai":
+        # OpenAI's own minimum: another API behind the same request shape (DeepSeek, Tencent, OpenRouter,
+        # Together) caches by its own rules, so no minimum is claimed there.
+        return OPENAI_MIN_PREFIX if openai_model(curr.model) else None
+    return {"gemini": GEMINI_MIN_PREFIX}.get(curr.provider)
 
 
 def _reusable(prev: RequestSnapshot, curr: RequestSnapshot) -> int:

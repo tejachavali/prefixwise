@@ -53,6 +53,28 @@ class Breakdown:
                 + self.cache_write_1h + self.cache_write)
 
 
+def _vendor_cached(usage: dict) -> int | None:
+    """A cache-read count some OpenAI-compatible providers report outside prompt_tokens_details:
+    DeepSeek's API sends prompt_cache_hit_tokens (and prompt_cache_miss_tokens), the field LiteLLM
+    maps to cached tokens. None when the usage has no such field."""
+    hit = usage.get("prompt_cache_hit_tokens")
+    return int(hit) if isinstance(hit, int) and not isinstance(hit, bool) else None
+
+
+def _chat_prompt(usage: dict) -> int:
+    prompt = int(usage.get("prompt_tokens", 0) or 0)
+    if not prompt and _vendor_cached(usage) is not None:  # hit + miss when prompt_tokens is missing
+        prompt = _vendor_cached(usage) + int(usage.get("prompt_cache_miss_tokens", 0) or 0)
+    return prompt
+
+
+def _chat_cached(usage: dict, details: dict) -> int:
+    cached = int(details.get("cached_tokens", 0) or usage.get("cached_tokens", 0) or 0)
+    if not cached and _vendor_cached(usage) is not None:
+        cached = _vendor_cached(usage)
+    return cached
+
+
 def breakdown(provider: str, usage: dict) -> Breakdown:
     """Split provider usage into billable parts. Each provider's own fields."""
     usage = usage or {}
@@ -69,11 +91,11 @@ def breakdown(provider: str, usage: dict) -> Breakdown:
         prompt = int(usage.get("input_tokens", 0) or 0)
         details = usage.get("input_tokens_details") or {}
         out = int(usage.get("output_tokens", 0) or 0)
-    else:  # chat completions (OpenAI, vLLM)
-        prompt = int(usage.get("prompt_tokens", 0) or 0)
+    else:  # chat completions (OpenAI, vLLM, DeepSeek and other OpenAI-compatible APIs)
+        prompt = _chat_prompt(usage)
         details = usage.get("prompt_tokens_details") or {}
         out = int(usage.get("completion_tokens", 0) or 0)
-    cached = int(details.get("cached_tokens", 0) or usage.get("cached_tokens", 0) or 0)
+    cached = _chat_cached(usage, details)
     write = int(details.get("cache_write_tokens", 0) or 0)
     return Breakdown(uncached_input=max(0, prompt - cached - write), cache_read=cached,
                      cache_write=write, output=out)
@@ -93,10 +115,8 @@ def normalize_usage(provider: str, usage: dict) -> tuple[int, int]:
     if "prompt_tokens" not in usage and "input_tokens" in usage:  # Responses API
         details = usage.get("input_tokens_details") or {}
         return int(usage.get("input_tokens", 0) or 0), int(details.get("cached_tokens", 0) or 0)
-    prompt = int(usage.get("prompt_tokens", 0) or 0)
     details = usage.get("prompt_tokens_details") or {}
-    cached = int(details.get("cached_tokens", 0) or usage.get("cached_tokens", 0) or 0)
-    return prompt, cached
+    return _chat_prompt(usage), _chat_cached(usage, details)
 
 
 def cache_reported(provider: str, usage: dict) -> bool:
@@ -110,7 +130,8 @@ def cache_reported(provider: str, usage: dict) -> bool:
     # A null details object (vLLM without --enable-prompt-tokens-details) reports nothing either.
     if "prompt_tokens" not in usage and "input_tokens" in usage:  # Responses API
         return usage.get("input_tokens_details") is not None or usage.get("cached_tokens") is not None
-    return usage.get("prompt_tokens_details") is not None or usage.get("cached_tokens") is not None
+    return (usage.get("prompt_tokens_details") is not None or usage.get("cached_tokens") is not None
+            or _vendor_cached(usage) is not None)
 
 
 def completion_tokens_of(provider: str, usage: dict) -> int:

@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- **DeepSeek's API: cache hits are read.** DeepSeek reports cache reads as `prompt_cache_hit_tokens`, not OpenAI's `prompt_tokens_details`, so through Prefixwise every DeepSeek turn read as nothing cached, its cause unknown. Now the count is read (the field LiteLLM maps the same way), with `prompt_cache_miss_tokens` filling in a missing `prompt_tokens`. Standard fields win where both are sent.
+- **OpenAI's 1,024-token minimum applies to OpenAI's models only.** Any API in OpenAI's request shape was judged by it, so a short prompt that missed on DeepSeek, Tencent, OpenRouter or Together was called `below_min_prefix`, and so was one on vLLM or SGLang, which cache from a single block. Now the minimum applies to OpenAI model ids (`gpt-*`, `o1`/`o3`/`o4`, `chatgpt-*`, `codex-*`) on a hosted API; anywhere else no minimum is claimed. From a review of what Tencent's Hy4 (OpenAI-compatible, a cache hit at about 5% of the input price) would get through Prefixwise.
+
 ## 0.11.4: 2026-11-10
 
 Two fixes from real questions. With SGLang's `--enable-session-radix-cache`, a client's own body
