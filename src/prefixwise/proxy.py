@@ -255,7 +255,7 @@ ENGINE_ONLY_HEADERS = ("x-forwarded-for", "cookie")
 # Never passed, even when named in PREFIXWISE_PASS_HEADERS: Prefixwise's own headers, and headers
 # urllib sets for the body Prefixwise sends.
 NEVER_PASSED = ("host", "content-length", "transfer-encoding", "connection", "keep-alive", "upgrade",
-                "proxy-authorization", "te", "trailer")
+                "proxy-authorization", "te", "trailer", "accept-encoding", "expect")
 # x-smg-routing-key and x-smg-target-worker: SGLang Model Gateway's routing (the worker schedules
 # by the routing key too).
 PASSTHROUGH_PREFIXES = ("x-codex-", "x-smg-")
@@ -777,7 +777,7 @@ class PrefixwiseProxy:
         on most backends), so nothing is ever read back; or a Mamba model (uses_mamba_radix_cache),
         whose state SGLang frees without events, so --full-attention would be wrong."""
         base = self._engine_base()
-        if not base or ".invalid" in (urllib.parse.urlsplit(base).hostname or ".invalid"):
+        if not base or (urllib.parse.urlsplit(base).hostname or ".invalid").endswith(".invalid"):
             return  # the in-process middleware: no server to ask
         headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
         try:

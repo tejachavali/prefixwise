@@ -71,7 +71,8 @@ Prefixwise warns once. sglang-router 0.3.2 had no policy that routes by a sessio
 - **The radix cache off** (`--disable-radix-cache`: HiSparse requires it, and deterministic
   inference sets it on most attention backends): `/server_info` says so, and Prefixwise records
   every miss as `unknown`, "the engine keeps no prefix cache", with nothing avoidable. Before
-  0.11.7 an unchanged prefix that missed was an inferred eviction on every turn.
+  0.11.7 an unchanged prefix that missed was an inferred eviction on every turn. Read by the proxy
+  (`prefixwise serve` or `run`); the in-process middleware cannot reach `/server_info`.
 - At startup Prefixwise reads `/server_info` (with `PREFIXWISE_API_KEY` if SGLang has
   `--api-key`) and judges from events only when it is safe: version 0.5.20 or later, events
   published, no `--enable-session-radix-cache`, and the rank count known. `GET /engine` on the
