@@ -1,10 +1,12 @@
 # Changelog
 
-## Unreleased
+## 0.11.7: 2026-11-11
 
-Corner cases from a review of every vLLM and SGLang blog post that touches the prefix cache (about
-60 of 310), each checked in the engines' source. These fix places where Prefixwise gave a wrong
-answer, or said something it had not seen.
+For anyone running Prefixwise in front of vLLM or SGLang: fixes from a review of every vLLM and
+SGLang blog post that touches the prefix cache (about 60 of 310), each checked in the engines'
+source. Routers now get the routing keys they route by, `host_restored` is claimed only from a
+restore the engine's events showed, and an SGLang with its radix cache off is no longer an eviction
+on every turn. Upgrade an edge and its collector together.
 
 - **Routing keys reach the router.** Prefixwise forwarded a fixed list of headers that left out the keys routers and engines route by: `x-sgl-routing-key` (sgl-router's sticky policy), `x-smg-routing-key` and `x-smg-target-worker` (SGLang Model Gateway), `x-dynamo-session-id` (Dynamo) and `x-data-parallel-rank` (vLLM and SGLang pin a rank by it). Behind a router, a session could then land on any worker and miss; across data-parallel ranks whose events Prefixwise joins, those misses were confirmed as `routing_miss`, with the advice to fix routing, for a rank the client had pinned. They now pass through unchanged. To a self-hosted engine or its router, `x-forwarded-for` and `cookie` pass too (the Gateway's consistent hashing falls back to them); never to a hosted API, where they could carry a login cookie or an address meant for Prefixwise's own ingress. `--pass-header NAME` (or `PREFIXWISE_PASS_HEADERS`) adds a router's own header name; Prefixwise's own headers and those urllib sets are refused there. Behind the Gateway with `--engine none`, add `--pass-header cookie` if clients rely on it.
 - **`host_restored` only from a hit the engine join judged.** With no offload tier at all, a turn that appended a large tool result could be labelled `host_restored` with "the tier's own stores were seen": the classifier called it a hit (half the shorter prompt read), the join, judging by this prompt, took its miss path, and the blocks it found removed became "restored". Now only the join's own hit verdict can become the detail, on vLLM and SGLang. Reproduced from a recorded event sequence. A new edge and an older collector still claim it the old way; a new collector with an older edge claims it not at all: upgrade both.
