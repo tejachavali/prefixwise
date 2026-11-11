@@ -113,7 +113,7 @@ changed never reaches RadixAttention's match at all. The verdicts, and the evide
 | what happened | verdict | detail | evidence |
 |---|---|---|---|
 | **GPU hit.** RadixAttention matched the prefix on the device | `none` | | `cached_tokens` covers the previous prompt |
-| **HiCache restore.** The GPU copy was evicted; `--enable-hierarchical-cache` brought the prefix back from host memory, no prefill recomputed | `none` | `host_restored` | `BlockRemoved` on the GPU medium for the previous request's blocks, the host tier's own stores seen on the stream (`CPU_PINNED` medium), and this request read those blocks back. Live: 5/5, below |
+| **HiCache restore.** The GPU copy was evicted; `--enable-hierarchical-cache` brought the prefix back from host memory (or, with an L3 backend, from storage through host memory: see below), no prefill recomputed | `none` | `host_restored` | `BlockRemoved` on the GPU medium for the previous request's blocks, the host tier's own stores seen on the stream (`CPU_PINNED` medium), and this request read those blocks back. Live: 5/5, below |
 | **Eviction.** The radix tree dropped the prefix (leaves first) and this turn recomputed it | `evicted`, confirmed | | the block where the cache read stopped was removed (`"3,382 of the previous request's KV blocks removed"`) |
 | Eviction without events | `evicted`, inferred | | one engine, prefix unchanged, not reused; the evidence says *inferred* |
 | **Not an eviction.** The block is still on the GPU, so the token prefix changed although the request did not (a chat template re-rendering history) | `unknown` | | KV events, `--full-attention`, the request's own store arrived (up to 0.5 s) and nothing was lost |
@@ -135,6 +135,14 @@ for it, and a sign the GPU cache alone is too small for the session's working se
 only once the stream has shown the host tier's own stores (so a tier exists), from a clean,
 uncontended stream, and behind one rank; without that, a hit after a GPU removal is a plain
 `none` (another request sharing the prefix may have recomputed it).
+
+With an L3 storage backend (`--hicache-storage-backend`), a restore from storage looks the same.
+SGLang does not yet publish KV events for the storage tier
+([sglang#29709](https://github.com/sgl-project/sglang/issues/29709)): a completed storage prefetch
+is inserted into the host tier and published as a `CPU_PINNED` store, then loaded back to the GPU,
+and the `DISK` and `EXTERNAL` mediums are never emitted (checked in SGLang's source, 2026-11-11).
+So there `host_restored` means restored from host memory or from storage, and a prefix that only
+storage still held is `host_restored`, not `evicted`. Telling the two apart needs that issue.
 
 ## Validated live
 
