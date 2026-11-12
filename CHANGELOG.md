@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- **The algorithm, written down and checked.** `docs/ALGORITHM.md` specifies the decision procedure: what is compared, the order of the rules, the evidence each needs, the overrides, and eleven invariants. `tests/test_invariants.py` checks those invariants on about 1,600 generated conversations in Anthropic's and OpenAI's request shapes (real tool schemas, timestamps in the system prompt, multi-turn tool calls and results), hosted and behind an engine: one change of each kind is named exactly, a full read is never a miss, appending is never a change, the earliest of two changes wins, avoidable tokens stay within what was reusable, engine evidence never overrides a changed prompt, and the hashes ignore exactly key order and volatile values.
+- **The earliest change in the conversation is the one named.** With an earlier tool result and a later message both changed, Prefixwise named the later edit (`history_edit`): it checked all messages before all tool results instead of walking the conversation in the order it was sent. Both are waste, so the avoidable count was right; the cause pointed at the wrong block. Found by the new invariant tests.
+
 ## 0.11.8: 2026-11-12
 
 For anyone running Prefixwise in front of OpenRouter: OpenRouter routes each conversation back to the provider that holds its cache by the client's body `session_id`, and Prefixwise used to remove that field. It now passes it through, so Prefixwise no longer costs those cache hits and then blames routing for the misses. Without a session id, OpenAI's `user` now groups turns.

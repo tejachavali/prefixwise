@@ -328,7 +328,7 @@ def _first_change(prev: RequestSnapshot, curr: RequestSnapshot, secondary: list,
     # prompt (module docstring); a self-hosted engine's chat template decides, so there the
     # system prompt, which templates render first, is checked first.
     order = ("system", "system_dynamic", "tools") if curr.engine else ("tools", "system", "system_dynamic")
-    for role in order + ("messages", "tool_results", "user"):
+    for role in order:
         p, c = prev_by_role.get(role, []), curr_by_role.get(role, [])
         if _role_unchanged(role, p, c):
             continue
@@ -339,39 +339,55 @@ def _first_change(prev: RequestSnapshot, curr: RequestSnapshot, secondary: list,
                                       + _volatile_kinds(p, c), secondary, native_reason)
             return Classification(MissCause.SYSTEM_EDIT, None,
                                   "system masked hash changed", secondary, native_reason)
-        if role == "tools":
-            if _tool_multiset(prev.blocks) == _tool_multiset(curr.blocks):
-                return Classification(MissCause.TOOL_RESERIALIZE, False,
-                                      "tool multiset of canonical hashes equal; sequence or raw bytes differ",
-                                      secondary, native_reason)
-            return Classification(MissCause.TOOL_CATALOG_CHANGE, True,
-                                  "tool multiset differs", secondary, native_reason)
-        if role == "messages":
-            if not curr.compaction_event and len(p) == 1 and c and p[0].raw != c[0].raw:
-                # The previous request was a one-shot (a single message, e.g. an
-                # agent's "title this" side call) and this one replaces it: a new
-                # conversation on the same tools and system prompt, not an edit of
-                # history. Judge it by whether the cache served the shared prefix.
-                secondary.append(MissCause.HISTORY_EDIT)
-                continue
+        if _tool_multiset(prev.blocks) == _tool_multiset(curr.blocks):
+            return Classification(MissCause.TOOL_RESERIALIZE, False,
+                                  "tool multiset of canonical hashes equal; sequence or raw bytes differ",
+                                  secondary, native_reason)
+        return Classification(MissCause.TOOL_CATALOG_CHANGE, True,
+                              "tool multiset differs", secondary, native_reason)
+
+    # The conversation grows by appending: the previous turn's blocks must be an unchanged prefix of
+    # this turn's. The first block that is not, in the order they were sent (messages and tool
+    # results interleaved), is where the cache stopped matching, and its kind names the cause.
+    pc = [b for b in prev.blocks if b.role in _APPEND_ROLES]
+    cc = [b for b in curr.blocks if b.role in _APPEND_ROLES]
+    i = next((k for k, (a, b) in enumerate(zip(pc, cc)) if a.role != b.role or not _same(a, b)), None)
+    if i is None and len(pc) > len(cc):
+        i = len(cc)  # earlier blocks removed (truncated history)
+    if i is None:
+        return None
+    role = pc[i].role
+    if role == "messages":
+        p, c = prev_by_role.get("messages", []), curr_by_role.get("messages", [])
+        if not curr.compaction_event and len(p) == 1 and c and p[0].raw != c[0].raw:
+            # The previous request was a one-shot (a single message, e.g. an
+            # agent's "title this" side call) and this one replaces it: a new
+            # conversation on the same tools and system prompt, not an edit of
+            # history. Judge it by whether the cache served the shared prefix.
+            secondary.append(MissCause.HISTORY_EDIT)
+            pt, ct = prev_by_role.get("tool_results", []), curr_by_role.get("tool_results", [])
+            if not _role_unchanged("tool_results", pt, ct):
+                role = "tool_results"
+            else:
+                return None
+        else:
             cause = MissCause.COMPACTION_REWRITE if curr.compaction_event else MissCause.HISTORY_EDIT
             legit = True if curr.compaction_event else False
             ev = "previous message blocks rewritten (not a prefix of this turn) with a compaction event" \
                 if curr.compaction_event else \
                 "previous message blocks rewritten (not a prefix of this turn) without a compaction event"
             return Classification(cause, legit, ev, secondary, native_reason)
-        if role == "tool_results":
-            if curr.compaction_event:
-                # Context editing that clears old tool results is a compaction.
-                return Classification(MissCause.COMPACTION_REWRITE, True,
-                                      "earlier tool results cleared or rewritten with a compaction event",
-                                      secondary, native_reason)
-            return Classification(MissCause.TOOL_RESULT_MUTATION, False,
-                                  "an earlier tool result changed or was removed without a compaction event",
+    if role == "tool_results":
+        if curr.compaction_event:
+            # Context editing that clears old tool results is a compaction.
+            return Classification(MissCause.COMPACTION_REWRITE, True,
+                                  "earlier tool results cleared or rewritten with a compaction event",
                                   secondary, native_reason)
-        # user role divergence with no other cause: fall through to param/TTL checks.
-        secondary.append(MissCause.HISTORY_EDIT)
-
+        return Classification(MissCause.TOOL_RESULT_MUTATION, False,
+                              "an earlier tool result changed or was removed without a compaction event",
+                              secondary, native_reason)
+    # user role divergence with no other cause: fall through to param/TTL checks.
+    secondary.append(MissCause.HISTORY_EDIT)
     return None
 
 
