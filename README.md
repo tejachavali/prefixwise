@@ -1,5 +1,9 @@
 # Prefixwise
 
+[![CI](https://github.com/tejachavali/prefixwise/actions/workflows/ci.yml/badge.svg)](https://github.com/tejachavali/prefixwise/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/prefixwise)](https://pypi.org/project/prefixwise/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+
 **Your agent resends its whole conversation every turn, and one changed byte near the top means the provider charges full price for everything after it. Prefixwise tells you which byte, what it cost, and fixes the common causes for you.**
 
 Providers and engines report *how many* tokens missed the prompt cache, not *why*. Prefixwise sits between your agent and the model and does four things:
@@ -19,6 +23,11 @@ prefixwise run --optimize -- claude  # the same agent, with the proven fixes app
 ```
 
 No API key (Claude Code or Codex on a subscription)? `prefixwise import claude-code` reads the logs already on your machine.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/figures/architecture-dark.svg">
+  <img alt="How a request flows through Prefixwise" src="docs/figures/architecture-light.svg" width="100%">
+</picture>
 
 ## What you see
 
@@ -155,6 +164,6 @@ The full list, with what was and was not verified live: [guide](docs/GUIDE.md#li
 - [The full guide](docs/GUIDE.md): every way in, every cause, the command and environment reference, production notes.
 - [How it decides](docs/ALGORITHM.md): the decision procedure, the evidence behind each cause, and the invariants the tests check.
 - [Use cases](docs/USE_CASES.md), [data and metrics](docs/DATA.md), [architecture](docs/ARCHITECTURE.md), [changelog](CHANGELOG.md), [security](SECURITY.md).
-- Working on Prefixwise: `pip install -e ".[dev]" && python -m pytest tests -q`. Read [WORKLOG.md](WORKLOG.md) first.
+- Working on Prefixwise: `pip install -e ".[dev]" && python -m pytest tests -q`. Read [docs/WORKLOG.md](docs/WORKLOG.md) first.
 
 MIT. See LICENSE.

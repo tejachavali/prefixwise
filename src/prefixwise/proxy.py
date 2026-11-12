@@ -422,8 +422,8 @@ def _error(status: int, message: str) -> dict:
 
 class StreamAccumulator:
     """Reads an SSE stream line by line as it is relayed, and rebuilds the
-    parts of a non-streaming payload the classifier needs: id, usage, and
-    any diagnostics. Never alters a line it forwards.
+    parts of a non-streaming payload the classifier needs: id, model, usage,
+    and any diagnostics. Never alters a line it forwards.
 
     OpenAI / vLLM: usage arrives only when stream_options.include_usage is
     set, in a final chunk with empty choices. If the proxy injected that
@@ -456,6 +456,10 @@ class StreamAccumulator:
             event = json.loads(data)
         except ValueError:
             return True
+        return self.feed_event(event)
+
+    def feed_event(self, event) -> bool:
+        """Consume one decoded event (a dict). Returns False if it must not be forwarded."""
         if not isinstance(event, dict):
             return True
         if self.provider == "anthropic":
@@ -466,6 +470,8 @@ class StreamAccumulator:
             return True
         if event.get("id") and "id" not in self.payload:
             self.payload["id"] = event["id"]
+        if event.get("model") and "model" not in self.payload:
+            self.payload["model"] = event["model"]
         for key in ("prompt_cache_diagnostics", "diagnostics"):
             if isinstance(event.get(key), dict):
                 self.payload[key] = event[key]
@@ -487,6 +493,8 @@ class StreamAccumulator:
             return
         if resp.get("id"):
             self.payload["id"] = resp["id"]
+        if resp.get("model"):
+            self.payload["model"] = resp["model"]
         if isinstance(resp.get("prompt_cache_diagnostics"), dict):
             self.payload["prompt_cache_diagnostics"] = resp["prompt_cache_diagnostics"]
         if isinstance(resp.get("usage"), dict):
@@ -501,6 +509,8 @@ class StreamAccumulator:
             msg = event.get("message") or {}
             if msg.get("id"):
                 self.payload["id"] = msg["id"]
+            if msg.get("model"):
+                self.payload["model"] = msg["model"]
             for key in ("prompt_cache_diagnostics", "diagnostics"):
                 if isinstance(msg.get(key), dict):
                     self.payload[key] = msg[key]

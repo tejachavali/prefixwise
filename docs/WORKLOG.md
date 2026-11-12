@@ -1,6 +1,6 @@
 # WORKLOG: read this first
 
-Shared handoff between the agents working on Prefixwise. It says **what is being attempted, why, what to run, and what happens with each result**. `build.log` records what happened after the fact; this file records intent.
+Shared handoff between the agents working on Prefixwise. It says **what is being attempted, why, what to run, and what happens with each result**. Run records under `experiments/*/runs/` and the CHANGELOG record what happened after the fact; this file records intent. Paths here are relative to the repository root.
 
 - **Read** the "Now" section before doing anything.
 - **Append** an entry to the log at the bottom whenever you start, finish or change direction. Newest last. Never rewrite old entries.
