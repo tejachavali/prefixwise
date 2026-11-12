@@ -51,12 +51,22 @@ dev = ["pytest", "pyzmq>=25", "msgspec>=0.18", "prometheus-client", "openai", "a
 content-type = "text/markdown"
 fragments = [{path = "README.md"}]
 
+# Images first, to the raw file (a blob/ URL is a web page, not an image): HTML src/srcset (PyPI drops
+# <source>, so it shows the <img> fallback) and Markdown images.
+[[tool.hatch.metadata.hooks.fancy-pypi-readme.substitutions]]
+pattern = '(src|srcset)="((?:docs|experiments|benchmarks|examples)/[^"\s]+)"'
+replacement = '\1="https://raw.githubusercontent.com/tejachavali/prefixwise/main/\2"'
+
+[[tool.hatch.metadata.hooks.fancy-pypi-readme.substitutions]]
+pattern = '(!\[[^\]]*\])\(((?:docs|experiments|benchmarks|examples)/[^)\s]*)\)'
+replacement = '\1(https://raw.githubusercontent.com/tejachavali/prefixwise/main/\2)'
+
 [[tool.hatch.metadata.hooks.fancy-pypi-readme.substitutions]]
 pattern = '\]\(((?:docs|experiments|benchmarks|examples|deploy|src|tests)/[^)\s]*)\)'
 replacement = '](https://github.com/tejachavali/prefixwise/blob/main/\1)'
 
 [[tool.hatch.metadata.hooks.fancy-pypi-readme.substitutions]]
-pattern = '\]\(((?:SECURITY|CONTRIBUTING|CHANGELOG|LICENSE|WORKLOG)\.md)\)'
+pattern = '\]\(((?:SECURITY|CONTRIBUTING|CHANGELOG)\.md|LICENSE)\)'
 replacement = '](https://github.com/tejachavali/prefixwise/blob/main/\1)'
 
 [[tool.hatch.metadata.hooks.fancy-pypi-readme.substitutions]]
@@ -69,7 +79,7 @@ packages = ["src/prefixwise"]
 [tool.hatch.build.targets.sdist]
 # Source, tests and what the tests read; not CI config or project logs.
 include = ["src", "tests", "experiments", "examples", "docs", "README.md", "LICENSE", "CHANGELOG.md", "SECURITY.md", "pyproject.toml"]
-exclude = ["experiments/*/results"]
+exclude = ["experiments/*/results", "docs/WORKLOG.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

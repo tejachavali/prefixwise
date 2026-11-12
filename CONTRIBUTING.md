@@ -18,7 +18,7 @@ The runtime uses the Python standard library only. Please keep it that way; test
 - **One PR per change**, with tests. CI runs the suite on Python 3.10 to 3.13, plus the E1 mock and a Docker build.
 - **A classifier change needs a test with the exact request shapes that motivated it.** Shapes observed from real providers go in tests verbatim, with the date.
 - **Experiments are evidence, not targets.** Never change code to make an E1 or E4 run pass. A failed run is a finding: record it under `experiments/<name>/runs/` and fix the cause. "Adjusted until green" proves nothing.
-- **Read [`WORKLOG.md`](WORKLOG.md)** for what is in flight and why, and add an entry when you start something. `build.log` records outcomes.
+- **Read [`docs/WORKLOG.md`](docs/WORKLOG.md)** for what is in flight and why, and add an entry when you start something. Run records under `experiments/*/runs/` and the CHANGELOG record outcomes.
 
 ## Releasing
 

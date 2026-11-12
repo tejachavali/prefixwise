@@ -232,7 +232,7 @@ litellm_settings:
   callbacks: prefixwise.litellm_callback.prefixwise_callback
 ```
 
-Sessions come from LiteLLM's `litellm_session_id`, else `metadata={"session_id": ..., "task_id": ..., "agent_id": ...}`, else `user`. What is classified is the request LiteLLM actually sent the provider, after its translation and with the cache breakpoints it injects; Claude through Anthropic, Vertex AI or Bedrock is judged by Anthropic's rules and prices. Answers from LiteLLM's own response cache reached no provider and are not recorded. `wrap` covers `create` and `parse` (and `with_raw_response`), Anthropic's `beta.messages` too. Both record non-streamed calls for now (streams pass through unrecorded), never change a request (fixes are a proxy feature), and can never break a call: a recording failure is reported once and ignored.
+Sessions come from LiteLLM's `litellm_session_id`, else `metadata={"session_id": ..., "task_id": ..., "agent_id": ...}`, else `user`. What is classified is the request LiteLLM actually sent the provider, after its translation and with the cache breakpoints it injects; Claude through Anthropic, Vertex AI or Bedrock is judged by Anthropic's rules and prices. Answers from LiteLLM's own response cache reached no provider and are not recorded. `wrap` covers `create` and `parse` (and `with_raw_response`), Anthropic's `beta.messages` too, and records streamed calls: `stream=True` and the `.stream()` helpers, sync and async. A stream is recorded once, when it ends, and one left before its end is a failure row, as the proxy records a client that hangs up. On OpenAI Chat Completions, `wrap` asks for `stream_options.include_usage` when the caller has not set it, and keeps the extra usage-only chunk out of the caller's stream. The LiteLLM callback records non-streamed calls only for now. Neither changes the prompt (fixes are a proxy feature; the one field `wrap` adds is `include_usage`, above), and neither can break a call: a recording failure is reported once and ignored.
 
 **More: [docs/USE_CASES.md](USE_CASES.md)** walks through eight concrete scenarios: a bill that jumped, a CI gate on prompt changes, A/B-testing prompt versions per successful task, Anthropic TTL choice, self-hosted vLLM, and more.
 
@@ -491,7 +491,7 @@ Measured by [`benchmarks/bench.py`](../benchmarks/README.md) (results in [`bench
 
 ## Working on Prefixwise
 
-Agents and people working on this repo: read [`WORKLOG.md`](../WORKLOG.md) first. It has the current goal, why, what to run, and what happens with each result. `build.log` records outcomes.
+Agents and people working on this repo: read [`WORKLOG.md`](WORKLOG.md) first. It has the current goal, why, what to run, and what happens with each result. Run records under `experiments/*/runs/` and the CHANGELOG record outcomes.
 
 The flowcharts are drawn by code: when the request flow or the classifier's order changes, update `docs/figures/make_architecture.py`, run it, look at the result, and commit the SVGs. CI fails if a committed figure differs from what its script draws, or if the decision flowchart leaves out a cause the classifier can return (`tests/test_figures.py`).
 
