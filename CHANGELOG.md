@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- **How far a fix would take the hit rate.** The report gave avoidable tokens and dollars but not the question teams ask: is there room from here? It now adds "Fixing them would take the share served from cache from 74.6% to 87.1%", and the shareable block "87% from cache if fixed". It is (cached + avoidable) / prompt over the same requests: avoidable tokens are exactly the reusable prefix the cache did not serve on wasteful requests, so a fix moves them and nothing else. Checked against a real run: Claude Sonnet 4.6, 20,089 of 26,932 tokens cached (74.6%) with 3,375 avoidable predicts 87.1%, and the same agent with `--optimize` read 87.1%. From an inference provider asking whether there was room from 89% to 93%.
+- **How far a fix would take the hit rate.** The report gave avoidable tokens and dollars but not the question teams ask: is there room from here? It now adds, after the list of avoidable causes, "Fixing these would take the share served from cache from 74.6% to 87.1%; the rest is new content each turn, misses with a legitimate cause and misses whose cause is not known", and the shareable block "87% from cache if fixed" (rounded down, with a decimal when whole percents would hide the gain or read as a perfect cache). It is (cached + avoidable) / prompt over the same requests: avoidable tokens are exactly the reusable prefix the cache did not serve on wasteful requests, so a fix moves them and nothing else. Checked against a real run: Claude Sonnet 4.6, 20,089 of 26,932 tokens cached (74.6%) with 3,375 avoidable predicts 87.1%, and the same agent with `--optimize` read 87.1%.
 
 ## 0.11.8: 2026-11-12
 

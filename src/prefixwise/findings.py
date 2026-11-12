@@ -104,13 +104,28 @@ def hit_rate_if_fixed(s: dict) -> float | None:
 
 
 def ceiling_line(s: dict) -> str | None:
-    """'Fixing them would take the share served from cache from 74.6% to 87.1%.' None when there is
-    nothing avoidable."""
+    """'Fixing these would take the share served from cache from 74.6% to 87.1%; ...', said after the
+    list of avoidable causes. None when there is nothing avoidable."""
     now, fixed = s.get("cache_hit_rate"), s.get("cache_hit_rate_if_fixed")
     if now is None or fixed is None or not s.get("avoidable_tokens"):
         return None
-    return (f"Fixing them would take the share served from cache from {now:.1%} to {fixed:.1%}; "
-            "the rest is new content each turn and expected misses.")
+    return (f"Fixing these would take the share served from cache from {now:.1%} to {_pct_down(fixed, now, 1)}; "
+            "the rest is new content each turn, misses with a legitimate cause and misses whose cause "
+            "is not known.")
+
+
+def _pct_down(fixed: float, now: float, decimals: int = 0) -> str:
+    """The if-fixed share as a percentage, rounded down (a prediction is never rounded up into a
+    promise), with as many decimals as it takes, up to two, to be above the current share as
+    printed and not to read as a perfect cache when it is not one."""
+    import math
+
+    for d in range(decimals, 3):
+        v = math.floor(fixed * 100 * 10**d + 1e-9) / 10**d
+        text = f"{v:.{d}f}%"
+        if v > float(f"{now * 100:.{d}f}") and (fixed >= 1 or v < 100):  # above the share as printed
+            return text
+    return text
 
 
 def _share(v: float, total: float) -> str:
@@ -343,9 +358,6 @@ def render(f: dict, command: str = "serve", headline: bool = True) -> str:
                 waste_usd = f" ({_usd(s['avoidable_cost_usd'])}{', priced requests only' if partial else ''})"
             lines.append(f"Avoidable: {_n(s['avoidable_tokens'])} tokens{waste_usd}, "
                          f"{(s['avoidable_share'] or 0):.1%} of prompt tokens. Fix these, biggest first:")
-            ceiling = ceiling_line(s)
-            if ceiling:
-                lines.insert(len(lines) - 1, ceiling)
             for i, w in enumerate(f["waste"], 1):
                 cost = f", {_usd(w['avoidable_cost_usd'])}" if w["avoidable_cost_usd"] is not None else ""
                 lines.append(f"  {i}. {w['what'].capitalize()} ({_req(w['requests'])}, "
@@ -357,6 +369,9 @@ def render(f: dict, command: str = "serve", headline: bool = True) -> str:
                 if w.get("proxy_fix"):
                     lines.append(f"     Prefixwise can do it for you: prefixwise {command} --fix {w['proxy_fix']}"
                                  + (f" ({w['fix_status']})" if w.get("fix_status") else ""))
+            ceiling = ceiling_line(s)
+            if ceiling:
+                lines.append(ceiling)
         elif f["unexplained"] and sum(u["requests"] for u in f["unexplained"]) > (f.get("cache_not_reported") or 0):
             lines.append("No avoidable waste found among the misses whose cause is known.")
         elif f["unexplained"]:
@@ -445,7 +460,7 @@ def render_share(f: dict, since_label: str | None = None) -> str:
         w = f["waste"][0]
         cost = f" ({_usd(s['avoidable_cost_usd'])})" if s["requests_priced"] else ""
         lines.append(f"avoidable: {_n(s['avoidable_tokens'])} tokens{cost}, {(s['avoidable_share'] or 0):.0%} of the prompt"
-                     + (f", {s['cache_hit_rate_if_fixed']:.0%} from cache if fixed"
+                     + (f", {_pct_down(s['cache_hit_rate_if_fixed'], s['cache_hit_rate'])} from cache if fixed"
                         if s.get("cache_hit_rate_if_fixed") is not None and s.get("cache_hit_rate") is not None else ""))
         lines.append(f"top cause: {w['what']} ({_req(w['requests'])})")
         if w.get("fix"):
