@@ -76,3 +76,11 @@ def test_the_report_names_the_causes_before_the_ceiling(tmp_path):
     at = next(i for i, l in enumerate(lines) if l.startswith("Fixing these would take"))
     assert any(l.startswith("Avoidable:") for l in lines[:at]) and any(l.startswith("  1.") for l in lines[:at])
     assert "whose cause is not known" in lines[at]
+
+
+def test_a_headline_share_is_never_rounded_up_to_a_perfect_cache():
+    """Found by review: 99.6% read as "100% from cache" in the headlines."""
+    from prefixwise.findings import from_to, share_pct
+    assert share_pct(0.996) == "99%" and share_pct(1.0) == "100%" and share_pct(0.746) == "75%"
+    assert share_pct(0.99996, 1) == "99.9%" and share_pct(0.0) == "0%"
+    assert from_to(0.996, 1.0) == ("99%", "100%")  # and the pair agrees with the headline

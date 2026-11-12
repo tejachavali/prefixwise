@@ -114,6 +114,17 @@ def ceiling_line(s: dict) -> str | None:
             "is not known.")
 
 
+def share_pct(share: float, decimals: int = 0) -> str:
+    """A share as a percentage, rounded, but never up to 100% when it is not (99.6% is "99%")."""
+    import math
+
+    scale = 10 ** decimals
+    v = round(share * 100 * scale) / scale
+    if share < 1 and v >= 100:
+        v = math.floor(share * 100 * scale) / scale
+    return f"{v:.{decimals}f}%"
+
+
 def from_to(now: float | None, fixed: float | None, decimals: int = 0) -> tuple[str, str] | None:
     """The current and the if-fixed share, printed together at one precision: the current share
     rounded (never up to 100% when it is not), the if-fixed one rounded down (a prediction is never
@@ -125,9 +136,7 @@ def from_to(now: float | None, fixed: float | None, decimals: int = 0) -> tuple[
         return None
     for d in range(decimals, 3):
         scale = 10 ** d
-        n = round(now * 100 * scale) / scale
-        if now < 1 and n >= 100:
-            n = math.floor(now * 100 * scale) / scale
+        n = float(share_pct(now, d)[:-1])  # as the headline prints it
         f = math.floor(fixed * 100 * scale + 1e-9) / scale
         if f > n and (f < 100 or fixed >= 1):
             return f"{n:.{d}f}%", f"{f:.{d}f}%"
@@ -340,7 +349,7 @@ def render(f: dict, command: str = "serve", headline: bool = True) -> str:
         hit = s["cache_hit_rate"]
         head = f"{_req(s['requests'])}, {_n(s['prompt_tokens'])} prompt tokens"
         if hit is not None:
-            head += f", {hit:.0%} served from cache"
+            head += f", {share_pct(hit)} served from cache"
         partial = s["requests_priced"] and s["requests_priced"] < s["requests"]
         if s["requests_priced"]:
             head += f". Cost {_usd(s['cost_usd'])}"
@@ -445,7 +454,7 @@ def render_share(f: dict, since_label: str | None = None) -> str:
     if not s["requests"]:
         return "prefixwise: no requests recorded yet."
     lines = ["prefixwise" + (f" ({since_label})" if since_label else "")]
-    hit = f"{s['cache_hit_rate']:.0%} from cache" if s["cache_hit_rate"] is not None else "cache hit rate unknown"
+    hit = f"{share_pct(s['cache_hit_rate'])} from cache" if s["cache_hit_rate"] is not None else "cache hit rate unknown"
     head = f"{_req(s['requests'])}, {_n(s['prompt_tokens'])} prompt tokens, {hit}"
     if s["requests_priced"]:
         head += f", {_usd(s['cost_usd'])}"
