@@ -100,6 +100,29 @@ def _block_text(c) -> str:
     return _text(c.get("text") or c.get("content") or "") if isinstance(c, dict) else _text(c)
 
 
+def split(conv: list[dict]) -> tuple[bool, list[list[dict]]]:
+    """(agent trace?, the requests). An agent trace (the model's tool calls are in it) makes a
+    request at every model call: everything up to the next assistant message, which is appended
+    after the response. A chat makes one at every user message."""
+    body = [m for m in conv if m["role"] != "system"]
+    steps = any(m.get("tool_calls") for m in body)
+    turns: list[list[dict]] = []
+    cur: list[dict] = []
+    for m in body:
+        if steps and cur and m["role"] != "assistant" and cur[-1]["role"] == "assistant":
+            turns.append(cur)
+            cur = []
+        elif not steps and m["role"] == "user" and cur:
+            turns.append(cur)
+            cur = []
+        cur.append(m)
+    if cur:
+        turns.append(cur)
+    if steps and turns and all(m["role"] == "assistant" for m in turns[-1]):
+        turns[-2:] = [turns[-2] + turns[-1]] if len(turns) > 1 else []  # a reply alone is no request
+    return steps, turns
+
+
 class Conv(list):
     """A conversation (a list of messages) and the tools its agent sent, when the trace has them."""
     tools = None
@@ -113,9 +136,11 @@ def _arguments(value, max_chars: int) -> str:
             value = json.loads(value)
         except ValueError:
             return json.dumps({"raw": value[:max_chars]})
-    if isinstance(value, dict):
-        value = {k: (v[:max_chars] if isinstance(v, str) else v) for k, v in value.items()}
-    return json.dumps(value)
+    if value is None:
+        return "{}"
+    if not isinstance(value, dict):  # a template may expect an object
+        value = {"value": value}
+    return json.dumps({k: (v[:max_chars] if isinstance(v, str) else v) for k, v in value.items()})
 
 
 def _tool_calls(calls, max_chars: int) -> list[dict] | None:
@@ -173,14 +198,12 @@ def normalize(row: dict, max_chars: int) -> list[dict] | None:
                     msg["tool_calls"] = calls
                 if role == "tool" and isinstance(raw, dict) and raw.get("tool_call_id"):
                     msg["tool_call_id"] = str(raw["tool_call_id"])
-                if role and (text.strip() or calls):
+                if role and (text.strip() or calls or "tool_call_id" in msg):  # an empty result is a result
                     out.append(msg)
             if isinstance(row.get("system_prompt"), str) and row["system_prompt"].strip() and \
                     not any(m["role"] == "system" for m in out):
                 out.insert(0, {"role": "system", "text": row["system_prompt"][:max_chars * 4]})
-            users = sum(m["role"] == "user" for m in out)
-            calls = sum(m["role"] == "assistant" for m in out)
-            if users >= 2 or (users >= 1 and calls >= 2):
+            if any(m["role"] == "user" for m in out) and len(split(out)[1]) >= 2:  # two requests or more
                 conv = Conv(out)
                 conv.tools = _trace_tools(row)
                 return conv
@@ -259,23 +282,7 @@ class State:
         sys_text = next((m["text"] for m in conv if m["role"] == "system"), "You are a coding agent.")
         self.system = sys_text + "\nCurrent time: 2026-11-12T09:00:00Z."
         self.tools = copy.deepcopy(getattr(conv, "tools", None)) or _tools(rng)  # the trace's own tools
-        body = [m for m in conv if m["role"] != "system"]
-        # An agent trace (one task, then the model's tool calls and their results) makes a request at
-        # every model call: everything up to the next assistant message, which is appended after the
-        # response. A chat makes one at every user message, as before.
-        self.steps = sum(m["role"] == "user" for m in body) < 2
-        self.turns: list[list[dict]] = []  # per request: what is sent, then what is appended after
-        cur: list[dict] = []
-        for m in body:
-            if self.steps and cur and m["role"] != "assistant" and cur[-1]["role"] == "assistant":
-                self.turns.append(cur)
-                cur = []
-            elif not self.steps and m["role"] == "user" and cur:
-                self.turns.append(cur)
-                cur = []
-            cur.append(m)
-        if cur:
-            self.turns.append(cur)
+        self.steps, self.turns = split(conv)  # per request: what is sent, then what is appended after
         self.k = 0  # turns sent so far
         self.msgs: list[dict] = []
         self.calls = 0
@@ -322,6 +329,8 @@ class State:
 def mutate(state: State, change: str, rng: random.Random) -> bool:
     """Apply one change to the agent's state (it stays for later turns). False if not applicable."""
     if change == "tool_reserialize":
+        if len(state.tools) < 2:
+            return False
         order = list(range(len(state.tools)))
         while order == sorted(order):
             rng.shuffle(order)
@@ -331,8 +340,10 @@ def mutate(state: State, change: str, rng: random.Random) -> bool:
             state.tools.pop(rng.randrange(len(state.tools)))
         else:
             free = [w for w in WORDS if w not in {t["function"]["name"] for t in state.tools}]
-            state.tools.insert(rng.randrange(len(state.tools) + 1), _tools(rng)[0] | {})
-            state.tools[-1]["function"]["name"] = rng.choice(free) + "_x"
+            at = rng.randrange(len(state.tools) + 1)  # draws in the order the recorded runs made them
+            added = _tools(rng)[0]
+            state.tools.insert(at, added)
+            added["function"]["name"] = rng.choice(free) + "_x"  # the added tool, not whichever is last
     elif change == "volatile_system":
         head = state.system.rsplit("Current time: ", 1)[0]
         state.system = head + "Current time: 2026-11-12T%02d:%02d:%02dZ." % (
