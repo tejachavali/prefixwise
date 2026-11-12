@@ -326,7 +326,9 @@ class Collector:
                                     "previous_response_id points to a response this proxy never saw;"
                                     " the cached prefix cannot be reconstructed",
                                     native_reason=native_reason)
-        elif concurrent and not stitched and curr.cached_tokens < prompt_tokens * 0.5:
+        elif concurrent and not stitched and not new_thread and curr.cached_tokens < prompt_tokens * 0.5:
+            # (A new conversation was compared with another conversation's turn only to find its
+            # lane: it has no previous turn of its own to have overlapped.)
             # It could not have read what the compared turn wrote (that was still being written), and
             # the record of an earlier turn may be the one that arrived late: no cause is claimed.
             concurrent_verdict = True
@@ -344,7 +346,9 @@ class Collector:
         prev_facts = parent_facts if state is not None else self.session_facts.get(session_id)
         if prev is None or stitched:
             prev_facts = None  # a stitched branch: the lane's latest request may be another branch
-        new_cause, detail, why = detail_for(result.cause.value, prev_facts, facts,
+        # No detail on a turn left unjudged (in flight with its previous turn, or continuing one never
+        # seen): its timing is not a gap, and a detail could promote it to a cause.
+        new_cause, detail, why = (None, None, "") if (concurrent_verdict or unknown_parent) else detail_for(result.cause.value, prev_facts, facts,
                                             prompt_tokens=prompt_tokens, cached_tokens=cached,
                                             evicted_blocks=curr.evicted_blocks if rec.engine_caches == 1 and restored else None,
                                             engine=rec.engine is not None,
@@ -365,7 +369,7 @@ class Collector:
                                     f"turn recomputes its prompt; no cause applies (classifier: {result.cause.value})",
                                     [], native_reason)
 
-        div = first_divergence(prev.blocks, curr.blocks) if prev is not None else None
+        div = first_divergence(prev.blocks, curr.blocks, engine=curr.engine) if prev is not None else None
         priced_model = str(rec.response_model or rec.model)
         # Waste is capped at what the previous turn left in the cache, except for a breakpoint left
         # early (the cache served all it held): there the waste is the stable prefix it left out.

@@ -349,12 +349,15 @@ def _first_change(prev: RequestSnapshot, curr: RequestSnapshot, secondary: list,
     # The conversation grows by appending: the previous turn's blocks must be an unchanged prefix of
     # this turn's. The first block that is not, in the order they were sent (messages and tool
     # results interleaved), is where the cache stopped matching, and its kind names the cause.
-    pc = [b for b in prev.blocks if b.role in _APPEND_ROLES]
-    cc = [b for b in curr.blocks if b.role in _APPEND_ROLES]
+    walked = ("messages", "tool_results")  # "user" blocks (wire records only) are judged apart, below
+    pc = [b for b in prev.blocks if b.role in walked]
+    cc = [b for b in curr.blocks if b.role in walked]
     i = next((k for k, (a, b) in enumerate(zip(pc, cc)) if a.role != b.role or not _same(a, b)), None)
     if i is None and len(pc) > len(cc):
         i = len(cc)  # earlier blocks removed (truncated history)
     if i is None:
+        if not _role_unchanged("user", prev_by_role.get("user", []), curr_by_role.get("user", [])):
+            secondary.append(MissCause.HISTORY_EDIT)  # a changed user block alone: no cause of its own
         return None
     role = pc[i].role
     if role == "messages":
@@ -386,8 +389,6 @@ def _first_change(prev: RequestSnapshot, curr: RequestSnapshot, secondary: list,
         return Classification(MissCause.TOOL_RESULT_MUTATION, False,
                               "an earlier tool result changed or was removed without a compaction event",
                               secondary, native_reason)
-    # user role divergence with no other cause: fall through to param/TTL checks.
-    secondary.append(MissCause.HISTORY_EDIT)
     return None
 
 
@@ -590,7 +591,7 @@ def classify(prev: RequestSnapshot | None, curr: RequestSnapshot,
        (gap <= (ttl if ttl is not None else MIN_PROVIDER_TTL_SECONDS)):
         window = f"TTL {ttl:.0f}s" if ttl is not None else f"shortest provider TTL {MIN_PROVIDER_TTL_SECONDS}s"
         return Classification(MissCause.ROUTING_MISS, None,
-                              f"blocks and params equal, gap {gap:.0f}s within {window}, "
+                              f"inferred: blocks and params equal, gap {gap:.0f}s within {window}, "
                               "no eviction evidence, nothing read from cache",
                               secondary, native_reason)
     if curr.prompt_tokens > 0 and gap is not None and ttl is None:
@@ -621,9 +622,16 @@ def classify_first_divergence(changed_role: str | None, *, model_changed: bool =
     return MissCause.UNKNOWN
 
 
-def first_divergence(prev: list, curr: list) -> dict | None:
-    """Locate the first block, in prefix order, where two requests differ."""
+def first_divergence(prev: list, curr: list, engine: bool = False) -> dict | None:
+    """Locate the first block, in prefix order, where two requests differ. Behind a self-hosted
+    engine the chat template renders the system prompt before the tools, as `_first_change` reads
+    them; the index stays the block's position in the request."""
+    if engine:
+        rank = {"system": 0, "system_dynamic": 0, "tools": 1}
+        prev = sorted(prev, key=lambda b: rank.get(b.role, 2))
+        curr = sorted(curr, key=lambda b: rank.get(b.role, 2))
     for i, (a, b) in enumerate(zip(prev, curr)):
+        i = getattr(a, "index", i)
         if a.role != b.role:
             return {"index": i, "role": f"{a.role} -> {b.role}", "kind": "block order changed"}
         if a.raw == b.raw:

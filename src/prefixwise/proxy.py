@@ -137,6 +137,7 @@ def _extract_blocks_raw(body: dict, provider: str) -> list[tuple[str, object]]:
     # One block per tool: the classifier compares the tool multiset, so
     # a reordered tool list is TOOL_RESERIALIZE, not a catalog change.
     tools = body.get("tools") or []
+    leading = 0  # leading system/developer messages taken as the system prompt (OpenAI shape)
     if provider == "anthropic":
         for tool in tools:
             blocks.append(("tools", tool))
@@ -147,14 +148,16 @@ def _extract_blocks_raw(body: dict, provider: str) -> list[tuple[str, object]]:
             blocks.append(("tools", tool))
         if body.get("system") is not None:
             blocks.append(("system", body["system"]))
-        # System and developer messages are the system prompt (OpenAI: tools, then developer /
-        # system, then the conversation), each its own block, in order.
+        # The leading system and developer messages are the system prompt (OpenAI: tools, then
+        # developer / system, then the conversation), each its own block, in order. One that comes
+        # later (an agent's mid-conversation reminder) is rendered where it was sent: it is part of
+        # the conversation, and appending one is growth, not a system prompt edit.
         for m in body.get("messages", []) or []:
-            if m.get("role") in _SYSTEM_ROLES:
-                blocks.append(("system", m.get("content")))
-    for m in body.get("messages", []) or []:
-        if m.get("role") in _SYSTEM_ROLES and provider != "anthropic":
-            continue
+            if not (isinstance(m, dict) and m.get("role") in _SYSTEM_ROLES):
+                break
+            blocks.append(("system", m.get("content")))
+            leading += 1
+    for m in (body.get("messages", []) or [])[leading:]:
         blocks.append(("tool_results" if _is_tool_result(m, provider) else "messages", m))
     return blocks
 

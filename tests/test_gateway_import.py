@@ -153,3 +153,24 @@ def test_the_cli_refuses_to_count_a_log_twice(tmp_path, monkeypatch, capsys):
     assert "Imported 1 requests from 1 a gateway log" in out or "Imported 1 requests" in out
     assert main(["import", "gateway", "--path", str(log)]) == 1
     assert "would count it twice" in capsys.readouterr().err
+
+
+def test_a_parallel_subagent_of_another_type_is_a_new_conversation_not_unknown(tmp_path):
+    """Two conversations in one session, with different system prompts, in flight at once. The
+    second has no previous turn of its own: it is compared with the first only to find its lane,
+    so the in-flight rule must not make it `unknown` (found by the spec audit)."""
+    rng = random.Random(8)
+    main_agent = _body(rng, "openai", 3, 2, None)
+    sub = _body(rng, "openai", 2, 1, None)
+    sub["messages"][0]["content"] = "You are a test-writing subagent. " * 80
+    lines = [
+        {"ts": T0, "duration_ms": 20_000, "request": main_agent, "headers": {"x-session-id": "s"},
+         "response": _response("openai", 1, 20_000, 0)},
+        {"ts": T0 + 2, "duration_ms": 30_000, "request": sub, "headers": {"x-session-id": "s"},
+         "response": _response("openai", 2, 9_000, 0)},
+    ]
+    log = tmp_path / "g.jsonl"
+    log.write_text("\n".join(json.dumps(x) for x in lines))
+    entries, _ = read_log(log)
+    replay(entries, str(tmp_path / "i.db"))
+    assert [r[1] for r in _rows(str(tmp_path / "i.db"))] == ["first_write", "first_write"]

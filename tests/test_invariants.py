@@ -227,12 +227,12 @@ def test_one_change_is_named_and_a_full_read_is_never_a_miss(seed, rng, provider
     assert miss.cause is expected, (seed, mutation.__name__, miss.cause, miss.evidence)
     assert miss.legit is (False if expected in WASTE else True if expected in LEGIT else None)
     # 2. The ledger's "first changed" column agrees with the cause about where the prefix broke.
-    div = first_divergence(prev.blocks, _snap(nxt, provider, 1, 0).blocks)
-    if expected in ROLE_OF and not engine:
+    div = first_divergence(prev.blocks, _snap(nxt, provider, 1, 0).blocks, engine=engine)
+    if expected in ROLE_OF:
         assert div is not None and ROLE_OF[expected] in div["role"], (seed, expected, div)
     # 3. A partial read (half of the prefix): still the change, not a hit.
     part = classify(prev, _snap(nxt, provider, 20_400, 10_000, engine=engine))
-    assert part.cause is expected
+    assert part.cause is expected and part.legit is miss.legit
     # 4. The cache served the whole reusable prefix: no miss is claimed, the change stays secondary.
     full = classify(prev, _snap(nxt, provider, 20_400, 20_000, engine=engine))
     assert full.cause is MissCause.NONE and expected in full.secondary and full.legit is None
@@ -270,6 +270,8 @@ def test_engine_evidence_decides_only_when_the_prompt_did_not_change(seed):
     if applied:  # a changed prompt is the cause, whatever the engine saw
         changed, expected = applied
         v = classify(prev, _snap(changed, "openai", 20_400, 0, engine=True, evicted_blocks=12))
+        assert v.cause is expected
+        v = classify(prev, _snap(changed, "openai", 20_400, 0, engine=True, routed=("rank 0", "rank 1", 40)))
         assert v.cause is expected
 
 
@@ -338,6 +340,8 @@ def test_with_two_changes_the_earliest_one_is_named(seed):
     v = classify(_snap(body, provider, 20_000, 0, engine=engine), _snap(nxt, provider, 20_400, 0, engine=engine))
     assert v.cause in CHANGE_CAUSES, (seed, v)
     assert ROLE_OF[v.cause] == role, (seed, first.__name__, second.__name__, role, v.cause)
+    div = first_divergence(_snap(body, provider, 1, 0).blocks, _snap(nxt, provider, 1, 0).blocks, engine=engine)
+    assert div is not None and role in div["role"], (seed, role, div)
 
 
 # -- the fingerprints every verdict rests on ---------------------------------------------------
@@ -381,3 +385,39 @@ def test_hashes_ignore_exactly_what_they_should(seed):
     s3 = FP.fingerprint_block("system", 0, "You are thorough. " + stamp(1, 1, 1))
     assert s1.masked == s2.masked
     assert s3.masked != s1.masked
+
+
+@pytest.mark.parametrize("seed", range(100))
+def test_a_mid_conversation_developer_message_is_growth_not_a_system_edit(seed):
+    """OpenAI-style agents append developer or system reminders mid-conversation. The provider
+    renders them where they were sent, so appending one is growth; only the leading system and
+    developer messages are the system prompt."""
+    rng = random.Random(60_000 + seed)
+    body = _body(rng, "openai", rng.randint(1, 4), rng.randint(2, 4), "2026-11-12T09:00:00Z")
+    nxt = _append_turn(body)
+    nxt["messages"].insert(len(nxt["messages"]) - 1, {"role": rng.choice(["developer", "system"]),
+                                                      "content": "Reminder: keep answers short."})
+    prev = _snap(body, "openai", 20_000, 0)
+    for cached in (0, 20_000):
+        v = classify(prev, _snap(nxt, "openai", 20_400, cached))
+        assert v.cause not in CHANGE_CAUSES and not (set(v.secondary) & CHANGE_CAUSES), (seed, cached, v)
+    # and the next turn, which repeats the reminder where it was, is still growth
+    after = _append_turn(nxt)
+    v = classify(_snap(nxt, "openai", 20_400, 0), _snap(after, "openai", 20_800, 0))
+    assert v.cause not in CHANGE_CAUSES, (seed, v)
+
+
+@pytest.mark.parametrize("seed", range(200))
+def test_avoidable_never_exceeds_what_was_unread_of_the_shorter_prompt(seed):
+    rng = random.Random(70_000 + seed)
+    prev_p = rng.randint(1, 10**6)
+    curr_p = rng.randint(1, 10**6)
+    cached = rng.randint(0, curr_p)
+    held = rng.choice([None, rng.randint(1, 10**6)])
+    for legit in (False, True, None):
+        avoid = avoidable_for_turn(legit, curr_p, cached, prev_p, held)
+        assert 0 <= avoid <= max(0, min(prev_p, curr_p) - cached)
+        if held:
+            assert avoid <= max(0, held - cached)
+        if legit is not False:
+            assert avoid == 0
