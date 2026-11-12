@@ -36,23 +36,31 @@ def test_nothing_to_say_without_usage_or_waste():
     assert ceiling_line(s) is None
 
 
-def test_the_short_figure_never_hides_the_gain_or_promises_a_perfect_cache():
-    """Found by review: whole percents showed 75% now and 75% if fixed, or 100% for 99.95%."""
-    from prefixwise.findings import _pct_down
-    assert _pct_down(0.7490, 0.7460) == "74.9%"   # 75% and 75% would hide the gain
-    assert _pct_down(0.9995, 0.9955) == "99.9%"   # never rounded up into a perfect cache
-    assert _pct_down(0.871, 0.746) == "87%"
-    assert _pct_down(1.0, 0.9) == "100%"
-    assert _pct_down(0.29, 0.1) == "29%"           # float noise does not round 29 down to 28
+def test_the_two_shares_are_printed_so_the_gain_shows_and_nothing_is_overstated():
+    """Found by review: 75% now and 75% if fixed; 74.9% if fixed under a headline of 75%; 99.995%
+    printed as 100.0%; a gain two decimals cannot show printed as none, or as a loss."""
+    from prefixwise.findings import from_to
+    assert from_to(0.746, 0.749) == ("74.6%", "74.9%")       # whole percents would hide it
+    assert from_to(20_089 / 26_932, (20_089 + 3_375) / 26_932, 1) == ("74.6%", "87.1%")  # the real run
+    assert from_to(0.746, 0.871) == ("75%", "87%")
+    assert from_to(0.99996, 0.99998) is None                  # 99.99% to 99.99% would show no gain
+    assert from_to(0.99996, 1.0) == ("99%", "100%")
+    assert from_to(0.746, 0.74601) is None                    # too small to show: left out
+    assert from_to(0.10, 0.29) == ("10%", "29%")              # float noise does not make 29 a 28
+    assert from_to(None, 0.5) is None
     rng = random.Random(9)
-    for _ in range(5000):  # never below or equal to the current share as the block prints it
-        now = rng.random() * 0.999
+    for _ in range(20_000):
+        now = rng.random()
         fixed = now + rng.random() * (1 - now)
-        if fixed - now > 2e-4:  # two decimals resolve it
-            text = _pct_down(fixed, now)
-            d = len(text[:-1].partition(".")[2])
-            assert float(text[:-1]) > float(f"{now * 100:.{d}f}") and float(text[:-1]) < 100
-            assert float(text[:-1]) <= fixed * 100 + 1e-9  # rounded down, never up
+        pair = from_to(now, fixed, rng.choice([0, 1]))
+        if pair is None:
+            assert fixed - now < 0.0002  # only a gain under two decimals' resolution is left out
+            continue
+        n, f = float(pair[0][:-1]), float(pair[1][:-1])
+        assert f > n                                   # the gain always shows
+        assert f <= fixed * 100 + 1e-9                 # never rounded up
+        assert n < 100 or now >= 1                     # never a perfect cache that is not one
+        assert f < 100 or fixed >= 1
 
 
 def test_the_report_names_the_causes_before_the_ceiling(tmp_path):

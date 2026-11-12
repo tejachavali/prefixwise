@@ -105,27 +105,33 @@ def hit_rate_if_fixed(s: dict) -> float | None:
 
 def ceiling_line(s: dict) -> str | None:
     """'Fixing these would take the share served from cache from 74.6% to 87.1%; ...', said after the
-    list of avoidable causes. None when there is nothing avoidable."""
-    now, fixed = s.get("cache_hit_rate"), s.get("cache_hit_rate_if_fixed")
-    if now is None or fixed is None or not s.get("avoidable_tokens"):
+    list of avoidable causes. None when there is nothing avoidable, or too little to show."""
+    pair = from_to(s.get("cache_hit_rate"), s.get("cache_hit_rate_if_fixed"), 1) if s.get("avoidable_tokens") else None
+    if pair is None:
         return None
-    return (f"Fixing these would take the share served from cache from {now:.1%} to {_pct_down(fixed, now, 1)}; "
+    return (f"Fixing these would take the share served from cache from {pair[0]} to {pair[1]}; "
             "the rest is new content each turn, misses with a legitimate cause and misses whose cause "
             "is not known.")
 
 
-def _pct_down(fixed: float, now: float, decimals: int = 0) -> str:
-    """The if-fixed share as a percentage, rounded down (a prediction is never rounded up into a
-    promise), with as many decimals as it takes, up to two, to be above the current share as
-    printed and not to read as a perfect cache when it is not one."""
+def from_to(now: float | None, fixed: float | None, decimals: int = 0) -> tuple[str, str] | None:
+    """The current and the if-fixed share, printed together at one precision: the current share
+    rounded (never up to 100% when it is not), the if-fixed one rounded down (a prediction is never
+    rounded up into a promise), with as many decimals as it takes, up to two, for the second to be
+    above the first. None when the gain is too small to show that way."""
     import math
 
+    if now is None or fixed is None:
+        return None
     for d in range(decimals, 3):
-        v = math.floor(fixed * 100 * 10**d + 1e-9) / 10**d
-        text = f"{v:.{d}f}%"
-        if v > float(f"{now * 100:.{d}f}") and (fixed >= 1 or v < 100):  # above the share as printed
-            return text
-    return text
+        scale = 10 ** d
+        n = round(now * 100 * scale) / scale
+        if now < 1 and n >= 100:
+            n = math.floor(now * 100 * scale) / scale
+        f = math.floor(fixed * 100 * scale + 1e-9) / scale
+        if f > n and (f < 100 or fixed >= 1):
+            return f"{n:.{d}f}%", f"{f:.{d}f}%"
+    return None
 
 
 def _share(v: float, total: float) -> str:
@@ -460,8 +466,8 @@ def render_share(f: dict, since_label: str | None = None) -> str:
         w = f["waste"][0]
         cost = f" ({_usd(s['avoidable_cost_usd'])})" if s["requests_priced"] else ""
         lines.append(f"avoidable: {_n(s['avoidable_tokens'])} tokens{cost}, {(s['avoidable_share'] or 0):.0%} of the prompt"
-                     + (f", {_pct_down(s['cache_hit_rate_if_fixed'], s['cache_hit_rate'])} from cache if fixed"
-                        if s.get("cache_hit_rate_if_fixed") is not None and s.get("cache_hit_rate") is not None else ""))
+                     + (", {} to {} from cache if fixed".format(*pair)
+                        if (pair := from_to(s.get("cache_hit_rate"), s.get("cache_hit_rate_if_fixed"))) else ""))
         lines.append(f"top cause: {w['what']} ({_req(w['requests'])})")
         if w.get("fix"):
             lines.append(f"fix: {w['fix']}")
