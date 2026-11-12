@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- **OpenRouter keeps its sticky routing through Prefixwise.** OpenRouter sends a conversation back to the provider that holds its cache by the body `session_id` ([its caching guide](https://openrouter.ai/docs/guides/best-practices/prompt-caching)), and agents such as OpenHands send one for that reason. Prefixwise removed a client's body `session_id` on the way to every hosted API, since most reject unknown fields, so through Prefixwise such an agent lost OpenRouter's stickiness, its cache missed, and the miss was blamed on routing. A client's own `session_id` now reaches an upstream on openrouter.ai unchanged (`PREFIXWISE_FORWARD_SESSION_ID=1` for another gateway that reads it); other hosted APIs still never get one. From a conversation with an inference provider that serves through OpenRouter.
+- **`prompt_cache_key` and OpenAI's `user` group turns.** With no session header or body `session_id`, all traffic was one session. A `prompt_cache_key` (OpenAI's per-conversation cache key, which OpenRouter also routes by) now names the session, and failing that an end-user id (Anthropic `metadata.user_id`, as before, or OpenAI `user`), whose conversations are still told apart by their opening message. Behind OpenRouter, on the provider's own servers, this is what tells its users' conversations apart, if OpenRouter forwards either field.
+
 ## 0.11.7: 2026-11-11
 
 For anyone running Prefixwise in front of vLLM or SGLang: fixes from a review of every vLLM and
