@@ -150,9 +150,11 @@ def avoidable_for_turn(legit: bool | None, prompt_tokens: int, cached_tokens: in
     have been reused: the uncached tail after the breakpoint is not
     this turn's waste.
     """
-    if legit is not False:
+    if legit is not False or not prev_prompt_tokens:
+        # Without the previous turn's usage, how much of it was reusable is not known: claiming this
+        # whole prompt would count appended content as waste.
         return 0
-    reusable = min(prev_prompt_tokens, prompt_tokens) if prev_prompt_tokens else prompt_tokens
+    reusable = min(prev_prompt_tokens, prompt_tokens)
     if prev_held_tokens:
         reusable = min(reusable, prev_held_tokens)
     return max(0, reusable - cached_tokens)

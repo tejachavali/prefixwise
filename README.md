@@ -162,6 +162,7 @@ The full list, with what was and was not verified live: [guide](docs/GUIDE.md#li
 ## More
 
 - [The full guide](docs/GUIDE.md): every way in, every cause, the command and environment reference, production notes.
+- [How it decides](docs/ALGORITHM.md): the decision procedure, the evidence behind each cause, and the invariants the tests check.
 - [Use cases](docs/USE_CASES.md), [data and metrics](docs/DATA.md), [architecture](docs/ARCHITECTURE.md), [changelog](CHANGELOG.md), [security](SECURITY.md).
 - Working on Prefixwise: `pip install -e ".[dev]" && python -m pytest tests -q`. Read [docs/WORKLOG.md](docs/WORKLOG.md) first.
 

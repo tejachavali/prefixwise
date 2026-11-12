@@ -89,6 +89,60 @@ def bill(ledger, since: float | None = None, until: float | None = None) -> dict
     return out
 
 
+def hit_rate_if_fixed(s: dict) -> float | None:
+    """The share of prompt tokens served from the cache had every avoidable miss been fixed:
+    (cached + avoidable) / prompt, over the same requests. Avoidable tokens are, by definition, the
+    part of each wasteful request's reusable prefix the cache did not serve, so fixing the cause
+    moves exactly them from uncached to cached; everything else (new content each turn, legitimate
+    misses, unexplained ones) stays as it is. A prediction: measured, a fix realised 97.5% to 99.9%
+    of what was predicted (experiments/e4), and a real run predicted at 87.1% read 87.1% with the
+    fixes on (experiments/demo/2026-11-10-optimize-real-run.md). None without usage."""
+    prompt, cached, avoidable = s.get("prompt_tokens") or 0, s.get("cached_tokens") or 0, s.get("avoidable_tokens") or 0
+    if prompt <= 0:
+        return None
+    return min(1.0, (cached + avoidable) / prompt)
+
+
+def ceiling_line(s: dict) -> str | None:
+    """'Fixing these would take the share served from cache from 74.6% to 87.1%; ...', said after the
+    list of avoidable causes. None when there is nothing avoidable, or too little to show."""
+    pair = from_to(s.get("cache_hit_rate"), s.get("cache_hit_rate_if_fixed"), 1) if s.get("avoidable_tokens") else None
+    if pair is None:
+        return None
+    return (f"Fixing these would take the share served from cache from {pair[0]} to {pair[1]}; "
+            "the rest is new content each turn, misses with a legitimate cause and misses whose cause "
+            "is not known.")
+
+
+def share_pct(share: float, decimals: int = 0) -> str:
+    """A share as a percentage, rounded, but never up to 100% when it is not (99.6% is "99%")."""
+    import math
+
+    scale = 10 ** decimals
+    v = round(share * 100 * scale) / scale
+    if share < 1 and v >= 100:
+        v = math.floor(share * 100 * scale) / scale
+    return f"{v:.{decimals}f}%"
+
+
+def from_to(now: float | None, fixed: float | None, decimals: int = 0) -> tuple[str, str] | None:
+    """The current and the if-fixed share, printed together at one precision: the current share
+    rounded (never up to 100% when it is not), the if-fixed one rounded down (a prediction is never
+    rounded up into a promise), with as many decimals as it takes, up to two, for the second to be
+    above the first. None when the gain is too small to show that way."""
+    import math
+
+    if now is None or fixed is None:
+        return None
+    for d in range(decimals, 3):
+        scale = 10 ** d
+        n = float(share_pct(now, d)[:-1])  # as the headline prints it
+        f = math.floor(fixed * 100 * scale + 1e-9) / scale
+        if f > n and (f < 100 or fixed >= 1):
+            return f"{n:.{d}f}%", f"{f:.{d}f}%"
+    return None
+
+
 def _share(v: float, total: float) -> str:
     p = v / total
     return "<1%" if 0 < p < 0.005 else f"{p:.0%}"
@@ -249,10 +303,12 @@ def findings(ledger, since: float | None = None, until: float | None = None,
         not_reported = conn.execute("SELECT COUNT(*) FROM entries WHERE " + " AND ".join(clauses), args).fetchone()[0]
     errors = metrics.query(ledger, ["requests_failed"], by="error", **window)
     statuses = metrics.query(ledger, ["requests_failed"], by="status", **window)
-    return {"summary": {k: s[k] for k in ("requests", "requests_failed", "prompt_tokens", "cached_tokens",
-                                          "cache_hit_rate", "avoidable_tokens", "avoidable_share",
-                                          "cost_usd", "avoidable_cost_usd", "requests_priced",
-                                          "tasks_successful", "tokens_per_successful_task")},
+    summary = {k: s[k] for k in ("requests", "requests_failed", "prompt_tokens", "cached_tokens",
+                                 "cache_hit_rate", "avoidable_tokens", "avoidable_share",
+                                 "cost_usd", "avoidable_cost_usd", "requests_priced",
+                                 "tasks_successful", "tokens_per_successful_task")}
+    summary["cache_hit_rate_if_fixed"] = hit_rate_if_fixed(summary)
+    return {"summary": summary,
             "waste": waste, "expected": expected, "unexplained": unexplained,
             "rejected_credentials": sum(x["requests_failed"] or 0 for x in statuses if x["status"] in (401, 403)),
             "failures": [{"error": e["error"], "requests": e["requests_failed"]}
@@ -293,7 +349,7 @@ def render(f: dict, command: str = "serve", headline: bool = True) -> str:
         hit = s["cache_hit_rate"]
         head = f"{_req(s['requests'])}, {_n(s['prompt_tokens'])} prompt tokens"
         if hit is not None:
-            head += f", {hit:.0%} served from cache"
+            head += f", {share_pct(hit)} served from cache"
         partial = s["requests_priced"] and s["requests_priced"] < s["requests"]
         if s["requests_priced"]:
             head += f". Cost {_usd(s['cost_usd'])}"
@@ -328,6 +384,9 @@ def render(f: dict, command: str = "serve", headline: bool = True) -> str:
                 if w.get("proxy_fix"):
                     lines.append(f"     Prefixwise can do it for you: prefixwise {command} --fix {w['proxy_fix']}"
                                  + (f" ({w['fix_status']})" if w.get("fix_status") else ""))
+            ceiling = ceiling_line(s)
+            if ceiling:
+                lines.append(ceiling)
         elif f["unexplained"] and sum(u["requests"] for u in f["unexplained"]) > (f.get("cache_not_reported") or 0):
             lines.append("No avoidable waste found among the misses whose cause is known.")
         elif f["unexplained"]:
@@ -395,7 +454,7 @@ def render_share(f: dict, since_label: str | None = None) -> str:
     if not s["requests"]:
         return "prefixwise: no requests recorded yet."
     lines = ["prefixwise" + (f" ({since_label})" if since_label else "")]
-    hit = f"{s['cache_hit_rate']:.0%} from cache" if s["cache_hit_rate"] is not None else "cache hit rate unknown"
+    hit = f"{share_pct(s['cache_hit_rate'])} from cache" if s["cache_hit_rate"] is not None else "cache hit rate unknown"
     head = f"{_req(s['requests'])}, {_n(s['prompt_tokens'])} prompt tokens, {hit}"
     if s["requests_priced"]:
         head += f", {_usd(s['cost_usd'])}"
@@ -415,7 +474,9 @@ def render_share(f: dict, since_label: str | None = None) -> str:
     if f["waste"]:
         w = f["waste"][0]
         cost = f" ({_usd(s['avoidable_cost_usd'])})" if s["requests_priced"] else ""
-        lines.append(f"avoidable: {_n(s['avoidable_tokens'])} tokens{cost}, {(s['avoidable_share'] or 0):.0%} of the prompt")
+        lines.append(f"avoidable: {_n(s['avoidable_tokens'])} tokens{cost}, {(s['avoidable_share'] or 0):.0%} of the prompt"
+                     + (", {} to {} from cache if fixed".format(*pair)
+                        if (pair := from_to(s.get("cache_hit_rate"), s.get("cache_hit_rate_if_fixed"))) else ""))
         lines.append(f"top cause: {w['what']} ({_req(w['requests'])})")
         if w.get("fix"):
             lines.append(f"fix: {w['fix']}")
