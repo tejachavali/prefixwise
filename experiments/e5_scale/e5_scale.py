@@ -431,7 +431,10 @@ def main(argv=None) -> int:
         names = get_dataset_split_names(args.dataset, args.config)
         print("splits:", names)
         split = args.split or names[0]
-        row = next(iter(load_dataset(args.dataset, args.config, split=split, streaming=True)))
+        row = next(iter(load_dataset(args.dataset, args.config, split=split, streaming=True)), None)
+        if row is None:
+            print(f"{split} has no rows")
+            return 1
         print(f"first row of {split}:", json.dumps(shape(row), indent=1))
         print("parses as a conversation:", bool(normalize(row, args.max_chars)))
         return 0
