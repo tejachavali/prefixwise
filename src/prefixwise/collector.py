@@ -326,7 +326,9 @@ class Collector:
                                     "previous_response_id points to a response this proxy never saw;"
                                     " the cached prefix cannot be reconstructed",
                                     native_reason=native_reason)
-        elif concurrent and not stitched and not new_thread and curr.cached_tokens < prompt_tokens * 0.5:
+        elif (concurrent and not stitched and not new_thread
+              and curr.cached_tokens < 0.5 * (min(prev.prompt_tokens, prompt_tokens) if prev.prompt_tokens
+                                             else prompt_tokens)):
             # (A new conversation was compared with another conversation's turn only to find its
             # lane: it has no previous turn of its own to have overlapped.)
             # It could not have read what the compared turn wrote (that was still being written), and

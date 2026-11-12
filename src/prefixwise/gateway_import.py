@@ -23,7 +23,8 @@ a response with usage.
   start time     start_time, startTime, started_at, timestamp, ts, created_at, time   (unix s/ms or ISO 8601)
   end time       end_time, endTime, completed_at, finished_at   (or start + latency_ms / duration_ms / duration)
   headers        request_headers, headers   (session ids: X-Prefixwise-Session-Id, x-session-id, ...)
-  status         status, status_code   (default 200)
+  first byte     ttft_ms, time_to_first_token_ms, completion_start_time   (optional; otherwise the end)
+  status         status, status_code   (a number; "success"/"ok" is 200, any other text a failure; default 200)
   provider       provider   (otherwise inferred: Anthropic's message shape, else OpenAI's)
 
 Prompt text is read from the log to fingerprint it and is never stored: the ledger holds the same
@@ -46,6 +47,8 @@ END_KEYS = ("end_time", "endtime", "completed_at", "finished_at")
 LATENCY_MS_KEYS = ("latency_ms", "duration_ms")
 LATENCY_S_KEYS = ("duration", "latency")
 HEADER_KEYS = ("request_headers", "headers")
+TTFT_MS_KEYS = ("ttft_ms", "time_to_first_token_ms")
+FIRST_BYTE_KEYS = ("completion_start_time", "completionstarttime", "first_token_time")
 STATUS_KEYS = ("status", "status_code")
 
 
@@ -98,7 +101,8 @@ def parse_time(value) -> float | None:
     if value is None or isinstance(value, bool):
         return None
     if isinstance(value, (int, float)):
-        return float(value) / 1000.0 if value > 1e11 else float(value)
+        v = float(value)
+        return v / 1e9 if v > 1e17 else v / 1e6 if v > 1e14 else v / 1e3 if v > 1e11 else v  # ns, us, ms, s
     if isinstance(value, str):
         text = value.strip()
         try:
@@ -113,6 +117,21 @@ def parse_time(value) -> float | None:
             when = when.replace(tzinfo=_dt.timezone.utc)
         return when.timestamp()
     return None
+
+
+def _status(value) -> int:
+    """A logged status: a number (or numeric text) as is; "success"/"ok" is 200; other text
+    ("failure", "error") is a failure; absent is 200."""
+    if value is None:
+        return 200
+    if isinstance(value, bool):
+        return 200 if value else 500
+    if isinstance(value, (int, float)):
+        return int(value)
+    text = str(value).strip().lower()
+    if text.isdigit():
+        return int(text)
+    return 200 if text in ("success", "succeeded", "ok", "completed") else 500
 
 
 def _provider(entry: dict, body: dict, response: dict) -> str:
@@ -156,13 +175,22 @@ def read_log(path: str | os.PathLike) -> tuple[list[dict], int]:
                     end = start + (float(ms) / 1000.0 if isinstance(ms, (int, float)) else
                                    float(s) if isinstance(s, (int, float)) else 0.0)
                 headers = _get(raw, HEADER_KEYS)
-                status = _get(raw, STATUS_KEYS)
+                status = _status(_get(raw, STATUS_KEYS))
+                ttft = _get(raw, TTFT_MS_KEYS)
+                first = parse_time(_get(raw, FIRST_BYTE_KEYS))
+                if first is None and isinstance(ttft, (int, float)) and not isinstance(ttft, bool):
+                    first = start + float(ttft) / 1000.0
+                timed = _get(raw, END_KEYS + LATENCY_MS_KEYS + LATENCY_S_KEYS) is not None
                 entries.append({"start": start, "end": max(start, end), "body": body, "response": response,
                                 "provider": _provider(raw, body, response),
                                 "headers": {str(k).lower(): str(v) for k, v in headers.items()}
                                 if isinstance(headers, dict) else {},
-                                "status": int(status) if isinstance(status, (int, float)) and not isinstance(status, bool)
-                                else 200,
+                                "status": status,
+                                # When the answer began: the cache entry existed from then on.
+                                "first": min(max(first, start), max(start, end)) if first is not None else max(start, end),
+                                # A log without durations says nothing about overlap: its requests are
+                                # replayed one after another, never as in flight together.
+                                "timed": timed,
                                 "line": f"{f.name}:{n}"})
     return entries, bad
 
@@ -176,10 +204,14 @@ def replay(entries: list[dict], ledger_path: str, *, engine: str | None = None, 
     stats = {"imported": 0, "failed": 0, "first": None, "last": None}
     events = []
     for i, e in enumerate(entries):
-        # At equal times a response lands before the next request starts, except a request's own
-        # response, which comes after its start (a log with no end time: start == end).
-        events.append((e["start"], 1, i))
-        events.append((e["end"], 0 if e["end"] > e["start"] else 2, i))
+        if not e.get("timed", True):  # no durations: start, first byte, end at once, one after another
+            events += [(e["start"], 1, i, 0), (e["start"], 1, i, 1), (e["start"], 1, i, 2)]
+            continue
+        # At equal times a response lands before the next request starts, except a request's own,
+        # which comes after its start.
+        events.append((e["start"], 1, i, 0))
+        events.append((e.get("first", e["end"]), 0 if e.get("first", e["end"]) > e["start"] else 1, i, 1))
+        events.append((e["end"], 0 if e["end"] > e["start"] else 1, i, 2))
     events.sort()
     with _replay_clock(clock):
         # Every setting explicit (empty, not None), so no PREFIXWISE_* variable of a live deployment
@@ -188,33 +220,44 @@ def replay(entries: list[dict], ledger_path: str, *, engine: str | None = None, 
                                 hmac_key=hmac_key, engine=engine or "", kv_events="", fixes=(), otel="",
                                 collector_url="", prices=prices)
         ctxs: dict[int, dict] = {}
-        for t, kind, i in events:
-            clock.now = t
-            e = entries[i]
-            if kind == 1:  # the request reaches the proxy
-                body = {k: v for k, v in e["body"].items() if k not in ("stream", "stream_options")}
-                api = "responses" if e["provider"] == "openai" and is_responses_body(body) else "chat"
-                try:
-                    ctx = proxy.prepare(e["provider"], body, e["headers"], api=api)
-                except Exception:  # noqa: BLE001 - a malformed logged body: skip it, like the proxy's 400
-                    stats["failed"] += 1
-                    continue
-                ctx["span_start"] = t
-                ctxs[i] = ctx
-                continue
-            ctx = ctxs.pop(i, None)
-            if ctx is None:
-                continue
-            ctx["span_end"] = t
-            proxy.response_started(ctx)
-            if e["status"] >= 400:
-                proxy.record_failure(ctx, e["status"], e["response"])
+        try:
+            _run(events, entries, proxy, clock, ctxs, stats, is_responses_body)
+        finally:
+            proxy.close()
+    return stats
+
+
+def _run(events, entries, proxy, clock, ctxs, stats, is_responses_body) -> None:
+    for t, _order, i, step in events:
+        clock.now = t
+        e = entries[i]
+        if step == 1:  # the answer began: the request's cache entry exists
+            if i in ctxs:
+                proxy.response_started(ctxs[i])
+            continue
+        if step == 0:  # the request reaches the proxy
+            body = {k: v for k, v in e["body"].items() if k not in ("stream", "stream_options")}
+            api = "responses" if e["provider"] == "openai" and is_responses_body(body) else "chat"
+            try:
+                ctx = proxy.prepare(e["provider"], body, e["headers"], api=api)
+            except Exception:  # noqa: BLE001 - a malformed logged body: skip it, like the proxy's 400
                 stats["failed"] += 1
                 continue
-            _, entry = proxy.finalize_safely(ctx, e["status"], e["response"])
-            if entry is not None:
-                stats["imported"] += 1
-                stats["first"] = e["start"] if stats["first"] is None else min(stats["first"], e["start"])
-                stats["last"] = t if stats["last"] is None else max(stats["last"], t)
-        proxy.close()
-    return stats
+            ctx["span_start"] = t
+            ctxs[i] = ctx
+            continue
+        ctx = ctxs.pop(i, None)
+        if ctx is None:
+            continue
+        ctx["span_end"] = t
+        if e["status"] >= 400:
+            proxy.record_failure(ctx, e["status"], e["response"])
+            stats["failed"] += 1
+            continue
+        _, entry = proxy.finalize_safely(ctx, e["status"], e["response"])
+        if entry is None:
+            stats["failed"] += 1
+            continue
+        stats["imported"] += 1
+        stats["first"] = e["start"] if stats["first"] is None else min(stats["first"], e["start"])
+        stats["last"] = t if stats["last"] is None else max(stats["last"], t)

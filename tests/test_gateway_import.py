@@ -152,7 +152,9 @@ def test_the_cli_refuses_to_count_a_log_twice(tmp_path, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "Imported 1 requests from 1 a gateway log" in out or "Imported 1 requests" in out
     assert main(["import", "gateway", "--path", str(log)]) == 1
-    assert "would count it twice" in capsys.readouterr().err
+    assert "would count its requests twice" in capsys.readouterr().err
+    assert main(["import", "gateway", "--path", str(log), "--ledger", "other.db"]) == 0
+    assert main(["import", "gateway", "--path", str(log), "--ledger", "other.db"]) == 1  # --ledger alone is no bypass
 
 
 def test_a_parallel_subagent_of_another_type_is_a_new_conversation_not_unknown(tmp_path):
@@ -174,3 +176,51 @@ def test_a_parallel_subagent_of_another_type_is_a_new_conversation_not_unknown(t
     entries, _ = read_log(log)
     replay(entries, str(tmp_path / "i.db"))
     assert [r[1] for r in _rows(str(tmp_path / "i.db"))] == ["first_write", "first_write"]
+
+
+
+def test_failure_statuses_in_words_are_failures(tmp_path):
+    from prefixwise.gateway_import import _status
+    assert [_status(v) for v in (None, 200, "200", "success", "OK", "failure", "error", "500", 429)] == \
+        [200, 200, 200, 200, 200, 500, 500, 500, 429]
+
+
+def test_without_durations_requests_are_not_invented_as_overlapping(tmp_path):
+    """Two sessions' first requests logged in the same second, no end time or latency: nothing says
+    they were in flight together, so no in-flight detail (sent_before_cache_written) is claimed."""
+    rng = random.Random(9)
+    a, b = _body(rng, "openai", 3, 2, None), _body(rng, "openai", 3, 2, None)
+    b["tools"], b["messages"][0] = a["tools"], a["messages"][0]  # the same shared prefix
+    lines = [{"ts": T0, "request": a, "headers": {"x-session-id": "s1"}, "response": _response("openai", 1, 20_000, 0)},
+             {"ts": T0, "request": b, "headers": {"x-session-id": "s2"}, "response": _response("openai", 2, 20_000, 0)}]
+    log = tmp_path / "g.jsonl"
+    log.write_text("\n".join(json.dumps(x) for x in lines))
+    entries, _ = read_log(log)
+    replay(entries, str(tmp_path / "i.db"))
+    with Ledger(str(tmp_path / "i.db")).reader() as conn:
+        details = [r[0] for r in conn.execute("SELECT detail FROM entries")]
+    assert "sent_before_cache_written" not in details
+
+
+def test_since_keeps_the_context_before_the_window(tmp_path, monkeypatch, capsys):
+    """The first turn inside the window is compared with its earlier turn, as live, not called a first write."""
+    from prefixwise.cli import main
+    rng = random.Random(10)
+    body = _body(rng, "openai", 3, 2, "2026-11-12T09:00:00Z")
+    nxt = _append_turn(body)
+    nxt["tools"] = list(reversed(nxt["tools"]))
+    lines = [{"ts": T0, "duration_ms": 500, "request": body, "headers": {"x-session-id": "s"},
+              "response": _response("openai", 1, 20_000, 0)},
+             {"ts": T0 + 60, "duration_ms": 500, "request": nxt, "headers": {"x-session-id": "s"},
+              "response": _response("openai", 2, 20_400, 0)}]
+    log = tmp_path / "g.jsonl"
+    log.write_text("\n".join(json.dumps(x) for x in lines))
+    monkeypatch.chdir(tmp_path)
+    assert main(["import", "gateway", "--path", str(log), "--since", str(int(T0 + 30))]) == 0
+    rows = _rows(str(tmp_path / "prefixwise-gateway.db"))
+    assert [r[1] for r in rows] == ["tool_reserialize"]
+
+
+def test_a_previous_turn_without_usage_makes_nothing_avoidable():
+    from prefixwise.ledger import avoidable_for_turn
+    assert avoidable_for_turn(False, 30_000, 0, 0) == 0 and avoidable_for_turn(False, 30_000, 0, None) == 0

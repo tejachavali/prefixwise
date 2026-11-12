@@ -52,21 +52,25 @@ without one they are plain SHA-256 like the rest:
 | canonical | the content with keys sorted at every depth, fixed separators, NFC unicode, and JSON Schema set-arrays (`required`, a list `type`) sorted | the same content, possibly serialized differently |
 | masked | the canonical form with dates, times, UUIDs, hex ids, numbers and any token containing a digit (`v2`, `gpt4`) replaced by placeholders | the same words: only volatile values differ |
 
-No prompt text is kept. The hashes live in memory for the lane's next turn and are never exported.
+No prompt text is kept. The hashes live in memory for the lane's next turn; when a remote collector
+(`--collector-url`) or a record log (Redis) is configured, they travel with the turn's record to it,
+so set `PREFIXWISE_HMAC_KEY` there too if short blocks must not be guessable.
 
 **Usage** is the provider's report: `prompt` tokens, `cached` tokens read from the cache, and,
 where reported, tokens `written` to it. From these:
 
-- **Reusable prefix** `R = min(prompt_prev, prompt_curr)`. Where the previous turn's cache content is
-  known (Anthropic, or any provider that reports writes), `R` is capped at what that turn left in the
-  cache: `cached_prev + written_prev`. What was never cached cannot be expected back.
+- **Reusable prefix** `R = min(prompt_prev, prompt_curr)` (this prompt when the previous turn has no
+  usage). Where the previous turn's cache content is known (Anthropic, or any provider that reports
+  writes) and is not zero, `R` is capped at what that turn left in the cache: `cached_prev +
+  written_prev`. What was never cached cannot be expected back.
 - **Served all**: `cached_curr >= R`, or short of `R` by less than one reporting unit (the read
   slack): reads are reported in whole blocks (an engine whose events showed its block size: that size
   plus 16 tokens of generation tail; any other provider but Anthropic: 128 tokens), never more than an
   eighth of `R`; Anthropic's counts are exact.
 - **Half read**: where only usage decides between a hit and a miss (2.3), the test is
-  `cached_curr >= min(prompt_prev, prompt_curr) / 2`, without the cap on `R`. The engine join uses
-  half of this prompt (section 3).
+  `cached_curr >= min(prompt_prev, prompt_curr) / 2` (half of this prompt when the previous turn has
+  no usage), without the cap on `R`. The engine join's own hit test uses half of this prompt
+  (section 3).
 
 ## 2. The decision procedure
 
@@ -98,9 +102,11 @@ the cause:**
 | a message | `history_edit` (`compaction_rewrite` with a compaction event) | yes (no) | an earlier message was rewritten, not appended to |
 | a tool result | `tool_result_mutation` (`compaction_rewrite` with a compaction event) | yes (no) | a tool's output was re-rendered or removed after it was sent |
 
-One exception: when the previous request was a single message and this one replaces it, it is a
-new conversation on the same tools and system prompt (an agent's side call), not an edit; it is
-judged by what the cache read, and the edit is kept as a secondary cause.
+One exception: when the previous request was a single message, this one replaces it, and no
+compaction event came with it, it is a new conversation on the same tools and system prompt (an
+agent's side call), not an edit. The edit is kept as a secondary cause and the walk goes on to the
+tool results: a changed tool result is still named; otherwise the turn is judged by what the cache
+read.
 
 A change is then weighed against what the cache actually did:
 
@@ -121,7 +127,7 @@ is not scored against the verdict, since it answers another question.
 | The cache served all of `R` | `none`, except on Anthropic when the cache served everything the previous turn held and a stable part of that turn, at least the minimum cacheable size, lay after its last breakpoint and was sent uncached again: `breakpoint_misplaced` |
 | A prompt-affecting parameter changed (thinking, tool choice, reasoning, output format, chat-template arguments, LoRA adapter, multimodal processing options, RAG documents) | `param_rendered` |
 | Below the provider's minimum cacheable length | `below_min_prefix` |
-| Anthropic with no `cache_control` anywhere, or a breakpoint after a volatile block | `breakpoint_misplaced` |
+| Anthropic with no `cache_control` anywhere (a breakpoint after a volatile block is a rule of the classifier too, but the proxy never sets that fact today) | `breakpoint_misplaced` |
 | No usage at all | `unknown` |
 | The server reports no cached-token count (Ollama, most llama.cpp builds), and no engine evidence | `unknown` |
 | Half read (section 1) | `none` |
@@ -144,7 +150,7 @@ Two facts the proxy saw in flight replace 2.1 to 2.3 altogether; no detail is at
 | Fact | Verdict |
 |---|---|
 | `previous_response_id` names a response this proxy never saw | `unknown`: the prefix cannot be reconstructed |
-| The request was sent before the previous turn of its own conversation finished (not a new conversation), and read less than half its prompt | `unknown`: it could not have read that turn's write |
+| The request was sent more than the clock skew (1 s, `PREFIXWISE_CLOCK_SKEW`) before the previous turn of its own conversation finished, it is not a new conversation or a stitched Responses turn, and it read less than half of the shorter of the two prompts | `unknown`: it could not have read that turn's write |
 
 Two details can change the cause 2.1 to 2.3 gave:
 
@@ -180,8 +186,9 @@ On a model with sliding-window or Mamba layers, which engines free without event
 is never claimed; a confirmed eviction still is.
 
 Only a `Restored` verdict can become `host_restored`. The join and the classifier use different hit
-thresholds (half of this prompt, half of `R`), so a turn the classifier calls a hit may be one the join
-judged a miss; its removed blocks were never restored and must not be labelled so.
+thresholds (the join: half of this prompt; the classifier: half of the shorter prompt, section 1), so a
+turn the classifier calls a hit may be one the join judged a miss; its removed blocks were never
+restored and must not be labelled so.
 
 ## 4. Evidence tiers
 
@@ -203,7 +210,9 @@ The tier is in the evidence text; it is not a separate field.
   breakpoint left early (2.3) counts the stable part it left uncached, `min(prompt_prev, prompt_curr)
   - cached_curr`, since that part is exactly what a later breakpoint would have cached.
 - **Avoidable dollars**: those tokens at the difference between the rate actually paid for them and
-  the cache-read rate, from a dated price table.
+  the cache-read rate, from a dated price table (the input rate when the request's usage does not say
+  what was paid). With no usage on the previous turn, nothing is avoidable: how much was reusable is
+  not known.
 - **The bill** of every priced request is split into cache reads, new input, cache writes and output.
 - The prediction is checked: when a fix is turned on, the saving realised is measured against the
   saving predicted (97.5% on vLLM and 99.9% on Claude for `canonical_tools`; 106.8% for
@@ -211,7 +220,9 @@ The tier is in the evidence text; it is not a separate field.
 
 ## 6. Invariants
 
-These must hold for every input; `tests/test_invariants.py` checks them on generated conversations
+These must hold for every well-formed request (a valid Anthropic, OpenAI Chat or Responses body;
+roles the wire formats do not define are not compared); `tests/test_invariants.py` checks them on
+generated conversations
 (Anthropic and OpenAI request shapes, hosted and engine prefix orders, real tool schemas and tool
 results):
 
@@ -219,8 +230,9 @@ results):
    schema's `required` reordered, a tool added, removed or edited, a timestamp in the system prompt,
    a reworded system prompt, an edited earlier message, an edited tool result) produces its cause and
    its legitimacy when nothing was read, and when half was read.
-2. **A full read is never a miss.** When the cache served all of `R`, the verdict is `none` (or the
-   Anthropic early-breakpoint case), and any change is kept as a secondary cause.
+2. **A full read is never a miss.** For a turn of a known conversation (not a new one, not a first
+   write), when the cache served all of `R`, the verdict is `none` (or the Anthropic early-breakpoint
+   case), and any change is kept as a secondary cause.
 3. **Appending is never a change.** A turn that only appends (including a system or developer reminder
    mid-conversation) never yields a change cause, primary or secondary.
 4. **The earliest change wins.** With two changes, the cause is the one in the block earliest in
@@ -234,7 +246,8 @@ results):
 7. **Engine evidence decides only an unchanged prompt.** An eviction or a routing miss from events
    never replaces a cause named by a changed block.
 8. **Model switch and first turn win** over every rule of 2.1 to 2.3 (2.4's two in-flight facts can
-   still leave a turn unjudged).
+   still leave a turn unjudged, and an engine without a prefix cache still turns a miss into
+   `no_prefix_cache`).
 9. **Deterministic.** The same two requests and usage give the same verdict.
 10. **Served-all is monotonic.** If a read counts as full, every larger read does.
 11. **The hashes ignore exactly what they should.** Key order at any depth leaves canonical and masked
@@ -243,8 +256,9 @@ results):
 
 Elsewhere in the suite: only a `Restored` verdict becomes `host_restored`
 (`tests/test_host_restored.py`); Prefixwise forwards the fields routers and gateways route by
-(`tests/test_routing_headers.py`, `tests/test_openrouter_session.py`); a gateway log replayed with
-`prefixwise import gateway` gives the live proxy's verdict on every request, and a parallel subagent of
+(`tests/test_routing_headers.py`, `tests/test_openrouter_session.py`); a gateway log with start and end
+times (or latency) replayed with `prefixwise import gateway` gives the live proxy's verdict on every
+request (without them, requests are replayed one after another and none is taken as in flight), and a parallel subagent of
 another type is a new conversation, not an unjudged one (`tests/test_gateway_import.py`).
 
 Not covered by the generated cases yet: the Responses API request shape, the engine order with
@@ -255,7 +269,10 @@ Anthropic's request shape, and the Anthropic early-breakpoint case (each has han
 - **Per block, not per token.** A change at the end of a long system prompt is reported for the
   whole block; the avoidable count comes from usage, so it is still exact.
 - **Masking is broad.** Any token containing a digit is treated as volatile, so a system prompt that
-  changes `v2` to `v3` reads as `volatile_system`, not `system_edit`.
+  changes `v2` to `v3` reads as `volatile_system`, not `system_edit`. Dates with and without a year
+  (`Nov 12`, `12. November`) are masked. Text is serialized unescaped (`café` stays `café`), but a
+  control character is escaped (`\u001b`) and that escape is masked, so a change inside a terminal
+  colour code is not seen as wording.
 - **Thresholds.** "At least half of `R` read" separates a hit from a miss where the evidence is only
   usage; the read slack absorbs block rounding. A read between the two is a partial hit.
 - **Inferred causes can be wrong.** `routing_miss` on a hosted API and `evicted` behind one engine

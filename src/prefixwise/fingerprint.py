@@ -83,8 +83,10 @@ _DATE_RE = re.compile(
     rf"|{_MONTH}\s+{_DAY}\s+{_CLOCK}(?:\s+{_ZONE})?\s+\d{{4}}"  # Sun Nov  9 04:10:00 UTC 2026 (`date`)
     rf"|{_MONTH}\s+{_DAY},?\s+\d{{4}}"                          # Nov 9, 2026
     rf"|{_DAY}\.?\s+{_MONTH},?\s+\d{{4}}"                      # 09 Nov 2026, 9. November 2026
+    rf"|{_MONTH}\s+{_DAY}(?![\d:])"                            # November 12, Oct 31 (no year: a date
+    rf"|{_DAY}\.?\s+{_MONTH}"                                  # 12 November     that changes daily)
     rf")(?:(?:[T ]|,\s*|\s+at\s+)?{_CLOCK})?{_TZ}", re.IGNORECASE)
-_DATE_HINT_RE = re.compile(r"\d{4}|\d{1,2}[-/]\d{1,2}")  # cheap test before the date pattern runs
+_DATE_HINT_RE = re.compile(r"\d")  # cheap test before the date pattern runs: every date has a digit
 _TIME_RE = re.compile(rf"\b{_CLOCK}{_TZ}", re.IGNORECASE)
 _UUID_RE = re.compile(r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b")
 _HEX_ID_RE = re.compile(r"\b[0-9a-fA-F]{16,}\b")

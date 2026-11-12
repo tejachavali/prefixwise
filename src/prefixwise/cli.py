@@ -809,18 +809,33 @@ def _import_gateway(log_path: str, ledger_path: str, args, since: float | None) 
     from .gateway_import import read_log, replay
 
     entries, bad = read_log(log_path)
-    if since is not None:
-        entries = [e for e in entries if e["start"] >= since]
-    if not entries:
+    in_window = [e for e in entries if since is None or e["start"] >= since]
+    if not in_window:
         print(f"prefixwise: no usable requests in {log_path}" + (f" ({bad} lines without a request body, a "
               "response or a start time)" if bad else ""), file=sys.stderr)
         return None
-    if os.path.exists(ledger_path) and not getattr(args, "ledger", None):
-        print(f"prefixwise: {ledger_path} exists; importing the same log twice would count it twice. "
-              "Remove it, or pass --ledger for another file.", file=sys.stderr)
+    if os.path.exists(ledger_path) and not getattr(args, "append", False):
+        print(f"prefixwise: {ledger_path} exists; importing a log into it again would count its requests "
+              "twice (each replayed request gets a new id). Pass --ledger for another file, or --append if "
+              "this log holds only requests not imported before.", file=sys.stderr)
         return None
+    from .ledger import Ledger
+    with Ledger(ledger_path).reader() as conn:
+        before = conn.execute("SELECT COALESCE(MAX(id), 0) FROM entries").fetchone()[0]
+    # The whole log is replayed, so the first turns in the window are compared with their earlier
+    # turns as live; only rows inside the window are kept.
     st = replay(entries, ledger_path, engine=getattr(args, "engine", None),
                 prices=getattr(args, "prices", None) or os.environ.get("PREFIXWISE_PRICES"))
+    if since is not None:
+        led = Ledger(ledger_path)
+        with led._lock:
+            led.conn.execute("DELETE FROM entries WHERE id > ? AND recorded_at < ?", (before, since))
+            led.conn.commit()
+        with led.reader() as conn:
+            kept = conn.execute("SELECT COUNT(*), MIN(recorded_at), MAX(recorded_at) FROM entries WHERE id > ?",
+                                (before,)).fetchone()
+        st["imported"], st["first"], st["last"] = kept[0], kept[1], kept[2]
+    entries = in_window
     if bad:
         print(f"prefixwise: skipped {bad} line(s) without a request body, a response or a start time", file=sys.stderr)
     return {"logs": 1, "imported": st["imported"], "in_window": len(entries), "skipped_known": 0,
@@ -1088,6 +1103,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--engine", choices=["vllm", "sglang"],
                    help="gateway: the log is from a self-hosted engine (its prefix order puts the system prompt first)")
     p.add_argument("--prices", metavar="FILE", help="gateway: your own rates file (default: $PREFIXWISE_PRICES)")
+    p.add_argument("--append", action="store_true",
+                   help="gateway: add to an existing ledger (only for a log whose requests were not imported before)")
     p.add_argument("--since", metavar="WHEN", help="only requests after this: unix seconds, or 24h, 7d")
     p.add_argument("--json", action="store_true", help="import counts as JSON, no report")
     p.add_argument("--ledger", help="SQLite ledger file (default: ./prefixwise-<source>.db, apart from a "
