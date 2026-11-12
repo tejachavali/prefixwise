@@ -344,7 +344,7 @@ Each detail is claimed only when all of its conditions hold; otherwise there is 
 
 | Header | Effect |
 |---|---|
-| `X-Prefixwise-Session-Id` | Groups turns into a session (also: `session_id` body field, the client's own `x-session-id`, or Anthropic `metadata.user_id`). Without it, all traffic is one session. A client's `x-session-id` is forwarded unchanged, since routers with session affinity route on it; Prefixwise never sends one of its own. |
+| `X-Prefixwise-Session-Id` | Groups turns into a session (also: `session_id` body field, the client's own `x-session-id`, or an end-user id: Anthropic `metadata.user_id`, OpenAI `user`). Without any of them, all traffic is one session. A gateway that knows its own conversation or customer key can send it here. A client's `x-session-id` is forwarded unchanged, since routers with session affinity route on it; Prefixwise never sends one of its own. |
 | `X-Prefixwise-Task-Id` | Joins the request to a task for tokens per successful task (also: `task_id` body field). |
 | `X-Prefixwise-Agent-Id` | Labels the agent or prompt version, for `report --by agent_id`. |
 | `X-Prefixwise-Compaction-Event: 1` | This turn follows a context compaction. |

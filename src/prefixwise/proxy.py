@@ -224,8 +224,14 @@ _MISSING = object()  # a field the client did not send
 _INNER_KEYS = {"prompt_cache_options": ("comparison_response_id",), "diagnostics": ("previous_message_id",),
                "stream_options": ("include_usage",), "vllm_xargs": ("kv_cache_report_mode",)}
 
+def _short_id(value) -> str | None:
+    """A client's own id field, when it is a usable string (not too long to key a session)."""
+    return value if isinstance(value, str) and value and len(value) <= MAX_ID_CHARS else None
+
+
 # Body fields Prefixwise reads but upstream APIs do not accept. Stripped
-# before forwarding (OpenAI rejects unknown fields with a 400). vLLM, and
+# before forwarding (OpenAI rejects unknown fields with a 400), except a client's own
+# session_id to OpenRouter, which routes by it (_takes_session_id). vLLM, and
 # SGLang with --kv-events, get Prefixwise's session id: they stamp it on KV events.
 PREFIXWISE_FIELDS = ("session_id", "agent_id", "task_id", "prefixwise_compaction_event",
                      "prefixwise_upstream_session_id")
@@ -909,8 +915,14 @@ class PrefixwiseProxy:
         given = (headers.get("x-prefixwise-session-id") or body.get("session_id")
                  or headers.get("thread-id") or headers.get("session-id")  # Codex
                  or client_key)
-        session_is_user = not given and bool((body.get("metadata") or {}).get("user_id"))
-        session_id = str(given or (body.get("metadata") or {}).get("user_id") or self.default_session)
+        # An end-user id last: Anthropic's metadata.user_id, OpenAI's user. Not a prompt_cache_key:
+        # a key that changes mid-conversation is the miss cache_key_changed names, and as a session
+        # name it would read as a new conversation. Not in `prefixwise check`, whose scenarios are
+        # named through default_session and must not merge on a shared user id.
+        user_id = None if self.check_mode else (
+            (body.get("metadata") or {}).get("user_id") or _short_id(body.get("user")))
+        session_is_user = not given and bool(user_id)
+        session_id = str(given or user_id or self.default_session)
         task_id = headers.get("x-prefixwise-task-id") or body.get("task_id")
         forward_body = {k: v for k, v in body.items() if k not in PREFIXWISE_FIELDS}
         # E1-open retry turns: a harness-only session id, used for the mock provider's cache lane.
@@ -935,6 +947,10 @@ class PrefixwiseProxy:
             forward_body[field] = value
             return True
         engine = self.engine_for(provider)
+        if engine is None and "session_id" in body and self._takes_session_id(provider):
+            # OpenRouter routes a conversation to the provider that holds its cache by the body
+            # session_id: removing it would cost the hits Prefixwise then reports as routing misses.
+            forward_body["session_id"] = body["session_id"]
         if (engine == "sglang" and api == "chat" and self.engine_events is not None and self.sglang_join
                 and body.get("n") in (None, 1)):  # n > 1: the choices' stores would mix
             if inject("session_id", session_id):
@@ -1369,6 +1385,16 @@ class PrefixwiseProxy:
             return None
         key = "anthropic" if ctx.get("provider") == "anthropic" else "openai"
         return self.upstreams.get(key, self.upstream_url) or None
+
+    def _takes_session_id(self, provider: str) -> bool:
+        """Does this provider's upstream read a body session_id as its own field? OpenRouter does
+        (sticky routing to the provider that holds the conversation's cache); most hosted APIs
+        reject unknown fields. PREFIXWISE_FORWARD_SESSION_ID=1 says yes for another gateway."""
+        if os.environ.get("PREFIXWISE_FORWARD_SESSION_ID") == "1":
+            return True
+        key = "anthropic" if provider == "anthropic" else "openai"
+        host = urllib.parse.urlsplit(self.upstreams.get(key, self.upstream_url) or "").hostname or ""
+        return host == "openrouter.ai" or host.endswith(".openrouter.ai")
 
     def target(self, provider: str, path: str) -> str:
         """The upstream URL for a request path like /v1/chat/completions."""
