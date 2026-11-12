@@ -247,4 +247,5 @@ def test_since_windows_by_when_a_request_ended_and_counts_only_the_window(tmp_pa
     assert main(["import", "gateway", "--path", str(log), "--since", str(int(since)), "--json"]) == 0
     out = json.loads(capsys.readouterr().out)
     assert out["imported"] == out["in_window"] == 2 and out["failed"] == 0
+    assert out["first"] >= since  # a request that started before the window does not stretch it
     assert len(_rows(str(tmp_path / "prefixwise-gateway.db"))) == 2
