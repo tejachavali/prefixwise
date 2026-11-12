@@ -4,7 +4,7 @@
 
 For anyone running Prefixwise in front of OpenRouter: a client's own `session_id` now reaches
 OpenRouter, which routes a conversation back to the provider holding its cache by it, so Prefixwise
-no longer costs those hits and then blames routing. Without a session id, OpenAI's `user` now groups
+no longer risks those hits and then blames routing for the misses. Without a session id, OpenAI's `user` now groups
 turns.
 
 - **OpenRouter keeps its sticky routing through Prefixwise.** OpenRouter sends a conversation back to the provider that holds its cache by the body `session_id` ([its caching guide](https://openrouter.ai/docs/guides/best-practices/prompt-caching)). Prefixwise removed a client's body `session_id` on the way to every hosted API, since most reject unknown fields, so through Prefixwise an agent that sent one lost OpenRouter's stickiness, its cache could miss, and the miss was blamed on routing. A client's own `session_id` now reaches an upstream on openrouter.ai unchanged (`PREFIXWISE_FORWARD_SESSION_ID=1` for another gateway that reads it); other hosted APIs still never get one, and Prefixwise never sends one of its own.
