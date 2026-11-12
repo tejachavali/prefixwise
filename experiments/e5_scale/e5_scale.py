@@ -68,27 +68,82 @@ ROLE_MAP = {"human": "user", "user": "user", "gpt": "assistant", "assistant": "a
             "ipython": "tool"}
 
 
+MESSAGE_KEYS = ("messages", "conversations", "conversation", "trajectory", "turns", "dialog", "history",
+                "events", "steps", "transcript", "trace")
+
+
+def _message(m) -> dict | None:
+    """One message as {role, content}: flat ({role, content} or {from, value}) or an agent log line
+    with the message nested ({"type": "user", "message": {"role": ..., "content": ...}}, as Claude
+    Code writes)."""
+    if isinstance(m, str):
+        try:
+            m = json.loads(m)
+        except ValueError:
+            return None
+    if not isinstance(m, dict):
+        return None
+    inner = m.get("message") if isinstance(m.get("message"), dict) else m
+    role = inner.get("role") or inner.get("from") or m.get("role") or m.get("type") or m.get("speaker")
+    content = inner.get("content", inner.get("value", inner.get("text")))
+    return {"role": role, "content": content}
+
+
+def _is_tool_result(content) -> bool:
+    return isinstance(content, list) and bool(content) and all(
+        isinstance(c, dict) and c.get("type") in ("tool_result", "function_call_output") for c in content)
+
+
+def _block_text(c) -> str:
+    if isinstance(c, dict) and c.get("type") in ("tool_use", "function_call"):
+        return json.dumps(c.get("input", c.get("arguments", "")), sort_keys=True)
+    return _text(c.get("text") or c.get("content") or "") if isinstance(c, dict) else _text(c)
+
+
 def normalize(row: dict, max_chars: int) -> list[dict] | None:
     """A dataset row as a list of {role, text} (user, assistant, tool, system), or None."""
-    for key in ("messages", "conversations", "conversation", "trajectory", "turns", "dialog"):
+    for key in MESSAGE_KEYS:
         msgs = row.get(key)
         if isinstance(msgs, str):
             try:
                 msgs = json.loads(msgs)
             except ValueError:
-                msgs = None
+                msgs = [line for line in msgs.splitlines() if line.strip()]  # JSON Lines
         if isinstance(msgs, list) and msgs:
             out = []
-            for m in msgs:
-                if not isinstance(m, dict):
+            for raw in msgs:
+                m = _message(raw)
+                if m is None:
                     continue
-                role = ROLE_MAP.get(str(m.get("role") or m.get("from") or "").lower())
-                text = _text(m.get("content", m.get("value")))[:max_chars]
+                role = ROLE_MAP.get(str(m["role"] or "").lower())
+                content = m["content"]
+                if role == "user" and _is_tool_result(content):
+                    role = "tool"  # Anthropic sends tool results as user messages
+                text = ("\n".join(_block_text(c) for c in content) if isinstance(content, list)
+                        else _text(content))[:max_chars]
                 if role and text.strip():
                     out.append({"role": role, "text": text})
             if sum(m["role"] == "user" for m in out) >= 2:
                 return out
     return None
+
+
+def shape(value, depth: int = 0) -> object:
+    """The structure of a dataset row: field names and types, never its text."""
+    if depth > 4:
+        return type(value).__name__
+    if isinstance(value, dict):
+        return {k: shape(v, depth + 1) for k, v in list(value.items())[:20]}
+    if isinstance(value, list):
+        return [shape(value[0], depth + 1), f"... {len(value)} items"] if value else []
+    if isinstance(value, str):
+        if value[:1] in "[{":
+            try:
+                return {"json string": shape(json.loads(value), depth + 1)}
+            except ValueError:
+                pass
+        return f"str({len(value)})"
+    return type(value).__name__
 
 
 def generated(rng: random.Random, n_turns: int) -> list[dict]:
@@ -104,15 +159,28 @@ def generated(rng: random.Random, n_turns: int) -> list[dict]:
 def load(args, rng) -> list[list[dict]]:
     if args.source == "generated":
         return [generated(rng, args.turns) for _ in range(args.limit)]
-    from datasets import load_dataset  # pip install datasets
-    ds = load_dataset(args.dataset, args.config, split=args.split, streaming=True)
-    convs = []
+    from datasets import get_dataset_split_names, load_dataset  # pip install datasets
+    split = args.split
+    if split is None:
+        names = get_dataset_split_names(args.dataset, args.config)
+        if len(names) != 1:
+            raise SystemExit(f"e5: {args.dataset} has splits {names}; pick one with --split")
+        split = names[0]
+    ds = load_dataset(args.dataset, args.config, split=split, streaming=True)
+    convs, scanned, first = [], 0, None
     for row in ds:
+        scanned += 1
+        first = first if first is not None else row
         conv = normalize(row, args.max_chars)
         if conv:
             convs.append(conv)
-        if len(convs) >= args.limit:
+        if len(convs) >= args.limit or scanned >= args.limit * 50:
             break
+    if not convs:  # measuring nothing must not look like a result
+        raise SystemExit(f"e5: no conversation with two or more user turns in the first {scanned} rows of "
+                         f"{args.dataset} ({split}); the row shape (field names and types, no text):\n"
+                         + json.dumps(shape(first), indent=1) if first is not None else
+                         f"e5: {args.dataset} ({split}) yielded no rows")
     return convs
 
 
@@ -334,7 +402,9 @@ def main(argv=None) -> int:
     ap.add_argument("--source", choices=["generated", "hf"], default="generated")
     ap.add_argument("--dataset", default="nvidia/Open-SWE-Traces")
     ap.add_argument("--config", default=None)
-    ap.add_argument("--split", default="train")
+    ap.add_argument("--split", default=None, help="default: the dataset's only split")
+    ap.add_argument("--inspect", action="store_true",
+                    help="print the splits and the first row's shape (field names and types, no text), then stop")
     ap.add_argument("--limit", type=int, default=60, help="conversations")
     ap.add_argument("--turns", type=int, default=10, help="turns per conversation, at most")
     ap.add_argument("--max-chars", type=int, default=1500, help="per message, so prompts fit the context")
@@ -342,6 +412,15 @@ def main(argv=None) -> int:
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--out", default=str(Path(__file__).parent / "results"))
     args = ap.parse_args(argv)
+    if args.inspect:
+        from datasets import get_dataset_split_names, load_dataset
+        names = get_dataset_split_names(args.dataset, args.config)
+        print("splits:", names)
+        split = args.split or names[0]
+        row = next(iter(load_dataset(args.dataset, args.config, split=split, streaming=True)))
+        print(f"first row of {split}:", json.dumps(shape(row), indent=1))
+        print("parses as a conversation:", bool(normalize(row, args.max_chars)))
+        return 0
     os.makedirs(args.out, exist_ok=True)
     res = run(args)
     stamp = time.strftime("%Y%m%d-%H%M%S")
