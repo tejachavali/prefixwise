@@ -335,13 +335,18 @@ def run(args) -> dict:
                 break
             result, entry = proxy.handle("openai", body, {"x-prefixwise-session-id": sid})
             if entry is None:
-                turns.append({"conv": ci, "turn": k, "label": label, "cause": None, "error": result.get("status")})
+                turns.append({"conv": ci, "turn": k, "label": label, "cause": None, "error": result.get("status"),
+                              "error_text": _error_text(result)})
+                if len(turns) == 5 and all(t["cause"] is None for t in turns):  # the server refuses: say why, now
+                    proxy.close()
+                    raise SystemExit(f"e5: the first 5 requests all failed; the first: {turns[0]['error_text']}")
                 continue
             turns.append({"conv": ci, "turn": k, "label": label, "cause": entry.cause, "detail": entry.detail,
                           "prompt": entry.prompt_tokens, "cached": entry.cached_tokens,
                           "secondary": entry.secondary_causes, "evidence": entry.evidence})
     proxy.close()
-    return score(turns) | {"turns": turns, "conversations": len(convs), "ledger": ledger}
+    first_error = next((t["error_text"] for t in turns if t.get("error_text")), None)
+    return score(turns) | {"turns": turns, "conversations": len(convs), "ledger": ledger, "first_error": first_error}
 
 
 def score(turns: list[dict]) -> dict:
@@ -373,9 +378,18 @@ def score(turns: list[dict]) -> dict:
     }
 
 
+def _error_text(result: dict) -> str:
+    """HTTP status and the server's own message, short: what a failed run must show."""
+    resp = result.get("response")
+    err = resp.get("error") if isinstance(resp, dict) else None
+    msg = (err.get("message") if isinstance(err, dict) else err) or (resp if resp else "")
+    return f"HTTP {result.get('status')}: {str(msg)[:300]}"
+
+
 def report(res: dict) -> str:
     lines = [f"# E5 accuracy at scale", "",
              f"{res['conversations']} conversations, {res['requests']} requests ({res['errors']} errors).", "",
+             *([f"First error: {res['first_error']}", ""] if res.get("first_error") else []),
              f"- Change turns named exactly: **{res['changes_named']} of {res['change_turns']}**"
              f" ({res['changes_unknown']} unknown, {res['changes_seen_within_rounding']} seen within one reporting"
              f" unit, {res['changes_wrong']} named as another cause)",
