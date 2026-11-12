@@ -195,9 +195,16 @@ def read_log(path: str | os.PathLike) -> tuple[list[dict], int]:
     return entries, bad
 
 
+def ended(e: dict) -> float:
+    """When the entry's request is recorded: its end, or its start when the log gave no duration
+    (such requests are replayed start to end at once)."""
+    return e["end"] if e.get("timed", True) else e["start"]
+
+
 def replay(entries: list[dict], ledger_path: str, *, engine: str | None = None, hmac_key: bytes | None = None,
-           prices: str | None = None) -> dict:
-    """Run the entries through the proxy pipeline on the log's clock. Returns import counts."""
+           prices: str | None = None, count_since: float | None = None) -> dict:
+    """Run the entries through the proxy pipeline on the log's clock. Returns import counts, of the
+    requests that ended at or after count_since when it is given (all are replayed either way)."""
     from .proxy import PrefixwiseProxy, is_responses_body
 
     clock = _Clock()
@@ -221,13 +228,16 @@ def replay(entries: list[dict], ledger_path: str, *, engine: str | None = None, 
                                 collector_url="", prices=prices)
         ctxs: dict[int, dict] = {}
         try:
-            _run(events, entries, proxy, clock, ctxs, stats, is_responses_body)
+            _run(events, entries, proxy, clock, ctxs, stats, is_responses_body, count_since)
         finally:
             proxy.close()
     return stats
 
 
-def _run(events, entries, proxy, clock, ctxs, stats, is_responses_body) -> None:
+def _run(events, entries, proxy, clock, ctxs, stats, is_responses_body, count_since=None) -> None:
+    def counted(e: dict) -> int:
+        return int(count_since is None or ended(e) >= count_since)
+
     for t, _order, i, step in events:
         clock.now = t
         e = entries[i]
@@ -241,7 +251,7 @@ def _run(events, entries, proxy, clock, ctxs, stats, is_responses_body) -> None:
             try:
                 ctx = proxy.prepare(e["provider"], body, e["headers"], api=api)
             except Exception:  # noqa: BLE001 - a malformed logged body: skip it, like the proxy's 400
-                stats["failed"] += 1
+                stats["failed"] += counted(e)
                 continue
             ctx["span_start"] = t
             ctxs[i] = ctx
@@ -252,11 +262,13 @@ def _run(events, entries, proxy, clock, ctxs, stats, is_responses_body) -> None:
         ctx["span_end"] = t
         if e["status"] >= 400:
             proxy.record_failure(ctx, e["status"], e["response"])
-            stats["failed"] += 1
+            stats["failed"] += counted(e)
             continue
         _, entry = proxy.finalize_safely(ctx, e["status"], e["response"])
         if entry is None:
-            stats["failed"] += 1
+            stats["failed"] += counted(e)
+            continue
+        if not counted(e):
             continue
         stats["imported"] += 1
         stats["first"] = e["start"] if stats["first"] is None else min(stats["first"], e["start"])

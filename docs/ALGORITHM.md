@@ -53,7 +53,7 @@ without one they are plain SHA-256 like the rest:
 | masked | the canonical form with dates, times, UUIDs, hex ids, numbers and any token containing a digit (`v2`, `gpt4`) replaced by placeholders | the same words: only volatile values differ |
 
 No prompt text is kept. The hashes live in memory for the lane's next turn; when a remote collector
-(`--collector-url`) or a record log (Redis) is configured, they travel with the turn's record to it,
+(`--collector`) or a record log (Redis) is configured, they travel with the turn's record to it,
 so set `PREFIXWISE_HMAC_KEY` there too if short blocks must not be guessable.
 
 **Usage** is the provider's report: `prompt` tokens, `cached` tokens read from the cache, and,
@@ -246,8 +246,8 @@ results):
 7. **Engine evidence decides only an unchanged prompt.** An eviction or a routing miss from events
    never replaces a cause named by a changed block.
 8. **Model switch and first turn win** over every rule of 2.1 to 2.3 (2.4's two in-flight facts can
-   still leave a turn unjudged, and an engine without a prefix cache still turns a miss into
-   `no_prefix_cache`).
+   still leave a turn unjudged, and an engine that keeps no prefix cache still turns a miss into
+   `unknown`).
 9. **Deterministic.** The same two requests and usage give the same verdict.
 10. **Served-all is monotonic.** If a read counts as full, every larger read does.
 11. **The hashes ignore exactly what they should.** Key order at any depth leaves canonical and masked
@@ -270,7 +270,8 @@ Anthropic's request shape, and the Anthropic early-breakpoint case (each has han
   whole block; the avoidable count comes from usage, so it is still exact.
 - **Masking is broad.** Any token containing a digit is treated as volatile, so a system prompt that
   changes `v2` to `v3` reads as `volatile_system`, not `system_edit`. Dates with and without a year
-  (`Nov 12`, `12. November`) are masked. Text is serialized unescaped (`café` stays `café`), but a
+  (`Nov 12`, `12. November`) are masked; without a year only a capitalized month and a day of 1 to 31
+  count, so `Step 2 May fail` still reads as a date (rare) while `Rule 1 may be skipped` does not. Text is serialized unescaped (`café` stays `café`), but a
   control character is escaped (`\u001b`) and that escape is masked, so a change inside a terminal
   colour code is not seen as wording.
 - **Thresholds.** "At least half of `R` read" separates a hit from a miss where the evidence is only

@@ -806,10 +806,11 @@ def cmd_import(args) -> int:
 
 def _import_gateway(log_path: str, ledger_path: str, args, since: float | None) -> dict | None:
     """Read a gateway's JSON Lines request log and replay it into the ledger (prefixwise.gateway_import)."""
-    from .gateway_import import read_log, replay
+    from .gateway_import import ended, read_log, replay
 
     entries, bad = read_log(log_path)
-    in_window = [e for e in entries if since is None or e["start"] >= since]
+    # The window holds the requests that ended at or after --since: a request is recorded when it ends.
+    in_window = [e for e in entries if since is None or ended(e) >= since]
     if not in_window:
         print(f"prefixwise: no usable requests in {log_path}" + (f" ({bad} lines without a request body, a "
               "response or a start time)" if bad else ""), file=sys.stderr)
@@ -825,16 +826,18 @@ def _import_gateway(log_path: str, ledger_path: str, args, since: float | None) 
     # The whole log is replayed, so the first turns in the window are compared with their earlier
     # turns as live; only rows inside the window are kept.
     st = replay(entries, ledger_path, engine=getattr(args, "engine", None),
-                prices=getattr(args, "prices", None) or os.environ.get("PREFIXWISE_PRICES"))
+                prices=getattr(args, "prices", None) or os.environ.get("PREFIXWISE_PRICES"), count_since=since)
     if since is not None:
         led = Ledger(ledger_path)
         with led._lock:
-            led.conn.execute("DELETE FROM entries WHERE id > ? AND recorded_at < ?", (before, since))
+            out = (before, since)
+            gone = [r[0] for r in led.conn.execute("SELECT DISTINCT task_id FROM entries WHERE id > ? AND "
+                                                  "recorded_at < ? AND task_id IS NOT NULL", out)]
+            led.conn.execute("DELETE FROM entries WHERE id > ? AND recorded_at < ?", out)
+            for task in gone:  # a task only the dropped requests named goes with them
+                led.conn.execute("DELETE FROM tasks WHERE task_id = ? AND NOT EXISTS "
+                                 "(SELECT 1 FROM entries WHERE task_id = ?)", (task, task))
             led.conn.commit()
-        with led.reader() as conn:
-            kept = conn.execute("SELECT COUNT(*), MIN(recorded_at), MAX(recorded_at) FROM entries WHERE id > ?",
-                                (before,)).fetchone()
-        st["imported"], st["first"], st["last"] = kept[0], kept[1], kept[2]
     entries = in_window
     if bad:
         print(f"prefixwise: skipped {bad} line(s) without a request body, a response or a start time", file=sys.stderr)

@@ -224,3 +224,27 @@ def test_since_keeps_the_context_before_the_window(tmp_path, monkeypatch, capsys
 def test_a_previous_turn_without_usage_makes_nothing_avoidable():
     from prefixwise.ledger import avoidable_for_turn
     assert avoidable_for_turn(False, 30_000, 0, 0) == 0 and avoidable_for_turn(False, 30_000, 0, None) == 0
+
+
+def test_since_windows_by_when_a_request_ended_and_counts_only_the_window(tmp_path, monkeypatch, capsys):
+    """A request that started before --since and ended after it is in the window (it is recorded when
+    it ends, as live); a failure before the window is not counted (found by review)."""
+    from prefixwise.cli import main
+    rng = random.Random(11)
+    body = _body(rng, "openai", 3, 2, None)
+    since = T0 + 100
+    lines = [{"ts": T0, "duration_ms": 500, "request": body, "status": "error", "headers": {"x-session-id": "f"},
+              "response": {"error": {"message": "boom"}}},
+             {"ts": since - 5, "duration_ms": 10_000, "request": body, "headers": {"x-session-id": "s"},
+              "response": _response("openai", 1, 20_000, 0)},
+             {"ts": since - 30, "duration_ms": 1_000, "request": body, "headers": {"x-session-id": "t"},
+              "response": _response("openai", 2, 20_000, 0)},
+             {"ts": since + 60, "duration_ms": 500, "request": _append_turn(body), "headers": {"x-session-id": "s"},
+              "response": _response("openai", 3, 20_400, 20_000)}]
+    log = tmp_path / "g.jsonl"
+    log.write_text("\n".join(json.dumps(x) for x in lines))
+    monkeypatch.chdir(tmp_path)
+    assert main(["import", "gateway", "--path", str(log), "--since", str(int(since)), "--json"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["imported"] == out["in_window"] == 2 and out["failed"] == 0
+    assert len(_rows(str(tmp_path / "prefixwise-gateway.db"))) == 2

@@ -34,3 +34,13 @@ def test_soft_tokens_never_hash_content():
 def test_mask_volatiles():
     assert mask_volatiles("2026-11-05 and 10:30 and id 123e4567-e89b-12d3-a456-426614174000") == \
         "<DATE> and <TIME> and id <ID>"
+
+
+def test_dates_without_a_year_are_masked_and_numbers_next_to_month_words_are_not():
+    from prefixwise.fingerprint import mask_volatiles
+    for text in ("Today is Nov 12.", "12 November", "12. November", "Thursday, November 12", "on 3rd March"):
+        assert "<DATE>" in mask_volatiles(text), text
+    # Found by review: a number before a month-like word is not a date, so a change to it stays a
+    # number change (not "a date or timestamp").
+    for text in ("Rule 1 may be skipped", "max 5 mar", "top 40 Aug", "version 2.1 May release"):
+        assert "<DATE>" not in mask_volatiles(text), text
