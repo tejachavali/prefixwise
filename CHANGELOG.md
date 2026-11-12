@@ -1,6 +1,11 @@
 # Changelog
 
-## Unreleased
+## 0.11.8: 2026-11-12
+
+For anyone running Prefixwise in front of OpenRouter: a client's own `session_id` now reaches
+OpenRouter, which routes a conversation back to the provider holding its cache by it, so Prefixwise
+no longer costs those hits and then blames routing. Without a session id, OpenAI's `user` now groups
+turns.
 
 - **OpenRouter keeps its sticky routing through Prefixwise.** OpenRouter sends a conversation back to the provider that holds its cache by the body `session_id` ([its caching guide](https://openrouter.ai/docs/guides/best-practices/prompt-caching)). Prefixwise removed a client's body `session_id` on the way to every hosted API, since most reject unknown fields, so through Prefixwise an agent that sent one lost OpenRouter's stickiness, its cache could miss, and the miss was blamed on routing. A client's own `session_id` now reaches an upstream on openrouter.ai unchanged (`PREFIXWISE_FORWARD_SESSION_ID=1` for another gateway that reads it); other hosted APIs still never get one, and Prefixwise never sends one of its own.
 - **OpenAI's `user` groups turns.** With no session header or body `session_id`, all traffic was one session; an end-user id now names it (Anthropic `metadata.user_id`, as before, or OpenAI `user`); `prefixwise check` now ignores both, so its scenarios never merge. It is kept out of OpenTelemetry's conversation id, also when recorded through `prefixwise.sdk`. Turns of one user's different conversations share that session, and the first turn of a later conversation with the same system prompt can read as a history edit, as it did in the single default session before: send a conversation id where you have one. A `prompt_cache_key` is deliberately not used: a key that changes mid-conversation is the miss `cache_key_changed` names.
