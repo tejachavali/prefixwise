@@ -89,6 +89,30 @@ def bill(ledger, since: float | None = None, until: float | None = None) -> dict
     return out
 
 
+def hit_rate_if_fixed(s: dict) -> float | None:
+    """The share of prompt tokens served from the cache had every avoidable miss been fixed:
+    (cached + avoidable) / prompt, over the same requests. Avoidable tokens are, by definition, the
+    part of each wasteful request's reusable prefix the cache did not serve, so fixing the cause
+    moves exactly them from uncached to cached; everything else (new content each turn, legitimate
+    misses, unexplained ones) stays as it is. A prediction: measured, a fix realised 97.5% to 99.9%
+    of what was predicted (experiments/e4), and a real run predicted at 87.1% read 87.1% with the
+    fixes on (experiments/demo/2026-11-10-optimize-real-run.md). None without usage."""
+    prompt, cached, avoidable = s.get("prompt_tokens") or 0, s.get("cached_tokens") or 0, s.get("avoidable_tokens") or 0
+    if prompt <= 0:
+        return None
+    return min(1.0, (cached + avoidable) / prompt)
+
+
+def ceiling_line(s: dict) -> str | None:
+    """'Fixing them would take the share served from cache from 74.6% to 87.1%.' None when there is
+    nothing avoidable."""
+    now, fixed = s.get("cache_hit_rate"), s.get("cache_hit_rate_if_fixed")
+    if now is None or fixed is None or not s.get("avoidable_tokens"):
+        return None
+    return (f"Fixing them would take the share served from cache from {now:.1%} to {fixed:.1%}; "
+            "the rest is new content each turn and expected misses.")
+
+
 def _share(v: float, total: float) -> str:
     p = v / total
     return "<1%" if 0 < p < 0.005 else f"{p:.0%}"
@@ -249,10 +273,12 @@ def findings(ledger, since: float | None = None, until: float | None = None,
         not_reported = conn.execute("SELECT COUNT(*) FROM entries WHERE " + " AND ".join(clauses), args).fetchone()[0]
     errors = metrics.query(ledger, ["requests_failed"], by="error", **window)
     statuses = metrics.query(ledger, ["requests_failed"], by="status", **window)
-    return {"summary": {k: s[k] for k in ("requests", "requests_failed", "prompt_tokens", "cached_tokens",
-                                          "cache_hit_rate", "avoidable_tokens", "avoidable_share",
-                                          "cost_usd", "avoidable_cost_usd", "requests_priced",
-                                          "tasks_successful", "tokens_per_successful_task")},
+    summary = {k: s[k] for k in ("requests", "requests_failed", "prompt_tokens", "cached_tokens",
+                                 "cache_hit_rate", "avoidable_tokens", "avoidable_share",
+                                 "cost_usd", "avoidable_cost_usd", "requests_priced",
+                                 "tasks_successful", "tokens_per_successful_task")}
+    summary["cache_hit_rate_if_fixed"] = hit_rate_if_fixed(summary)
+    return {"summary": summary,
             "waste": waste, "expected": expected, "unexplained": unexplained,
             "rejected_credentials": sum(x["requests_failed"] or 0 for x in statuses if x["status"] in (401, 403)),
             "failures": [{"error": e["error"], "requests": e["requests_failed"]}
@@ -317,6 +343,9 @@ def render(f: dict, command: str = "serve", headline: bool = True) -> str:
                 waste_usd = f" ({_usd(s['avoidable_cost_usd'])}{', priced requests only' if partial else ''})"
             lines.append(f"Avoidable: {_n(s['avoidable_tokens'])} tokens{waste_usd}, "
                          f"{(s['avoidable_share'] or 0):.1%} of prompt tokens. Fix these, biggest first:")
+            ceiling = ceiling_line(s)
+            if ceiling:
+                lines.insert(len(lines) - 1, ceiling)
             for i, w in enumerate(f["waste"], 1):
                 cost = f", {_usd(w['avoidable_cost_usd'])}" if w["avoidable_cost_usd"] is not None else ""
                 lines.append(f"  {i}. {w['what'].capitalize()} ({_req(w['requests'])}, "
@@ -415,7 +444,9 @@ def render_share(f: dict, since_label: str | None = None) -> str:
     if f["waste"]:
         w = f["waste"][0]
         cost = f" ({_usd(s['avoidable_cost_usd'])})" if s["requests_priced"] else ""
-        lines.append(f"avoidable: {_n(s['avoidable_tokens'])} tokens{cost}, {(s['avoidable_share'] or 0):.0%} of the prompt")
+        lines.append(f"avoidable: {_n(s['avoidable_tokens'])} tokens{cost}, {(s['avoidable_share'] or 0):.0%} of the prompt"
+                     + (f", {s['cache_hit_rate_if_fixed']:.0%} from cache if fixed"
+                        if s.get("cache_hit_rate_if_fixed") is not None and s.get("cache_hit_rate") is not None else ""))
         lines.append(f"top cause: {w['what']} ({_req(w['requests'])})")
         if w.get("fix"):
             lines.append(f"fix: {w['fix']}")
