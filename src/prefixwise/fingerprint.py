@@ -76,6 +76,9 @@ _CLOCK = r"\d{1,2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:\s*[AP]M)?"
 _ZONE = r"(?-i:Z|z|UTC|GMT|[ECMP][SD]T|[+-]\d{2}:?\d{2})"
 _TZ = rf"(?:\s*{_ZONE})?(?![A-Za-z])"
 _DAY = r"\d{1,2}(?:st|nd|rd|th)?"
+# Without a year, only a capitalized month and a day of 1 to 31 make a date: "Rule 1 may be skipped",
+# "max 5 mar" and "top 40 Aug" are not dates, and a number change there must not read as one.
+_DAY31 = r"(?:3[01]|[12]\d|0?[1-9])(?:st|nd|rd|th)?(?!\d)"
 _DATE_RE = re.compile(
     rf"(?<!\d)(?:{_WEEKDAY})?(?:"
     rf"\d{{4}}[-/]\d{{1,2}}[-/]\d{{1,2}}"                       # 2026-11-09, 2026/11/09
@@ -83,8 +86,10 @@ _DATE_RE = re.compile(
     rf"|{_MONTH}\s+{_DAY}\s+{_CLOCK}(?:\s+{_ZONE})?\s+\d{{4}}"  # Sun Nov  9 04:10:00 UTC 2026 (`date`)
     rf"|{_MONTH}\s+{_DAY},?\s+\d{{4}}"                          # Nov 9, 2026
     rf"|{_DAY}\.?\s+{_MONTH},?\s+\d{{4}}"                      # 09 Nov 2026, 9. November 2026
+    rf"|(?-i:{_MONTH})\s+{_DAY31}(?![\d:])"                    # November 12, Oct 31 (no year: a date
+    rf"|(?<![\d.]){_DAY31}\.?\s+(?-i:{_MONTH})"                          # 12 November     that changes daily)
     rf")(?:(?:[T ]|,\s*|\s+at\s+)?{_CLOCK})?{_TZ}", re.IGNORECASE)
-_DATE_HINT_RE = re.compile(r"\d{4}|\d{1,2}[-/]\d{1,2}")  # cheap test before the date pattern runs
+_DATE_HINT_RE = re.compile(r"\d")  # cheap test before the date pattern runs: every date has a digit
 _TIME_RE = re.compile(rf"\b{_CLOCK}{_TZ}", re.IGNORECASE)
 _UUID_RE = re.compile(r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b")
 _HEX_ID_RE = re.compile(r"\b[0-9a-fA-F]{16,}\b")

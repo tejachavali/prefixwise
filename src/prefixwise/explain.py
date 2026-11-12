@@ -136,7 +136,7 @@ def explain_pair(prev: Turn | None, curr: Turn, provider: str | None = None,
     curr_snap = _snapshot(curr, provider, fp)
     prev_snap = _snapshot(prev, provider, fp) if prev is not None else None
     result = classify(prev_snap, curr_snap)
-    div = first_divergence(prev_snap.blocks, curr_snap.blocks) if prev_snap else None
+    div = first_divergence(prev_snap.blocks, curr_snap.blocks, engine=curr_snap.engine) if prev_snap else None
     if div and result.cause.value == "tool_reserialize" and div["kind"] == "content changed":
         div["kind"] = "tools reordered (same tool set, different order)"
     text = None

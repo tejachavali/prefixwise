@@ -88,5 +88,7 @@ def test_avoidable_for_turn_counts_waste_only():
     assert avoidable_for_turn(False, 2000, 400, 2000) == 1600
     # Tokens appended after the prior prefix are new content, not avoidable.
     assert avoidable_for_turn(False, 2500, 0, 2000) == 2000
-    # No prior turn to compare against: whole prompt is the reusable prefix.
-    assert avoidable_for_turn(False, 2000, 0, None) == 2000
+    # No prior turn's usage to compare against: how much was reusable is not known, so nothing is
+    # claimed (counting this whole prompt would count appended content as waste).
+    assert avoidable_for_turn(False, 2000, 0, None) == 0
+    assert avoidable_for_turn(False, 2000, 0, 0) == 0
