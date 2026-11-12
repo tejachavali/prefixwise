@@ -77,6 +77,7 @@ Every number is from a live run against real models, and each links to its recor
 | Claim | Result |
 |---|---|
 | Agrees with Anthropic's own miss reason | **32 of 32** misses Anthropic named ([1](experiments/e1_hosted/runs/2026-11-06-anthropic-claude-haiku-5-5.md), [2](experiments/e1_hosted/runs/2026-11-06-round4.md)) |
+| Names injected changes at scale, on real agent trajectories | **1,772 of 1,772** seen, **0** named as another cause, **0** false alarms on 3,622 turns that only appended, on vLLM and SGLang with real Claude Code trajectories and generated conversations ([records](experiments/e5_scale/runs/)) |
 | Names injected causes on open models | **120 of 120** on vLLM, vLLM + LMCache and SGLang ([vLLM](experiments/e1_open/runs/2026-11-06-colab-l4-qwen3-4b.md), [LMCache and SGLang](experiments/e_evict/runs/2026-11-07-colab-l4.md)) |
 | Tells an engine eviction from everything else | **5 of 5**, confirmed from KV events ([vLLM](experiments/e_evict/runs/2026-11-07-colab-l4.md), [SGLang](experiments/e_evict/runs/2026-11-07-colab-l4-sglang-events.md)); a prefix LMCache or HiCache restored counted as a hit **5 of 5**, through the proxy and inside vLLM ([record](experiments/e_evict/runs/2026-11-08-colab-l4-host-restored.md), [inside vLLM](experiments/e_evict/runs/2026-11-10-colab-l4-middleware-lmcache.md)) |
 | The tool-order fix saves what was predicted | **99.9%** on Claude, **97.5%** on vLLM, task success flat (one of 60 turns changed on Qwen3-4B) ([record](experiments/e4/runs/2026-11-06-live.md)) |
@@ -98,6 +99,7 @@ Each takes about thirty seconds. All write the same ledger and print the same re
 | Your own Python code | `client = prefixwise.wrap(Anthropic())` (or OpenAI) |
 | LiteLLM | `litellm.callbacks = [PrefixwiseCallback()]` |
 | Claude Code or Codex on a subscription | `prefixwise import claude-code` / `prefixwise import codex` |
+| A gateway's request log (JSON Lines) | `prefixwise import gateway --path requests.jsonl`: yesterday's traffic, the live proxy's verdicts, nothing changed in production |
 
 ## Identify
 
@@ -132,7 +134,7 @@ prefixwise check -- pytest tests/agent_scenarios      # exit 2 on a cache regres
 The costly regressions pass every functional test: a tool list built from a set, a timestamp added to the system prompt, a marker moved. `prefixwise check` runs your agent's scenarios against a local mock provider, with no API calls, and fails on four: tools in a changed order, a volatile system prompt, a misplaced marker, a mutated tool result. As a GitHub Action:
 
 ```yaml
-- uses: tejachavali/prefixwise@v0.11
+- uses: tejachavali/prefixwise@v0.12
   with:
     command: pytest tests/agent_scenarios
 ```
