@@ -732,16 +732,28 @@ def cmd_import(args) -> int:
         print(f"prefixwise: {exc}", file=sys.stderr)
         return 2
     codex = args.source == "codex"
-    name, home = ("Codex", "~/.codex") if codex else ("Claude Code", "~/.claude/projects")
-    root = os.path.expanduser(args.path or home)
-    if not os.path.isdir(root):
-        print(f"prefixwise: no {name} logs at {root} ({name} keeps them in {home}; pass --path)", file=sys.stderr)
-        return 1
+    gateway = args.source == "gateway"
+    name, home = (("a gateway", None) if gateway else ("Codex", "~/.codex") if codex
+                  else ("Claude Code", "~/.claude/projects"))
     # Its own ledger by default: someone who also proxies the agent keeps the two apart
     # (the proxy cannot know the log's response ids, so one request would count twice).
     path = args.ledger or f"prefixwise-{args.source}.db"
-    led = Ledger(path)
-    stats = (import_codex if codex else import_claude_code)(root, led, since=since)
+    if gateway:
+        if not args.path or not os.path.exists(os.path.expanduser(args.path)):
+            print("prefixwise: import gateway needs --path: a JSON Lines request log, or a folder of them "
+                  "(one request per line: its body, the response with usage, and when it started)", file=sys.stderr)
+            return 1
+        stats = _import_gateway(os.path.expanduser(args.path), path, args, since)
+        if stats is None:
+            return 1
+        led = Ledger(path)
+    else:
+        root = os.path.expanduser(args.path or home)
+        if not os.path.isdir(root):
+            print(f"prefixwise: no {name} logs at {root} ({name} keeps them in {home}; pass --path)", file=sys.stderr)
+            return 1
+        led = Ledger(path)
+        stats = (import_codex if codex else import_claude_code)(root, led, since=since)
     if args.json:
         print(json.dumps(stats, indent=2))
         return 0
@@ -756,7 +768,7 @@ def cmd_import(args) -> int:
     day = lambda t: time.strftime("%Y-%m-%d", time.localtime(t))  # noqa: E731
     span = day(stats["first"]) if day(stats["first"]) == day(stats["last"]) else \
         f"{day(stats['first'])} to {day(stats['last'])}"
-    print(f"Imported {stats['imported']:,} requests from {stats['logs']} {name} logs ({span})"
+    print(f"Imported {stats['imported']:,} requests from {stats['logs']} {name} log{'' if gateway else 's'} ({span})"
           + (f"; {stats['skipped_known']:,} were already in {path}" if stats["skipped_known"] else "")
           + (f"; {stats['duplicates']:,} logged twice were counted once" if stats["duplicates"] else "") + ".\n")
     window = {"since": stats["first"], "until": stats["last"] + 1}
@@ -778,12 +790,42 @@ def cmd_import(args) -> int:
             (window["since"], window["until"]))]
     if unpriced:
         print(f"\nNo prices for {', '.join(unpriced)}: add rates with PREFIXWISE_PRICES (see `prefixwise prices`).")
-    print("\nAbout these numbers: they come from the logs, which hold each response's usage and what changed "
-          "between requests, not the prompt itself, so causes are inferred and a miss the log cannot explain is "
-          "`unknown`. Dollars are API prices: on a subscription (Claude Pro/Max, ChatGPT plans) they show what the "
-          "usage is worth, not what you paid.")
+    if gateway:
+        print("\nAbout these numbers: every logged request was replayed through the proxy's own pipeline on the "
+              "log's clock, so each verdict is the one the proxy would have given live; prompts were read to "
+              "fingerprint them and are not stored. Without a conversation id in the log, a user's conversations "
+              "share one session. Dollars are list prices from the dated table unless --prices gives yours.")
+    else:
+        print("\nAbout these numbers: they come from the logs, which hold each response's usage and what changed "
+              "between requests, not the prompt itself, so causes are inferred and a miss the log cannot explain is "
+              "`unknown`. Dollars are API prices: on a subscription (Claude Pro/Max, ChatGPT plans) they show what the "
+              "usage is worth, not what you paid.")
     print(f"\nLedger: {path}  (prefixwise report --ledger {path} --detail, or prefixwise serve to browse /api/v1)")
     return 0
+
+
+def _import_gateway(log_path: str, ledger_path: str, args, since: float | None) -> dict | None:
+    """Read a gateway's JSON Lines request log and replay it into the ledger (prefixwise.gateway_import)."""
+    from .gateway_import import read_log, replay
+
+    entries, bad = read_log(log_path)
+    if since is not None:
+        entries = [e for e in entries if e["start"] >= since]
+    if not entries:
+        print(f"prefixwise: no usable requests in {log_path}" + (f" ({bad} lines without a request body, a "
+              "response or a start time)" if bad else ""), file=sys.stderr)
+        return None
+    if os.path.exists(ledger_path) and not getattr(args, "ledger", None):
+        print(f"prefixwise: {ledger_path} exists; importing the same log twice would count it twice. "
+              "Remove it, or pass --ledger for another file.", file=sys.stderr)
+        return None
+    st = replay(entries, ledger_path, engine=getattr(args, "engine", None),
+                prices=getattr(args, "prices", None) or os.environ.get("PREFIXWISE_PRICES"))
+    if bad:
+        print(f"prefixwise: skipped {bad} line(s) without a request body, a response or a start time", file=sys.stderr)
+    return {"logs": 1, "imported": st["imported"], "in_window": len(entries), "skipped_known": 0,
+            "duplicates": 0, "unreadable": 0, "first": st["first"] or entries[0]["start"],
+            "last": st["last"] or entries[-1]["end"], "failed": st["failed"]}
 
 
 def cmd_request(args) -> int:
@@ -1037,9 +1079,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_export)
 
     p = sub.add_parser("import", help="read agent session logs (no proxy needed) and report on them")
-    p.add_argument("source", choices=["claude-code", "codex"],
-                   help="whose logs: claude-code (~/.claude/projects) or codex (~/.codex)")
-    p.add_argument("--path", metavar="DIR", help="where the logs are (default: the agent's own folder)")
+    p.add_argument("source", choices=["claude-code", "codex", "gateway"],
+                   help="whose logs: claude-code (~/.claude/projects), codex (~/.codex), or gateway: a JSON Lines "
+                        "request log from a gateway or provider (one request per line: the body, the response "
+                        "with usage, when it started), replayed through the proxy's own pipeline")
+    p.add_argument("--path", metavar="PATH", help="where the logs are (default: the agent's own folder; for "
+                                                  "gateway, the log file or a folder of them)")
+    p.add_argument("--engine", choices=["vllm", "sglang"],
+                   help="gateway: the log is from a self-hosted engine (its prefix order puts the system prompt first)")
+    p.add_argument("--prices", metavar="FILE", help="gateway: your own rates file (default: $PREFIXWISE_PRICES)")
     p.add_argument("--since", metavar="WHEN", help="only requests after this: unix seconds, or 24h, 7d")
     p.add_argument("--json", action="store_true", help="import counts as JSON, no report")
     p.add_argument("--ledger", help="SQLite ledger file (default: ./prefixwise-<source>.db, apart from a "
