@@ -224,14 +224,15 @@ _MISSING = object()  # a field the client did not send
 _INNER_KEYS = {"prompt_cache_options": ("comparison_response_id",), "diagnostics": ("previous_message_id",),
                "stream_options": ("include_usage",), "vllm_xargs": ("kv_cache_report_mode",)}
 
-# Body fields Prefixwise reads but upstream APIs do not accept. Stripped
-# before forwarding (OpenAI rejects unknown fields with a 400). vLLM, and
-# SGLang with --kv-events, get Prefixwise's session id: they stamp it on KV events.
 def _short_id(value) -> str | None:
     """A client's own id field, when it is a usable string (not too long to key a session)."""
     return value if isinstance(value, str) and value and len(value) <= MAX_ID_CHARS else None
 
 
+# Body fields Prefixwise reads but upstream APIs do not accept. Stripped
+# before forwarding (OpenAI rejects unknown fields with a 400), except a client's own
+# session_id to OpenRouter, which routes by it (_takes_session_id). vLLM, and
+# SGLang with --kv-events, get Prefixwise's session id: they stamp it on KV events.
 PREFIXWISE_FIELDS = ("session_id", "agent_id", "task_id", "prefixwise_compaction_event",
                      "prefixwise_upstream_session_id")
 
@@ -913,13 +914,13 @@ class PrefixwiseProxy:
         # them, since its meaning is up to each client; a user id last.
         given = (headers.get("x-prefixwise-session-id") or body.get("session_id")
                  or headers.get("thread-id") or headers.get("session-id")  # Codex
-                 or client_key
-                 # OpenAI's cache routing key, which OpenRouter also routes by: clients set it per
-                 # conversation (or per user), so it groups turns where nothing else names one
-                 or _short_id(body.get("prompt_cache_key")))
-        # An end-user id last: Anthropic's metadata.user_id, OpenAI's user. Turns of one user's
-        # different conversations are still told apart by their opening message.
-        user_id = (body.get("metadata") or {}).get("user_id") or _short_id(body.get("user"))
+                 or client_key)
+        # An end-user id last: Anthropic's metadata.user_id, OpenAI's user. Not a prompt_cache_key:
+        # a key that changes mid-conversation is the miss cache_key_changed names, and as a session
+        # name it would read as a new conversation. Not in `prefixwise check`, whose scenarios are
+        # named through default_session and must not merge on a shared user id.
+        user_id = None if self.check_mode else (
+            (body.get("metadata") or {}).get("user_id") or _short_id(body.get("user")))
         session_is_user = not given and bool(user_id)
         session_id = str(given or user_id or self.default_session)
         task_id = headers.get("x-prefixwise-task-id") or body.get("task_id")

@@ -71,15 +71,39 @@ def test_a_hosted_api_still_gets_no_session_id(monkeypatch):
         up.server.shutdown()
 
 
-def test_prompt_cache_key_then_user_group_turns_when_nothing_else_names_a_session():
+def test_user_groups_turns_when_nothing_else_names_a_session_but_never_a_cache_key():
     p = PrefixwiseProxy(mock=True)
-    ctx = p.prepare("openai", {**BODY, "prompt_cache_key": "conv-7"}, {})
-    assert ctx["session_id"] == "conv-7" and not ctx["session_is_user"]
     ctx = p.prepare("openai", {**BODY, "user": "u-123"}, {})
     assert ctx["session_id"] == "u-123" and ctx["session_is_user"]  # a user id, not a conversation id
-    ctx = p.prepare("openai", {**BODY, "prompt_cache_key": "conv-7"}, {"x-prefixwise-session-id": "s-1"})
-    assert ctx["session_id"] == "s-1"  # an explicit id still wins
-    ctx = p.prepare("openai", {**BODY, "user": 12345}, {})
-    assert ctx["session_id"] == p.default_session  # not a string: not an id
-    long = "k" * 300
-    assert p.prepare("openai", {**BODY, "prompt_cache_key": long}, {})["session_id"] == p.default_session
+    ctx = p.prepare("openai", {**BODY, "prompt_cache_key": "conv-7"}, {})
+    assert ctx["session_id"] == p.default_session  # a changing key is the miss cache_key_changed names
+    ctx = p.prepare("openai", {**BODY, "user": "u-123"}, {"x-prefixwise-session-id": "s-1"})
+    assert ctx["session_id"] == "s-1" and not ctx["session_is_user"]  # an explicit id still wins
+    assert p.prepare("openai", {**BODY, "user": 12345}, {})["session_id"] == p.default_session
+    assert p.prepare("openai", {**BODY, "user": "u" * 300}, {})["session_id"] == p.default_session
+
+
+def test_a_changed_cache_key_without_a_session_id_is_still_named():
+    """The regression a prompt_cache_key session name would cause: turn 2 changes the key and
+    misses; without any session id it must stay cache_key_changed, not a new conversation."""
+    p = PrefixwiseProxy(mock=True)
+    usages = [{"prompt_tokens": 3000, "completion_tokens": 1, "prompt_tokens_details": {"cached_tokens": 0}},
+              {"prompt_tokens": 3020, "completion_tokens": 1, "prompt_tokens_details": {"cached_tokens": 0}}]
+
+    def fake(provider, body, request_id, session_id, client_headers, api="chat"):
+        return 200, {"id": request_id, "choices": [{"message": {"role": "assistant", "content": "ok"}}],
+                     "usage": usages.pop(0)}
+    p.mock = False
+    p._forward = fake
+    msgs = [{"role": "system", "content": "You are careful. " * 300}, {"role": "user", "content": "hi"}]
+    p.handle("openai", {"model": "gpt-5", "messages": msgs, "prompt_cache_key": "a"}, {})
+    more = msgs + [{"role": "assistant", "content": "ok"}, {"role": "user", "content": "go on"}]
+    _, e = p.handle("openai", {"model": "gpt-5", "messages": more, "prompt_cache_key": "b"}, {})
+    assert e.detail == "cache_key_changed", (e.cause, e.detail, e.evidence)
+
+
+def test_check_scenarios_do_not_merge_on_a_shared_user():
+    p = PrefixwiseProxy(mock=True)
+    p.check_mode = True
+    p.default_session = "test_a"
+    assert p.prepare("openai", {**BODY, "user": "ci-bot"}, {})["session_id"] == "test_a"

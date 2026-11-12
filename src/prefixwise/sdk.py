@@ -91,7 +91,7 @@ class Recorder:
                 headers["x-prefixwise-task-id"] = str(tid)
             ctx = None
             ctx = self.proxy.prepare(provider, _plain(request), headers, api=api)
-            ctx["session_is_user"] = bool(session_is_user)
+            ctx["session_is_user"] = bool(session_is_user) or bool(ctx.get("session_is_user"))
             if genai_provider:
                 ctx["genai_provider"] = genai_provider
             if ended_at is not None:
