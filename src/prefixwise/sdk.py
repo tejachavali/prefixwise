@@ -18,7 +18,9 @@ usage is read from its events as they pass, and the call is recorded once, when 
 stream ends. A stream closed or cancelled before its end is a failure row
 (`client_disconnected`), as the proxy records a client that hangs up: its usage is partial at
 best; one the server or the network breaks is `upstream_dropped`. A stream dropped without
-being closed or read to its end is not recorded. `with_raw_response` and
+being closed or read to its end is not recorded (recording from the garbage collector could block
+on the ledger). One edge: a helper's stream closed by another task while it is being read, and
+which the server then ends cleanly, is recorded as ended, with what was read. `with_raw_response` and
 `with_streaming_response` streams are passed through untouched and unrecorded. On OpenAI Chat
 Completions, usage is only streamed when `stream_options.include_usage` is set; when the
 caller has not set it, Prefixwise asks for it and keeps the extra usage-only chunk out of
@@ -220,28 +222,6 @@ class _Tap:
         self.acc = StreamAccumulator(call.provider, suppress_usage_chunk=injected, api=call.api)
         self.finished = False
         self.broken = False
-        self.reading = False  # inside the stream's own next(): a close there is its natural end
-
-    def hook_close(self, stream, asynchronous: bool) -> None:
-        """The SDKs' helpers (ChatCompletionStream, ResponseStream) close a stream through its HTTP
-        response, never through the stream: a close there before the end is a stream left early."""
-        response = getattr(stream, "response", None)
-        name = "aclose" if asynchronous else "close"
-        original = getattr(response, name, None)
-        if original is None:
-            return
-        tap = self
-        if asynchronous:
-            async def close(*args, **kwargs):
-                if not tap.reading:
-                    tap.end(False)
-                return await original(*args, **kwargs)
-        else:
-            def close(*args, **kwargs):
-                if not tap.reading:
-                    tap.end(False)
-                return original(*args, **kwargs)
-        setattr(response, name, close)
 
     def see(self, item) -> bool:
         """True if the item goes on to the caller (only an usage chunk Prefixwise asked for does not)."""
@@ -335,7 +315,6 @@ class _StreamTap(_Proxy):
     def __init__(self, inner, tap: _Tap):
         super().__init__(inner)
         object.__setattr__(self, "_pw_tap", tap)
-        tap.hook_close(inner, asynchronous=False)
 
     def __iter__(self):
         return self
@@ -343,7 +322,6 @@ class _StreamTap(_Proxy):
     def __next__(self):
         inner, tap = object.__getattribute__(self, "_pw_inner"), object.__getattribute__(self, "_pw_tap")
         while True:
-            tap.reading = True
             try:
                 item = next(inner)
             except StopIteration:
@@ -352,8 +330,6 @@ class _StreamTap(_Proxy):
             except BaseException as exc:
                 tap.stopped(exc)
                 raise
-            finally:
-                tap.reading = False
             if tap.see(item):
                 return item
 
@@ -380,7 +356,6 @@ class _AsyncStreamTap(_Proxy):
     def __init__(self, inner, tap: _Tap):
         super().__init__(inner)
         object.__setattr__(self, "_pw_tap", tap)
-        tap.hook_close(inner, asynchronous=True)
 
     def __aiter__(self):
         return self
@@ -388,7 +363,6 @@ class _AsyncStreamTap(_Proxy):
     async def __anext__(self):
         inner, tap = object.__getattribute__(self, "_pw_inner"), object.__getattribute__(self, "_pw_tap")
         while True:
-            tap.reading = True
             try:
                 item = await inner.__anext__()
             except StopAsyncIteration:
@@ -397,8 +371,6 @@ class _AsyncStreamTap(_Proxy):
             except BaseException as exc:
                 tap.stopped(exc)
                 raise
-            finally:
-                tap.reading = False
             if tap.see(item):
                 return item
 
@@ -593,6 +565,65 @@ def _record_snapshot(call: _Call, stream, exc=None) -> None:
         pass
 
 
+class _HelperTap(_Proxy):
+    """OpenAI's chat.completions.stream() and responses.stream(): their request goes through the
+    patched create, so the stream is recorded there; but their streams close through the HTTP
+    response, never through ours, so a stream left before its end is ended here, on exit from the
+    `with` block (a no-op when it ran to its end)."""
+
+    def __init__(self, inner):
+        super().__init__(inner)
+        object.__setattr__(self, "_pw_stream", None)
+
+    def __enter__(self):
+        stream = object.__getattribute__(self, "_pw_inner").__enter__()
+        object.__setattr__(self, "_pw_stream", stream)
+        return stream
+
+    def __exit__(self, *exc):
+        try:
+            return object.__getattribute__(self, "_pw_inner").__exit__(*exc)
+        finally:
+            _left(object.__getattribute__(self, "_pw_stream"))
+
+    async def __aenter__(self):
+        stream = await object.__getattribute__(self, "_pw_inner").__aenter__()
+        object.__setattr__(self, "_pw_stream", stream)
+        return stream
+
+    async def __aexit__(self, *exc):
+        try:
+            return await object.__getattribute__(self, "_pw_inner").__aexit__(*exc)
+        finally:
+            _left(object.__getattribute__(self, "_pw_stream"))
+
+
+def _left(stream) -> None:
+    """End the tap of the raw stream a helper's stream reads (a failure row, unless it ended)."""
+    try:
+        raw = getattr(stream, "_raw_stream", None)
+        if type(raw) in (_StreamTap, _AsyncStreamTap):  # type(): isinstance would see the SDK's class
+            object.__getattribute__(raw, "_pw_tap").end(False)
+    except Exception:  # noqa: BLE001 - recording never breaks the caller
+        pass
+
+
+def _patch_helper(resource) -> None:
+    original = getattr(resource, "stream", None)
+    if original is None or getattr(original, "_prefixwise", False):
+        return
+
+    @functools.wraps(original)
+    def wrapper(*args, **kwargs):
+        manager = original(*args, **kwargs)
+        try:
+            return _HelperTap(manager)
+        except Exception:  # noqa: BLE001
+            return manager
+    wrapper._prefixwise = True
+    setattr(resource, "stream", wrapper)
+
+
 def _patch_stream_helper(resource, provider: str, recorder: Recorder, agent_id: str | None) -> None:
     original = getattr(resource, "stream", None)
     if original is None or getattr(original, "_prefixwise", False):
@@ -633,7 +664,9 @@ def wrap(client, *, recorder: Recorder | None = None, agent_id: str | None = Non
     elif module == "openai":
         for name in ("create", "parse"):
             _patch(client.chat.completions, name, "openai", "chat", recorder, agent_id)
+        _patch_helper(client.chat.completions)
         if getattr(client, "responses", None) is not None:
             for name in ("create", "parse"):
                 _patch(client.responses, name, "openai", "responses", recorder, agent_id)
+            _patch_helper(client.responses)
     return client

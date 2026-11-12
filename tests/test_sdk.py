@@ -492,3 +492,30 @@ def test_an_error_event_mid_stream_is_an_upstream_failure():
             next(iter(s))
             raise RuntimeError("mine")
     assert errors(rec) == ["upstream_dropped", "upstream_dropped", "client_disconnected"]
+
+
+def test_a_dropped_stream_is_left_to_the_sdk_and_nothing_is_patched_onto_its_response(server):
+    """Found by review: a close hooked on the HTTP response recorded from the garbage collector,
+    which can run while the ledger lock is held (a deadlock), and kept every response alive until
+    a cyclic collection. A stream dropped half-read is not recorded; a finished one is freed at once."""
+    import gc
+    import weakref
+    rec = Recorder(":memory:")
+    oa = prefixwise.wrap(openai.OpenAI(base_url=server + "/v1", api_key="sk-test"), recorder=rec)
+    an = prefixwise.wrap(anthropic.Anthropic(base_url=server, api_key="sk-ant-test"), recorder=rec)
+    s = oa.chat.completions.create(model="gpt-5.6", messages=MSGS, stream=True)
+    next(s)
+    assert "close" not in vars(s.response) and "aclose" not in vars(s.response)
+    del s
+    gc.collect()
+    assert rows(rec) == []
+    gc.disable()
+    try:
+        s = an.messages.create(**ANTH, stream=True)
+        response = weakref.ref(s.response)
+        list(s)
+        del s
+        assert response() is None  # freed by reference counting, as without Prefixwise
+    finally:
+        gc.enable()
+    assert errors(rec) == [None]
