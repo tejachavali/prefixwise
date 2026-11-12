@@ -367,3 +367,128 @@ def test_a_server_that_rejects_stream_options_is_asked_once(tmp_path):
                 client.chat.completions.create(model="m", messages=MSGS, stream=True)] == ["hi"]
     assert seen == [True, False, False]
     assert errors(rec) == [None, None]  # recorded; no usage, so no verdict is claimed from it
+
+
+# Found by review: raw responses, extra_body, helpers left early, cancellation, error events ------
+
+
+def _sse_openai(handler_seen, with_usage_when_asked=True):
+    import json as _json
+    httpx = pytest.importorskip("httpx")
+
+    def handler(request):
+        body = _json.loads(request.content)
+        handler_seen.append(body)
+        base = {"id": "c1", "object": "chat.completion.chunk", "created": 1, "model": "m"}
+        chunks = [{**base, "choices": [{"index": 0, "delta": {"content": "hi"}, "finish_reason": None}]},
+                  {**base, "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}]
+        if with_usage_when_asked and (body.get("stream_options") or {}).get("include_usage"):
+            chunks.append({**base, "choices": [], "usage": {"prompt_tokens": 2000, "completion_tokens": 1,
+                                                            "prompt_tokens_details": {"cached_tokens": 0}}})
+        sse = "".join(f"data: {_json.dumps(c)}\n\n" for c in chunks) + "data: [DONE]\n\n"
+        return httpx.Response(200, content=sse.encode(), headers={"content-type": "text/event-stream"})
+    return httpx.MockTransport(handler)
+
+
+def test_raw_and_streaming_responses_are_left_untouched():
+    httpx = pytest.importorskip("httpx")
+    seen = []
+    rec = Recorder(":memory:")
+    client = prefixwise.wrap(openai.OpenAI(base_url="http://local.invalid/v1", api_key="k", max_retries=0,
+                                           http_client=httpx.Client(transport=_sse_openai(seen))), recorder=rec)
+    chunks = list(client.chat.completions.with_raw_response.create(model="m", messages=MSGS, stream=True).parse())
+    with client.chat.completions.with_streaming_response.create(model="m", messages=MSGS, stream=True) as r:
+        text = b"".join(r.iter_bytes())
+    assert len(chunks) == 2 and all(c.choices for c in chunks) and b'"usage"' not in text
+    assert ["stream_options" in b for b in seen] == [False, False] and rows(rec) == []
+
+
+def test_usage_asked_for_through_extra_body_reaches_the_caller():
+    httpx = pytest.importorskip("httpx")
+    seen = []
+    rec = Recorder(":memory:")
+    client = prefixwise.wrap(openai.OpenAI(base_url="http://local.invalid/v1", api_key="k", max_retries=0,
+                                           http_client=httpx.Client(transport=_sse_openai(seen))), recorder=rec)
+    chunks = list(client.chat.completions.create(model="m", messages=MSGS, stream=True,
+                                                 extra_body={"stream_options": {"include_usage": True}}))
+    assert len(chunks) == 3 and chunks[-1].usage.prompt_tokens == 2000
+    assert [r[6] for r in rows(rec)] == [2000]
+
+
+def test_helpers_left_early_are_failure_rows(server):
+    rec = Recorder(":memory:")
+    oa = prefixwise.wrap(openai.OpenAI(base_url=server + "/v1", api_key="sk-test"), recorder=rec)
+    with oa.chat.completions.stream(model="gpt-5.6", messages=MSGS) as s:
+        next(iter(s))
+    with oa.responses.stream(model="gpt-5.6", input="hi") as s:
+        next(iter(s))
+    aoa = prefixwise.wrap(openai.AsyncOpenAI(base_url=server + "/v1", api_key="sk-test"), recorder=rec)
+
+    async def go():
+        async with aoa.chat.completions.stream(model="gpt-5.6", messages=MSGS) as s:
+            async for _ in s:
+                break
+        async with aoa.chat.completions.stream(model="gpt-5.6", messages=MSGS) as s:  # to the end: a row
+            async for _ in s:
+                pass
+    asyncio.run(go())
+    assert errors(rec) == ["client_disconnected"] * 3 + [None]
+
+
+def test_a_cancelled_stream_is_the_caller_stopping_not_an_upstream_failure():
+    from prefixwise.sdk import _AsyncStreamTap, _Call, _StreamTap, _Tap
+    rec = Recorder(":memory:")
+
+    class Stalls:  # the next chunk never comes: the caller's timeout cancels the wait
+        async def __anext__(self):
+            raise asyncio.CancelledError
+
+    class Interrupted:
+        def __next__(self):
+            raise KeyboardInterrupt
+
+    async def go():
+        stream = _AsyncStreamTap(Stalls(), _Tap(_Call(rec, "openai", "chat", {"model": "m", "messages": MSGS},
+                                                      None), False))
+        with pytest.raises(asyncio.CancelledError):
+            await stream.__anext__()
+    asyncio.run(go())
+    with pytest.raises(KeyboardInterrupt):
+        next(_StreamTap(Interrupted(), _Tap(_Call(rec, "openai", "chat", {"model": "m", "messages": MSGS}, None),
+                                            False)))
+    assert errors(rec) == ["client_disconnected", "client_disconnected"]
+
+
+def test_an_error_event_mid_stream_is_an_upstream_failure():
+    """Anthropic sends an `error` event (overloaded) after message_start: the SDK raises from the
+    stream, and the row says the stream broke, not that the caller left."""
+    import json as _json
+    try:
+        import httpx2 as httpx  # the anthropic SDK's own HTTP client, where it has one
+    except ImportError:
+        httpx = pytest.importorskip("httpx")
+
+    def handler(request):
+        start = {"type": "message_start", "message": {"id": "msg_1", "type": "message", "role": "assistant",
+                 "model": "claude-haiku-5-5", "content": [], "stop_reason": None,
+                 "usage": {"input_tokens": 2000, "output_tokens": 0}}}
+        err = {"type": "error", "error": {"type": "overloaded_error", "message": "Overloaded"}}
+        sse = f"event: message_start\ndata: {_json.dumps(start)}\n\nevent: error\ndata: {_json.dumps(err)}\n\n"
+        return httpx.Response(200, content=sse.encode(), headers={"content-type": "text/event-stream"})
+
+    rec = Recorder(":memory:")
+    an = prefixwise.wrap(anthropic.Anthropic(base_url="http://local.invalid", api_key="k", max_retries=0,
+                                             http_client=httpx.Client(transport=httpx.MockTransport(handler))),
+                         recorder=rec)
+    with pytest.raises(anthropic.APIStatusError):
+        with an.messages.stream(**ANTH) as s:
+            for _ in s:
+                pass
+    with pytest.raises(anthropic.APIStatusError):
+        for _ in an.messages.create(**ANTH, stream=True):
+            pass
+    with pytest.raises(RuntimeError):  # the caller's own error inside the block: the caller left
+        with an.messages.stream(**ANTH) as s:
+            next(iter(s))
+            raise RuntimeError("mine")
+    assert errors(rec) == ["upstream_dropped", "upstream_dropped", "client_disconnected"]

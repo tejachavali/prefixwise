@@ -15,8 +15,11 @@ SDK's own. Recording can never break a call: a failure is reported once and igno
 Streamed calls are recorded too: `create(..., stream=True)` and the SDKs' `.stream()`
 helpers, sync and async. The stream the caller iterates is the SDK's own, item for item;
 usage is read from its events as they pass, and the call is recorded once, when the
-stream ends. A stream closed before its end is a failure row (`client_disconnected`), as
-the proxy records a client that hangs up: its usage is partial at best. On OpenAI Chat
+stream ends. A stream closed or cancelled before its end is a failure row
+(`client_disconnected`), as the proxy records a client that hangs up: its usage is partial at
+best; one the server or the network breaks is `upstream_dropped`. A stream dropped without
+being closed or read to its end is not recorded. `with_raw_response` and
+`with_streaming_response` streams are passed through untouched and unrecorded. On OpenAI Chat
 Completions, usage is only streamed when `stream_options.include_usage` is set; when the
 caller has not set it, Prefixwise asks for it and keeps the extra usage-only chunk out of
 the caller's stream, so the caller sees exactly the chunks it asked for. The session is
@@ -217,6 +220,28 @@ class _Tap:
         self.acc = StreamAccumulator(call.provider, suppress_usage_chunk=injected, api=call.api)
         self.finished = False
         self.broken = False
+        self.reading = False  # inside the stream's own next(): a close there is its natural end
+
+    def hook_close(self, stream, asynchronous: bool) -> None:
+        """The SDKs' helpers (ChatCompletionStream, ResponseStream) close a stream through its HTTP
+        response, never through the stream: a close there before the end is a stream left early."""
+        response = getattr(stream, "response", None)
+        name = "aclose" if asynchronous else "close"
+        original = getattr(response, name, None)
+        if original is None:
+            return
+        tap = self
+        if asynchronous:
+            async def close(*args, **kwargs):
+                if not tap.reading:
+                    tap.end(False)
+                return await original(*args, **kwargs)
+        else:
+            def close(*args, **kwargs):
+                if not tap.reading:
+                    tap.end(False)
+                return original(*args, **kwargs)
+        setattr(response, name, close)
 
     def see(self, item) -> bool:
         """True if the item goes on to the caller (only an usage chunk Prefixwise asked for does not)."""
@@ -239,6 +264,11 @@ class _Tap:
         except Exception:  # noqa: BLE001 - an event we cannot read: this call goes unrecorded
             self.broken = True
         return True
+
+    def stopped(self, exc: BaseException) -> None:
+        """The stream raised: the server or the network broke it (an Exception), or the caller
+        stopped it (cancelled, interrupted, generator closed)."""
+        self.end(False, "upstream_dropped" if isinstance(exc, Exception) else "client_disconnected")
 
     def end(self, completed: bool, error: str = "client_disconnected") -> None:
         """Record the call: completed, from what was read; otherwise as a failure row."""
@@ -305,6 +335,7 @@ class _StreamTap(_Proxy):
     def __init__(self, inner, tap: _Tap):
         super().__init__(inner)
         object.__setattr__(self, "_pw_tap", tap)
+        tap.hook_close(inner, asynchronous=False)
 
     def __iter__(self):
         return self
@@ -312,14 +343,17 @@ class _StreamTap(_Proxy):
     def __next__(self):
         inner, tap = object.__getattribute__(self, "_pw_inner"), object.__getattribute__(self, "_pw_tap")
         while True:
+            tap.reading = True
             try:
                 item = next(inner)
             except StopIteration:
                 tap.end(True)
                 raise
-            except BaseException:
-                tap.end(False, "upstream_dropped")
+            except BaseException as exc:
+                tap.stopped(exc)
                 raise
+            finally:
+                tap.reading = False
             if tap.see(item):
                 return item
 
@@ -346,6 +380,7 @@ class _AsyncStreamTap(_Proxy):
     def __init__(self, inner, tap: _Tap):
         super().__init__(inner)
         object.__setattr__(self, "_pw_tap", tap)
+        tap.hook_close(inner, asynchronous=True)
 
     def __aiter__(self):
         return self
@@ -353,14 +388,17 @@ class _AsyncStreamTap(_Proxy):
     async def __anext__(self):
         inner, tap = object.__getattribute__(self, "_pw_inner"), object.__getattribute__(self, "_pw_tap")
         while True:
+            tap.reading = True
             try:
                 item = await inner.__anext__()
             except StopAsyncIteration:
                 tap.end(True)
                 raise
-            except BaseException:
-                tap.end(False, "upstream_dropped")
+            except BaseException as exc:
+                tap.stopped(exc)
                 raise
+            finally:
+                tap.reading = False
             if tap.see(item):
                 return item
 
@@ -395,13 +433,24 @@ def _ask_for_usage(kwargs: dict) -> tuple[dict, bool]:
     opts = kwargs.get("stream_options")
     if isinstance(opts, dict) and "include_usage" in opts:
         return kwargs, False
+    extra = kwargs.get("extra_body")
+    if isinstance(extra, dict) and "stream_options" in extra:  # sent over ours: the caller's choice
+        return kwargs, False
     base = opts if isinstance(opts, dict) else {}
     return {**kwargs, "stream_options": {**base, "include_usage": True}}, True
 
 
-def _refused_usage(exc: Exception) -> bool:
-    """A server that rejects stream_options (some OpenAI-compatible ones do): 400 naming it."""
-    return getattr(exc, "status_code", None) in (400, 422) and "stream_options" in str(exc)
+def _refused_usage(exc: Exception, kwargs: dict) -> bool:
+    """A server that rejects stream_options (some OpenAI-compatible ones do): 400 naming it. Retried
+    only when the caller sent none, so the retry is the caller's own request and can succeed."""
+    return (getattr(exc, "status_code", None) in (400, 422) and "stream_options" in str(exc)
+            and not isinstance(kwargs.get("stream_options"), dict))
+
+
+def _raw(kwargs: dict) -> bool:
+    """with_raw_response / with_streaming_response: the caller reads the HTTP response itself."""
+    headers = kwargs.get("extra_headers")
+    return isinstance(headers, dict) and any(str(k).lower() == "x-stainless-raw-response" for k in headers)
 
 
 def _patch(resource, name: str, provider: str, api: str, recorder: Recorder, agent_id: str | None) -> None:
@@ -447,13 +496,15 @@ def _patch(resource, name: str, provider: str, api: str, recorder: Recorder, age
     @functools.wraps(original)
     def wrapper(*args, **kwargs):
         started = time.perf_counter()
+        if kwargs.get("stream") is True and _raw(kwargs):
+            return original(*args, **kwargs)  # the caller reads the raw stream: untouched, unrecorded
         if kwargs.get("stream") is True:
             call = _Call(recorder, provider, api, _request_body(kwargs), agent_id)
             out, injected = sent(kwargs)
             try:
                 result = original(*args, **out)
             except Exception as exc:
-                if not injected or not _refused_usage(exc):
+                if not injected or not _refused_usage(exc, kwargs):
                     raise
                 refused.append(True)
                 out, injected = kwargs, False
@@ -474,7 +525,7 @@ async def _await_stream(awaitable, kwargs, call, injected, original, args, refus
     try:
         result = await awaitable
     except Exception as exc:
-        if not injected or not _refused_usage(exc):
+        if not injected or not _refused_usage(exc, kwargs):
             raise
         refused.append(True)
         injected = False
@@ -501,7 +552,8 @@ class _ManagerTap(_Proxy):
         try:
             return object.__getattribute__(self, "_pw_inner").__exit__(*exc)
         finally:
-            _record_snapshot(object.__getattribute__(self, "_pw_call"), object.__getattribute__(self, "_pw_stream"))
+            _record_snapshot(object.__getattribute__(self, "_pw_call"), object.__getattribute__(self, "_pw_stream"),
+                             exc[1] if len(exc) > 1 else None)
 
     async def __aenter__(self):
         stream = await object.__getattribute__(self, "_pw_inner").__aenter__()
@@ -512,10 +564,17 @@ class _ManagerTap(_Proxy):
         try:
             return await object.__getattribute__(self, "_pw_inner").__aexit__(*exc)
         finally:
-            _record_snapshot(object.__getattribute__(self, "_pw_call"), object.__getattribute__(self, "_pw_stream"))
+            _record_snapshot(object.__getattribute__(self, "_pw_call"), object.__getattribute__(self, "_pw_stream"),
+                             exc[1] if len(exc) > 1 else None)
 
 
-def _record_snapshot(call: _Call, stream) -> None:
+def _from_the_stream(exc) -> bool:
+    """An error the SDK or its HTTP client raised (an error event mid-stream, a dropped connection),
+    not one from the caller's own code in the `with` block, nor a cancellation."""
+    return isinstance(exc, Exception) and type(exc).__module__.split(".")[0] in ("anthropic", "httpx", "httpx2", "httpcore")
+
+
+def _record_snapshot(call: _Call, stream, exc=None) -> None:
     if stream is None:  # the request itself failed: the SDK raised it to the caller
         return
     try:
@@ -526,6 +585,8 @@ def _record_snapshot(call: _Call, stream) -> None:
         payload = _as_dict(snapshot) if snapshot is not None else None
         if payload and payload.get("stop_reason"):
             call.record(payload)
+        elif _from_the_stream(exc):
+            call.fail(502, "upstream_dropped")
         else:
             call.fail(499, "client_disconnected")
     except Exception:  # noqa: BLE001 - recording never breaks the caller's stream
