@@ -2,10 +2,10 @@
 
 ## 0.12.1: 2026-11-13
 
-For anyone comparing two ways of running the same agent work: `prefixwise report --compare TASK TASK` puts two tasks side by side with the difference, so one long session against several short ones (or one prompt layout against another) is one command, not a spreadsheet. PyPI's search now finds Prefixwise under SGLang and LMCache.
+For anyone comparing two ways of running the same agent work: `prefixwise report --compare TASK TASK` puts two tasks side by side with the difference, so one long session against several short ones (or one prompt layout against another) is one command, not a spreadsheet. SGLang and LMCache are now named in the package's one-line description and keywords on PyPI.
 
 - **Two tasks side by side: `prefixwise report --compare TASK TASK`.** The same work done two ways (one long session against several short ones, one prompt layout against another) as two columns and the change between them: requests, prompt tokens, the share from cache, output tokens, avoidable tokens, cost and outcome. Asked for by someone comparing long and short sessions on their own gateway: the report summed the two tasks together, and the per-task table (`--by task_id`) was there but not mentioned. The report now points to both when a ledger holds more than one task. Cost is shown only for a task whose every request is priced, with enough digits to compare small runs.
-- **Found under SGLang and LMCache on PyPI.** The package's keywords and one-line description now name both engines, which Prefixwise already supported.
+- **SGLang and LMCache in the PyPI summary and keywords.** Both were supported and named in the README already; the one-line description and keywords now name them too.
 
 ## 0.12.0: 2026-11-12
 
