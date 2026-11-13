@@ -196,6 +196,7 @@ Then:
 prefixwise task fix-bug-42 --success         # when the task ends (or POST /tasks)
 prefixwise report                            # what the cache did, and what to fix (--detail for tables)
 prefixwise report --by agent_id              # compare agent / prompt versions per successful task
+prefixwise report --compare long short       # two tasks side by side, with the difference (one long session vs several short ones)
 prefixwise explain examples/session.jsonl    # offline: diagnose a saved session (examples/ is in this repo)
 ```
 
@@ -336,7 +337,7 @@ Each detail is claimed only when all of its conditions hold; otherwise there is 
 | `prefixwise prune --older-than 30d` | Delete ledger entries older than that (retention). Add `--include-undated` to also drop rows written before 0.3.1. |
 | `prefixwise export [--format jsonl\|csv] [--since 7d] [--where session=s1] [--baseline]` | Every ledger row (facts, never prompt text) for a spreadsheet, notebook or warehouse. |
 | `prefixwise fixes [--json]` | The fixes that would save the most, ranked by the avoidable tokens your own ledger attributes to each cause. |
-| `prefixwise report [--by cause\|session_id\|agent_id\|model\|provider\|task_id] [--session ID\|latest] [--share] [--json]` | Totals and a breakdown, most avoidable first. `--session`: one session turn by turn: prompt and cached tokens, hit rate, the cause and detail, the block where the prompt first changed, as role[position in the whole prompt: tools, then system, then the conversation] (`tools[0]`, `messages[9]`), the request's cost, avoidable tokens and dollars. Hashes and counts only. |
+| `prefixwise report [--by cause\|session_id\|agent_id\|model\|provider\|task_id] [--session ID\|latest] [--compare TASK TASK] [--share] [--json]` | Totals and a breakdown, most avoidable first. `--compare`: two tasks side by side (requests, prompt tokens, share from cache, output tokens, avoidable tokens, cost, outcome) with the change from the first to the second; cost only for a task whose every request is priced. `--session`: one session turn by turn: prompt and cached tokens, hit rate, the cause and detail, the block where the prompt first changed, as role[position in the whole prompt: tools, then system, then the conversation] (`tools[0]`, `messages[9]`), the request's cost, avoidable tokens and dollars. Hashes and counts only. |
 | `prefixwise task ID --success\|--failure` | Record a task outcome (safe while the proxy runs). |
 | `prefixwise request REQUEST_ID [--json]` | One request's ledger entry (from `X-Prefixwise-Request-Id`). |
 | `prefixwise explain A.json B.json` / `explain SESSION.jsonl [--json] [--fail-on-waste] [--diff]` | Offline diagnosis of saved request bodies, or `{"request": ..., "usage": ..., "session_id": ..., "gap_seconds": ...}` records. |
