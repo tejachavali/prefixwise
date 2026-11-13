@@ -21,10 +21,11 @@ python experiments/demo/hallway.py --auto     # no pauses, for a recording
 | 5 | the same agent with `--optimize` on the proxy, and the two changes the report asked for in the agent (no time in the prefix; append, don't rewrite) | every turn after the first hits; before and after side by side |
 
 In the live run nothing is simulated: the cached-token counts come from the provider, and the run
-costs a few cents on Claude Haiku. The mock provider reports a hit when the tools, system prompt and
-earlier messages are unchanged, as a real cache does, so the verdicts are the ones the classifier gives
-live, with 2,000-token prompts. Ledgers hold hashes and token counts, never prompt text. `--keep DIR`
-keeps the two ledgers for `prefixwise report --ledger DIR/before.db --session hallway-before`.
+costs under a cent on Claude Haiku. The mock provider reports a hit when the tools, system prompt and
+earlier messages are unchanged since the session's previous turn, with 2,000-token prompts; a live
+provider that keeps older entries can turn the return to the first tool order (turn 6) back into a
+hit. Ledgers hold hashes and token counts, never prompt text. `--keep DIR` keeps the two ledgers; the
+closing lines print the `prefixwise report --session` command for them.
 
 What this does not show: engine evictions and routing misses confirmed from vLLM or SGLang KV events,
 which need a GPU ([E-evict](../e_evict/runs/), [E-route](../e_route/runs/)). The measured proof that

@@ -15,9 +15,11 @@ One scripted coding agent, nine turns, through Prefixwise. Press Enter between a
            report asked for in the agent                            -> every turn after the first hits
 
 Nothing here is simulated in the live run: the usage comes from the provider. The mock provider
-reports a hit when the prompt's tools, system prompt and earlier messages are unchanged, as a real
-cache does, so the verdicts are the same ones the classifier gives live. The ledger holds hashes and
-token counts, never prompt text. The measured proof of the fix is experiments/e4/runs.
+reports a hit when the prompt's tools, system prompt and earlier messages are unchanged since the
+session's previous turn, as a cache that keeps one entry per conversation does; a live provider that
+keeps older entries too can turn a reorder back into a hit (turn 6, which returns to the first order).
+The ledger holds hashes and token counts, never prompt text. The measured proof of the fix is
+experiments/e4/runs.
 """
 
 from __future__ import annotations
@@ -31,6 +33,7 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.error
 import urllib.request
 
 MODEL = {"anthropic": "claude-haiku-5-5", "openai": "gpt-5.6-luna"}
@@ -52,13 +55,17 @@ def pause(args, prompt: str) -> None:
         pass
 
 
+class DemoError(Exception):
+    """A request failed: the demo stops with the provider's own words, not a traceback."""
+
+
 class Agent:
     """A coding agent that resends its whole conversation every turn, as agents do."""
 
     def __init__(self, base: str, provider: str, key: str, session: str):
         self.base, self.provider, self.key, self.session = base, provider, key, session
-        # A big enough prefix to be cacheable on every provider (about 5,000 tokens), tagged per run
-        # so the fixed run cannot read the broken run's cache on a live provider.
+        # A prefix well above every provider's minimum cacheable size (about 10,000 tokens), tagged
+        # per run so the fixed run cannot read the broken run's cache on a live provider.
         self.system = (
             "You are a coding agent working in a large repository. "
             + "Rules, conventions and the repository map follow. " * 900
@@ -124,6 +131,7 @@ class Agent:
                 "max_completion_tokens": 48,
                 "tools": tools,
                 "tool_choice": "none",
+                "reasoning_effort": "none",  # OpenAI rejects function tools with reasoning on
                 "messages": [{"role": "system", "content": system}, *msgs],
             }
             url, headers = (
@@ -137,8 +145,18 @@ class Agent:
             }
         )
         req = urllib.request.Request(url, json.dumps(body).encode(), headers)
-        with urllib.request.urlopen(req, timeout=120) as resp:
-            resp.read()
+        try:
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                resp.read()
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", "replace")[:300]
+            raise DemoError(
+                f"turn {self.turn}: the provider answered {exc.code}: {detail}"
+            ) from None
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            raise DemoError(
+                f"turn {self.turn}: no answer from the provider: {exc}"
+            ) from None
         # The reply is not used: a fixed line keeps both runs' prompts identical, turn for turn.
         self.messages += [
             {
@@ -245,7 +263,9 @@ def session_turns(ledger: str, session: str) -> list[dict]:
         check=False,
     )
     if out.returncode:
-        return []
+        raise DemoError(
+            f"prefixwise report failed: {out.stderr.strip() or out.stdout.strip()}"
+        )
     return json.loads(out.stdout)["turns"]
 
 
@@ -293,7 +313,6 @@ def start_proxy(ledger: str, provider: str, live: bool, optimize: bool):
         fixes=["optimize"] if optimize else None,
         upstreams=upstreams if live else None,
     )
-    proxy.versioned = {"openai"}
     proxy.api_key = None  # the agent's own key passes through; the demo never holds one
     server = PrefixwiseHTTPServer(("127.0.0.1", 0), make_handler(proxy))
     threading.Thread(target=server.serve_forever, daemon=True).start()
@@ -339,6 +358,10 @@ def main() -> int:
             "hallway: --live needs ANTHROPIC_API_KEY or OPENAI_API_KEY in the environment"
         )
     workdir = args.keep or tempfile.mkdtemp(prefix="prefixwise-hallway-")
+    run = time.strftime(
+        "%H%M%S"
+    )  # a new tag per run: a second run cannot read the first's cache
+    sessions = (f"hallway-before-{run}", f"hallway-after-{run}")
     os.makedirs(workdir, exist_ok=True)
     for name in ("before.db", "after.db"):
         for suffix in ("", "-wal", "-shm"):
@@ -362,7 +385,7 @@ def main() -> int:
             server.server_address[1],
             provider,
             key,
-            "hallway-before",
+            sessions[0],
             fixed=False,
             ledger=before,
         )
@@ -401,7 +424,7 @@ def main() -> int:
             server.server_address[1],
             provider,
             key,
-            "hallway-after",
+            sessions[1],
             fixed=True,
             ledger=after,
         )
@@ -410,7 +433,7 @@ def main() -> int:
         server.drain(5)
         server.server_close()
 
-    b, a = totals(before, "hallway-before"), totals(after, "hallway-after")
+    b, a = totals(before, sessions[0]), totals(after, sessions[1])
     say()
     say("before and after", BOLD)
     say(f"  {'':22}{'before':>12}{'after':>12}")
@@ -420,24 +443,34 @@ def main() -> int:
     )
     say(f"  {'avoidable tokens':22}{b['avoidable']:>12,}{a['avoidable']:>12,}")
     saved = b["cost"] - a["cost"]
-    if b["cost"]:
+    if b["cost"] and saved > 0:
         say(
-            f"\n  saved ${saved:.4f}, {saved / b['cost'] * 100:.0f}% of the run's cost",
+            f"\n  saved ${saved:.4f}, {saved / b['cost'] * 100:.0f}% of the run's cost "
+            f"(the report had called ${b['avoidable_cost']:.4f} avoidable)",
             GREEN,
         )
+    elif b["cost"]:
         say(
-            f"  (the report counted ${b['avoidable_cost']:.4f} as avoidable; the write surcharge on the same misses is the rest)",
+            f"\n  no saving this time (before ${b['cost']:.4f}, after ${a['cost']:.4f}): see the two ledgers",
+            RED,
+        )
+    if args.keep:
+        say(f"\nledgers kept in {workdir}  (hashes and counts only)", DIM)
+        say(
+            f"turn by turn: prefixwise report --ledger {os.path.join(workdir, 'before.db')} --session {sessions[0]}",
             DIM,
         )
-    say(f"\nledgers: {workdir}  (hashes and counts only)", DIM)
-    say(
-        "turn by turn: prefixwise report --ledger before.db --session hallway-before",
-        DIM,
-    )
-    if not args.keep:
+    else:
         shutil.rmtree(workdir, ignore_errors=True)
     return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        print("\nhallway: stopped", file=sys.stderr)
+        sys.exit(130)
+    except DemoError as exc:
+        print(f"\nhallway: {exc}", file=sys.stderr)
+        sys.exit(1)
