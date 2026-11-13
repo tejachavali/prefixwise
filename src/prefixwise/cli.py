@@ -273,8 +273,15 @@ def cmd_report(args) -> int:
         table = PriceTable.load(getattr(args, "prices", None))
     except (OSError, ValueError) as exc:
         sys.exit(f"prefixwise: {exc}")
-    if getattr(args, "session", None):
+    if getattr(args, "session", None) and not getattr(args, "compare", None):
         return _report_session(led, args.session, args.json, since)
+    if getattr(args, "compare", None):
+        clash = [flag for flag, on in (("--by", args.by), ("--session", getattr(args, "session", None)),
+                                       ("--share", args.share)) if on]
+        if clash:
+            print(f"prefixwise: --compare cannot be combined with {', '.join(clash)}", file=sys.stderr)
+            return 2
+        return _report_compare(led, args.compare, args.json, since, args.since)
     found = findings(led, since=since, prices=table)
     detail = args.detail or args.by is not None
     args.by = args.by or "cause"
@@ -289,6 +296,8 @@ def cmd_report(args) -> int:
     print(render(found))
     if not detail:
         print("\nDetails: prefixwise report --detail   Fixes: prefixwise fixes   Data: prefixwise export")
+        if _task_count(led, since) >= 2:
+            print("Per task: prefixwise report --by task_id   Two tasks side by side: prefixwise report --compare TASK TASK")
         return 0
     print()
     t = summary["tasks"]
@@ -322,6 +331,93 @@ def cmd_report(args) -> int:
                   for r in rows],
                  [args.by, "requests", "prompt", "cached", "avoidable", "waste reqs",
                   "tokens/success", "cost", "avoidable $"]))
+    return 0
+
+
+def _task_count(led, since) -> int:
+    from . import metrics
+    return sum(1 for r in metrics.query(led, ["requests"], by="task", since=since) if r["task"] and r["requests"])
+
+
+_COMPARED = ["requests", "prompt_tokens", "cached_tokens", "completion_tokens", "avoidable_tokens",
+             "requests_priced", "cost_usd"]
+
+
+def _usd_precise(x) -> str:
+    """Dollars with enough digits to compare small runs ($0.000923, not $0.0009)."""
+    if x is None:
+        return "-"
+    if not x:
+        return "$0"
+    sign, x = ("-" if x < 0 else ""), abs(x)
+    if x >= 1:
+        return f"{sign}${x:,.2f}"
+    import math
+    digits = min(12, 2 - math.floor(math.log10(x)))  # three significant digits, never an exponent
+    return f"{sign}${x:.{digits}f}"
+
+
+def _report_compare(led, tasks: list[str], as_json: bool, since, since_label=None) -> int:
+    """Two tasks side by side, with the difference: the same work done two ways (one long session
+    against several short ones, one prompt layout against another)."""
+    from . import metrics
+
+    a, b = tasks
+    rows = {}
+    for t in (a, b):
+        r = metrics.query(led, _COMPARED + ["requests_all"], filters={"task": t}, since=since)
+        r = r[0] if r else {}
+        if not r.get("requests"):
+            where = f"since {since_label}" if since_label else "in this ledger"
+            if r.get("requests_all"):
+                print(f"prefixwise: task {t!r} has {r['requests_all']} request(s) {where}, all failed "
+                      "(no usage to compare)", file=sys.stderr)
+            else:
+                print(f"prefixwise: no requests with task id {t!r} {where}"
+                      " (requests are tagged with X-Prefixwise-Task-Id)", file=sys.stderr)
+            return 1
+        with led.reader() as conn:
+            outcome = conn.execute("SELECT success FROM tasks WHERE task_id = ?", (t,)).fetchone()
+        r["outcome"] = None if outcome is None else bool(outcome[0])
+        r["cache_hit_rate"] = r["cached_tokens"] / r["prompt_tokens"] if r["prompt_tokens"] else None
+        r["cost_usd"] = r["cost_usd"] if r["requests_priced"] == r["requests"] else None  # all priced, or none
+        rows[t] = r
+    ra, rb = rows[a], rows[b]
+
+    def change(x, y):
+        return None if x is None or y is None or not x else (y - x) / x
+
+    keys = ["requests", "prompt_tokens", "cached_tokens", "completion_tokens", "avoidable_tokens", "cost_usd"]
+    diff = {k: change(ra[k], rb[k]) for k in keys}
+    hit = (None if ra["cache_hit_rate"] is None or rb["cache_hit_rate"] is None
+           else rb["cache_hit_rate"] - ra["cache_hit_rate"])
+    if as_json:
+        print(json.dumps({"tasks": [a, b], a: ra, b: rb, "change": diff, "cache_hit_rate_change": hit}, indent=2))
+        return 0
+
+    def pct(x):
+        return "-" if x is None else f"{x:+.1%}"
+
+    def outcome(o):
+        return "succeeded" if o else "failed" if o is not None else "no outcome"
+
+    print(f"Task {a!r} against task {b!r}" + (f" (since {since_label})" if since_label else "") + "\n")
+    print(_table([
+        ["requests", _fmt_int(ra["requests"]), _fmt_int(rb["requests"]), pct(diff["requests"])],
+        ["prompt tokens", _fmt_int(ra["prompt_tokens"]), _fmt_int(rb["prompt_tokens"]), pct(diff["prompt_tokens"])],
+        ["  from cache", _fmt_pct(ra["cache_hit_rate"]), _fmt_pct(rb["cache_hit_rate"]),
+         "-" if hit is None else f"{hit * 100:+.1f} pts"],
+        ["output tokens", _fmt_int(ra["completion_tokens"]), _fmt_int(rb["completion_tokens"]),
+         pct(diff["completion_tokens"])],
+        ["avoidable tokens", _fmt_int(ra["avoidable_tokens"]), _fmt_int(rb["avoidable_tokens"]),
+         pct(diff["avoidable_tokens"])],
+        ["cost", _usd_precise(ra["cost_usd"]), _usd_precise(rb["cost_usd"]), pct(diff["cost_usd"])],
+        ["outcome", outcome(ra["outcome"]), outcome(rb["outcome"]), ""],
+    ], ["", a, b, f"{b} vs {a}"]))
+    if ra["cost_usd"] is None or rb["cost_usd"] is None:
+        print("\nCost is shown only for a task whose every request is priced (see `prefixwise prices`, --prices FILE).")
+    if None in (ra["outcome"], rb["outcome"]):
+        print("Record outcomes with `prefixwise task TASK --success` (or --failure): a cheaper run that fails is no saving.")
     return 0
 
 
@@ -1005,6 +1101,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="one session turn by turn: hit rate per turn, the cause, and the block where the prompt "
                         "first changed, as role[position in the whole prompt] (tools[0], messages[9]); `latest` for the most "
                         "recent session")
+    p.add_argument("--compare", nargs=2, metavar="TASK",
+                   help="two tasks side by side, with the difference: the same work done two ways "
+                        "(one long session against several short ones, say)")
     p.add_argument("--share", action="store_true",
                    help="a short block to paste into a chat or a thread: counts, dollars, the top cause and its fix; no text")
     p.add_argument("--prices", metavar="FILE", help="also load this rates file (default: $PREFIXWISE_PRICES)")

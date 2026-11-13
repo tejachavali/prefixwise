@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **Two tasks side by side: `prefixwise report --compare TASK TASK`.** The same work done two ways (one long session against several short ones, one prompt layout against another) as two columns and the change between them: requests, prompt tokens, the share from cache, output tokens, avoidable tokens, cost and outcome. Asked for by someone comparing long and short sessions on their own gateway: the report summed the two tasks together, and the per-task table (`--by task_id`) was there but not mentioned. The report now points to both when a ledger holds more than one task. Cost is shown only for a task whose every request is priced, with enough digits to compare small runs.
+
 ## 0.12.0: 2026-11-12
 
 For anyone deciding whether to trust the causes Prefixwise names: the decision procedure is now written down (`docs/ALGORITHM.md`), checked by invariants on generated traffic, audited twice against the code, and measured at scale on two engines. Through vLLM and SGLang, half of it replaying real Claude Code trajectories, every one of 1,772 injected changes was seen, none was named as another cause, and none of 3,622 turns that only appended got a change cause. Also new: `prefixwise import gateway` replays a gateway's request log through the proxy's own pipeline, so Prefixwise can be tried on yesterday's traffic without touching production; the report says how far fixing the avoidable misses would take the hit rate; `prefixwise.wrap` records streamed calls; and OpenRouter keeps its sticky routing through Prefixwise. 0.11.8 was prepared but never published: its changes are here.
