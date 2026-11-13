@@ -415,6 +415,7 @@ def run(args) -> dict:
     for ci, conv in enumerate(convs):
         state = State(conv, rng)
         sid = f"e5-{args.seed}-{ci}"
+        prev_body = None
         for k in range(args.turns):
             label = "first_write" if k == 0 else "none"
             if k > 0 and rng.random() < args.change_rate:
@@ -424,6 +425,8 @@ def run(args) -> dict:
             body = state.next_body(args.model)
             if body is None:
                 break
+            section = section_changed(prev_body, body)  # the baseline, before Prefixwise sees anything
+            prev_body = copy.deepcopy(body)
             result, entry = proxy.handle("openai", body, {"x-prefixwise-session-id": sid})
             if entry is None:
                 turns.append({"conv": ci, "turn": k, "label": label, "cause": None, "error": result.get("status"),
@@ -434,10 +437,57 @@ def run(args) -> dict:
                 continue
             turns.append({"conv": ci, "turn": k, "label": label, "cause": entry.cause, "detail": entry.detail,
                           "prompt": entry.prompt_tokens, "cached": entry.cached_tokens,
-                          "secondary": entry.secondary_causes, "evidence": entry.evidence})
+                          "secondary": entry.secondary_causes, "evidence": entry.evidence, "section": section})
     proxy.close()
     first_error = next((t["error_text"] for t in turns if t.get("error_text")), None)
-    return score(turns) | {"turns": turns, "conversations": len(convs), "ledger": ledger, "first_error": first_error}
+    return score(turns) | {"turns": turns, "conversations": len(convs), "ledger": ledger, "first_error": first_error,
+                           "baseline": score_baseline(turns)}
+
+
+# -- baseline: what a section-level diagnostic can say -----------------------------------------
+# Provider diagnostics and request diffs (Anthropic's and OpenAI's cache diagnostics, an editor's
+# request diff) report which section of the request changed first: tools, system or messages. Computed
+# here from the two request bodies alone, independently of Prefixwise, to score what that level of
+# detail can and cannot tell.
+
+SECTION_OF = {"tool_reserialize": "tools", "tool_catalog_change": "tools", "volatile_system": "system",
+              "system_edit": "system", "history_edit": "messages", "tool_result_mutation": "messages"}
+CAUSES_IN = {sec: sorted(c for c, s2 in SECTION_OF.items() if s2 == sec) for sec in ("tools", "system", "messages")}
+
+
+def section_changed(prev: dict | None, curr: dict) -> str:
+    """The first section that differs, in the hosted prefix order (tools, system, messages)."""
+    if prev is None:
+        return "first"
+    if json.dumps(prev.get("tools"), sort_keys=False) != json.dumps(curr.get("tools"), sort_keys=False):
+        return "tools"
+    sys_p = [m for m in prev["messages"] if m["role"] == "system"]
+    sys_c = [m for m in curr["messages"] if m["role"] == "system"]
+    if sys_p != sys_c:
+        return "system"
+    rest_p = [m for m in prev["messages"] if m["role"] != "system"]
+    rest_c = [m for m in curr["messages"] if m["role"] != "system"]
+    if rest_c[:len(rest_p)] != rest_p:
+        return "messages"
+    return "unchanged"
+
+
+def score_baseline(turns: list[dict]) -> dict:
+    """For each injected change: does the section-level view point at the right section, name the
+    exact cause (only when its section holds a single cause), and say whether it was waste (only
+    when every cause in its section agrees)? Growth turns: does it stay silent?"""
+    changes = [t for t in turns if t["label"] in SECTION_OF and t.get("section")]
+    growth = [t for t in turns if t["label"] == "none" and t.get("section")]
+    right = [t for t in changes if t["section"] == SECTION_OF[t["label"]]]
+    named = [t for t in right if CAUSES_IN[t["section"]] == [t["label"]]]
+    def waste_known(sec):
+        kinds = {c in WASTE for c in CAUSES_IN.get(sec, [])}
+        return len(kinds) == 1
+    waste = [t for t in right if waste_known(t["section"])]
+    return {"change_turns": len(changes), "right_section": len(right), "exact_cause": len(named),
+            "waste_known": len(waste), "growth_turns": len(growth),
+            "growth_silent": sum(t["section"] == "unchanged" for t in growth),
+            "sections": {sec: CAUSES_IN[sec] for sec in CAUSES_IN}}
 
 
 def score(turns: list[dict]) -> dict:
@@ -493,6 +543,14 @@ def report(res: dict) -> str:
         lines.append(f"| {c} | {p['injected']} | {p['named']} | {p['unknown']} | {prec} |")
     lines += ["", "Confusion (label -> verdict):", ""]
     lines += [f"- {k}: {v}" for k, v in res["confusion"].items()]
+    b = res.get("baseline")
+    if b and b["change_turns"]:
+        lines += ["", "Baseline, a section-level diagnostic (which of tools / system / messages changed first):", "",
+                  f"- Points at the right section: {b['right_section']} of {b['change_turns']}",
+                  f"- Names the exact cause: {b['exact_cause']} of {b['change_turns']} (by construction: each section holds two causes, "
+                  + "; ".join(f"{sec}: {', '.join(cs)}" for sec, cs in b["sections"].items()) + ")",
+                  f"- Says whether it was waste: {b['waste_known']} of {b['change_turns']}",
+                  f"- Silent on growth turns: {b['growth_silent']} of {b['growth_turns']}"]
     return "\n".join(lines)
 
 
