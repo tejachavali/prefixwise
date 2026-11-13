@@ -72,3 +72,24 @@ def test_the_report_points_to_the_per_task_views_only_with_several_tasks(ledger,
     Ledger(one).record(_entry("only", "s", 1000, 0, 10, 0.001))
     assert main(["report", "--ledger", one]) == 0
     assert "--compare" not in capsys.readouterr().out
+
+
+def test_small_costs_print_as_plain_decimals():
+    from prefixwise.cli import _usd_precise
+    assert [_usd_precise(x) for x in (5e-05, 1.234e-05, 0.000923, 0.0031, 0.5, 12.3456, 0, None, -0.0001)] == \
+        ["$0.0000500", "$0.0000123", "$0.000923", "$0.00310", "$0.500", "$12.35", "$0", "-", "-$0.000100"]
+
+
+def test_a_task_whose_requests_all_failed_says_so(ledger, capsys):
+    led = Ledger(ledger)
+    led.record(LedgerEntry(session_id="f", agent_id="a", provider="openai", model="m", cause="unknown", legit=None,
+                           prompt_tokens=0, cached_tokens=0, avoidable_tokens=0, avoidable_cost=None, task_id="F",
+                           error="http_500", status=500))
+    assert main(["report", "--ledger", ledger, "--compare", "long", "F"]) == 1
+    assert "has 1 request(s) in this ledger, all failed" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("extra", [["--by", "model"], ["--share"], ["--session", "long-0"]])
+def test_compare_refuses_flags_it_would_ignore(ledger, capsys, extra):
+    assert main(["report", "--ledger", ledger, "--compare", "long", "short", *extra]) == 2
+    assert "--compare cannot be combined with" in capsys.readouterr().err

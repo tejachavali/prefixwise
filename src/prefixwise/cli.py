@@ -273,9 +273,14 @@ def cmd_report(args) -> int:
         table = PriceTable.load(getattr(args, "prices", None))
     except (OSError, ValueError) as exc:
         sys.exit(f"prefixwise: {exc}")
-    if getattr(args, "session", None):
+    if getattr(args, "session", None) and not getattr(args, "compare", None):
         return _report_session(led, args.session, args.json, since)
     if getattr(args, "compare", None):
+        clash = [flag for flag, on in (("--by", args.by), ("--session", getattr(args, "session", None)),
+                                       ("--share", args.share)) if on]
+        if clash:
+            print(f"prefixwise: --compare cannot be combined with {', '.join(clash)}", file=sys.stderr)
+            return 2
         return _report_compare(led, args.compare, args.json, since, args.since)
     found = findings(led, since=since, prices=table)
     detail = args.detail or args.by is not None
@@ -342,7 +347,14 @@ def _usd_precise(x) -> str:
     """Dollars with enough digits to compare small runs ($0.000923, not $0.0009)."""
     if x is None:
         return "-"
-    return f"${x:,.2f}" if abs(x) >= 1 else f"${x:#.3g}" if x else "$0"
+    if not x:
+        return "$0"
+    sign, x = ("-" if x < 0 else ""), abs(x)
+    if x >= 1:
+        return f"{sign}${x:,.2f}"
+    import math
+    digits = min(12, 2 - math.floor(math.log10(x)))  # three significant digits, never an exponent
+    return f"{sign}${x:.{digits}f}"
 
 
 def _report_compare(led, tasks: list[str], as_json: bool, since, since_label=None) -> int:
@@ -353,11 +365,16 @@ def _report_compare(led, tasks: list[str], as_json: bool, since, since_label=Non
     a, b = tasks
     rows = {}
     for t in (a, b):
-        r = metrics.query(led, _COMPARED, filters={"task": t}, since=since)
+        r = metrics.query(led, _COMPARED + ["requests_all"], filters={"task": t}, since=since)
         r = r[0] if r else {}
         if not r.get("requests"):
-            print(f"prefixwise: no requests with task id {t!r} in this ledger"
-                  " (requests are tagged with X-Prefixwise-Task-Id)", file=sys.stderr)
+            where = f"since {since_label}" if since_label else "in this ledger"
+            if r.get("requests_all"):
+                print(f"prefixwise: task {t!r} has {r['requests_all']} request(s) {where}, all failed "
+                      "(no usage to compare)", file=sys.stderr)
+            else:
+                print(f"prefixwise: no requests with task id {t!r} {where}"
+                      " (requests are tagged with X-Prefixwise-Task-Id)", file=sys.stderr)
             return 1
         with led.reader() as conn:
             outcome = conn.execute("SELECT success FROM tasks WHERE task_id = ?", (t,)).fetchone()
