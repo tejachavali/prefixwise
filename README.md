@@ -83,7 +83,7 @@ Every number is from a live run against real models, and each links to its recor
 | The tool-order fix saves what was predicted | **99.9%** on Claude, **97.5%** on vLLM, task success flat (one of 60 turns changed on Qwen3-4B) ([record](experiments/e4/runs/2026-11-06-live.md)) |
 | The cache-marker fix pays for itself | **106.8%** of predicted savings, prompt cost down **85.6%** with the write surcharge included, task success flat ([record](experiments/e4/runs/2026-11-09-auto-breakpoints-live.md)) |
 | Works with real agents | Claude Code, Codex, opencode, the Anthropic and OpenAI SDKs ([record](experiments/compat/2026-11-07.md), [opencode](experiments/compat/2026-11-09-opencode-run.md)) |
-| Costs almost nothing | **3 ms** per request at 2k tokens, 13 ms at 120k ([record](benchmarks/runs/2026-11-07-vm.md)) |
+| Costs almost nothing | **2 to 4 ms** per request at 2k tokens, 12 to 23 ms at 120k (streamed to unstreamed), about 100 requests/s per process on 4 CPUs; 33,358 requests in a soak, 0 errors ([record](benchmarks/runs/2026-11-14-vm.md)) |
 
 ## Ways in
 

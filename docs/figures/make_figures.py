@@ -31,8 +31,8 @@ EVICT = [("vLLM", 0 / 3404, "evicted: confirmed from KV events"),
          ("vLLM + LMCache", 3328 / 3404, "hit: restored from CPU"),
          ("SGLang", 3 / 3404, "evicted: confirmed from KV events"),
          ("SGLang + HiCache", 3382 / 3404, "hit: restored from host memory")]
-# benchmarks/runs/2026-11-07-vm.md: added latency, OpenAI, not streamed
-OVERHEAD = [(2_000, 2.71, 3.81), (30_000, 5.62, 7.51), (120_000, 13.27, 18.77)]
+# benchmarks/runs/2026-11-14-vm.md: added latency, OpenAI, not streamed
+OVERHEAD = [(2_000, 3.40, 4.46), (30_000, 8.07, 12.76), (120_000, 22.11, 32.57)]  # 0.12.1, benchmarks/runs/2026-11-14-vm.md
 
 
 def esc(s: str) -> str:
@@ -130,7 +130,7 @@ def evict_chart(t: dict) -> str:
 def overhead_chart(t: dict) -> str:
     w, h = 720, 280
     left, right, top, base = 56, 600, 40, 230
-    xmax, ymax = 120_000, 20
+    xmax, ymax = 120_000, 35
 
     def px(x):
         return left + (right - left) * x / xmax
@@ -138,7 +138,7 @@ def overhead_chart(t: dict) -> str:
     def py(y):
         return base - (base - top) * y / ymax
     body = [legend(left, 22, [("median (p50)", t["s1"]), ("p95", t["s2"])], t)]
-    for v in (0, 5, 10, 15, 20):
+    for v in (0, 10, 20, 30):
         body.append(f'<line x1="{left}" x2="{right}" y1="{py(v):.1f}" y2="{py(v):.1f}" '
                     f'stroke="{t["grid"] if v else t["axis"]}" stroke-width="1"/>')
         body.append(text(left - 8, py(v) + 4, f"{v} ms", t["muted"], 12, "end"))
