@@ -31,7 +31,7 @@ EVICT = [("vLLM", 0 / 3404, "evicted: confirmed from KV events"),
          ("vLLM + LMCache", 3328 / 3404, "hit: restored from CPU"),
          ("SGLang", 3 / 3404, "evicted: confirmed from KV events"),
          ("SGLang + HiCache", 3382 / 3404, "hit: restored from host memory")]
-# benchmarks/runs/2026-11-07-vm.md: added latency, OpenAI, not streamed
+# benchmarks/runs/2026-11-14-vm.md: added latency, OpenAI, not streamed
 OVERHEAD = [(2_000, 3.40, 4.46), (30_000, 8.07, 12.76), (120_000, 22.11, 32.57)]  # 0.12.1, benchmarks/runs/2026-11-14-vm.md
 
 
