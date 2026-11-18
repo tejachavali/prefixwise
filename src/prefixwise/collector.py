@@ -19,7 +19,8 @@ import threading
 import time
 from collections import OrderedDict
 
-from .classifier import Classification, MissCause, RequestSnapshot, classify, first_divergence, served_all
+from .classifier import (UNSEEN_PARENT, Classification, MissCause, RequestSnapshot, classify, first_divergence,
+                         served_all)
 from .details import Facts, detail_for
 from .diagnostics import AgreementScorer
 from .ledger import Ledger, LedgerEntry, avoidable_for_turn, unread_write
@@ -322,10 +323,7 @@ class Collector:
         # element): a miss's removed blocks on a turn the classifier calls a hit were never restored.
         restored = bool(rec.engine_verdict and len(rec.engine_verdict) > 3 and rec.engine_verdict[3] is True)
         if unknown_parent:
-            result = Classification(MissCause.UNKNOWN, None,
-                                    "previous_response_id points to a response this proxy never saw;"
-                                    " the cached prefix cannot be reconstructed",
-                                    native_reason=native_reason)
+            result = Classification(MissCause.UNKNOWN, None, UNSEEN_PARENT, native_reason=native_reason)
         elif (concurrent and not stitched and not new_thread
               and curr.cached_tokens < 0.5 * (min(prev.prompt_tokens, prompt_tokens) if prev.prompt_tokens
                                              else prompt_tokens)):

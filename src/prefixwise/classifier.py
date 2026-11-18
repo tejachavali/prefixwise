@@ -185,6 +185,9 @@ def _role_unchanged(role: str, p: list[BlockFingerprint], c: list[BlockFingerpri
 
 CACHE_NOT_REPORTED = ("the prompt's reusable part did not change, but the server reports no cached-token count "
                       "(no prompt_tokens_details in its usage), so a hit cannot be told from a miss")
+# A Responses turn continuing a response this proxy never saw: nothing to compare, hit or miss.
+UNSEEN_PARENT = ("previous_response_id points to a response this proxy never saw;"
+                 " the cached prefix cannot be reconstructed")
 
 
 def _min_prefix(curr: RequestSnapshot) -> int | None:

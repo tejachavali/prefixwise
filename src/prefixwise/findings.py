@@ -294,7 +294,7 @@ def findings(ledger, since: float | None = None, until: float | None = None,
         if approx:
             approximate.append((model, key))
     from .classifier import CACHE_NOT_REPORTED
-    clauses, args = ["cause = 'unknown'", "evidence = ?"], [CACHE_NOT_REPORTED]
+    clauses, args = ["cause = 'unknown'", _starts_with("evidence")], [CACHE_NOT_REPORTED, CACHE_NOT_REPORTED]
     for col, op, val in (("recorded_at", ">=", since), ("recorded_at", "<", until)):
         if val is not None:
             clauses.append(f"{col} {op} ?")
@@ -317,7 +317,45 @@ def findings(ledger, since: float | None = None, until: float | None = None,
             "unread_writes": unread_writes(ledger, **window),
             "unpriced_models": sorted(unpriced), "approximate_prices": sorted(approximate),
             "bill": bill(ledger, **window),
-            "cache_not_reported": not_reported}
+            "cache_not_reported": not_reported,
+            "unexplained_share": unexplained_share(ledger, since, until)}
+
+
+def _starts_with(col: str) -> str:
+    """SQL for `col` starting with the next bound parameter (bind it twice). Evidence can have text
+    appended after the classifier's own (an interleaved conversation, a detail), so never `=`."""
+    return f"substr({col}, 1, length(?)) = ?"
+
+
+def unexplained_share(ledger, since: float | None = None, until: float | None = None) -> dict | None:
+    """The misses whose cause is not known, as a share of all misses and of the prompt tokens the
+    misses left uncached; None when there are none.
+
+    A miss is a request that got a response (no error) and a cause other than `none`. An `unknown`
+    request is left out of both sides when it is not known to be a miss at all: the server reports no
+    cached-token count, the provider returned no usage, or it continues a response this proxy never
+    saw (it may well have been a hit)."""
+    from .classifier import CACHE_NOT_REPORTED, UNSEEN_PARENT
+    sw = _starts_with("COALESCE(evidence, '')")
+    not_judged = f"(cause = 'unknown' AND (COALESCE(prompt_tokens, 0) <= 0 OR {sw} OR {sw}))"
+    uncached = "MAX(0, COALESCE(prompt_tokens, 0) - COALESCE(cached_tokens, 0))"
+    clauses = ["error IS NULL", "cause IS NOT NULL", "cause != 'none'", f"NOT {not_judged}"]
+    args: list = [CACHE_NOT_REPORTED, CACHE_NOT_REPORTED, UNSEEN_PARENT, UNSEEN_PARENT]
+    for col, op, val in (("recorded_at", ">=", since), ("recorded_at", "<", until)):
+        if val is not None:
+            clauses.append(f"{col} {op} ?")
+            args.append(val)
+    sql = (f"SELECT COUNT(*), COALESCE(SUM({uncached}), 0), "
+           f"COALESCE(SUM(CASE WHEN cause = 'unknown' THEN 1 ELSE 0 END), 0), "
+           f"COALESCE(SUM(CASE WHEN cause = 'unknown' THEN {uncached} ELSE 0 END), 0) "
+           f"FROM entries WHERE " + " AND ".join(clauses))
+    with ledger.reader() as conn:
+        total, total_tokens, n, tokens = conn.execute(sql, args).fetchone()
+    if not n or not total:
+        return None
+    return {"requests": n, "of_misses": total, "share_of_misses": n / total,
+            "uncached_tokens": tokens, "of_uncached_tokens": total_tokens,
+            "share_of_uncached_tokens": (tokens / total_tokens) if total_tokens else None}
 
 
 def _usd(x) -> str:
@@ -401,8 +439,16 @@ def render(f: dict, command: str = "serve", headline: bool = True) -> str:
                      "--enable-prompt-tokens-details.")
     if f["unexplained"] and sum(u["requests"] for u in f["unexplained"]) > blind:
         n = sum(u["requests"] for u in f["unexplained"]) - blind
-        lines.append(f"Cause not determined for {n} request{'s' if n != 1 else ''} "
-                     "(`prefixwise report --detail` shows the evidence).")
+        share = f.get("unexplained_share")
+        if share:
+            n = share["requests"]
+            tok = (f", {_n(share['uncached_tokens'])} of {_n(share['of_uncached_tokens'])} uncached prompt tokens "
+                   f"({share['share_of_uncached_tokens']:.1%})" if share["share_of_uncached_tokens"] is not None else "")
+            lines.append(f"Cause not determined for {n:,} of {share['of_misses']:,} misses "
+                         f"({share['share_of_misses']:.1%}){tok} (`prefixwise report --detail` shows the evidence).")
+        else:
+            lines.append(f"Cause not determined for {n} request{'s' if n != 1 else ''} "
+                         "(`prefixwise report --detail` shows the evidence).")
     if f["expected"]:
         parts = [f"{e['requests']} x {e['what']}" for e in f["expected"][:4]]
         lines.append("Expected misses (not waste): " + "; ".join(parts) + ".")
@@ -486,6 +532,9 @@ def render_share(f: dict, since_label: str | None = None) -> str:
         lines.append("no avoidable waste in the prompts")
     else:
         lines.append("no avoidable waste: every miss had a legitimate cause")
+    if share := f.get("unexplained_share"):
+        lines.append(f"cause not determined: {share['requests']:,} of {share['of_misses']:,} misses "
+                     f"({share['share_of_misses']:.1%})")
     if f.get("cache_not_reported"):
         lines.append("this server does not report cached tokens: the share served from cache is not known")
     unread = f.get("unread_writes") or []
