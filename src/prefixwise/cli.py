@@ -197,7 +197,7 @@ def _report_session(led, session: str, as_json: bool, since: float | None = None
         print(json.dumps({"session_id": sid, "turns": turns}, indent=2, default=str))
         return 0
     from .classifier import CACHE_NOT_REPORTED
-    blind = {t["turn"] for t in turns if t.get("evidence") == CACHE_NOT_REPORTED}  # the server gave no count
+    blind = {t["turn"] for t in turns if (t.get("evidence") or "").startswith(CACHE_NOT_REPORTED)}  # the server gave no count
     prompt = sum(t["prompt_tokens"] or 0 for t in turns)
     cached = sum(t["cached_tokens"] or 0 for t in turns)
     avoidable = sum(t["avoidable_tokens"] or 0 for t in turns)

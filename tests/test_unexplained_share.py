@@ -44,3 +44,54 @@ def test_nothing_unexplained_prints_nothing(tmp_path):
     f = findings(led)
     assert f["unexplained_share"] is None
     assert "Cause not determined" not in render(f) and "cause not determined" not in render_share(f)
+
+
+def test_unknowns_not_known_to_be_misses_are_left_out(tmp_path):
+    """Found by review: a turn continuing a response the proxy never saw is `unknown` whatever it read
+    (a full hit included), and so is a response with no usage; neither is known to be a miss."""
+    from prefixwise.classifier import UNSEEN_PARENT
+    led = Ledger(str(tmp_path / "l.db"))
+    _rec(led, "first_write", 10_000, 0, legit=True)
+    _rec(led, "unknown", 10_000, 9_900, evidence=UNSEEN_PARENT)                   # probably a hit
+    _rec(led, "unknown", 0, 0, evidence="blocks unchanged but the provider returned no usage")
+    f = findings(led)
+    assert f["unexplained_share"] is None
+    _rec(led, "unknown", 10_000, 100, evidence="prefix reusable but cache_read low")  # a real one
+    share = findings(led)["unexplained_share"]
+    assert share["requests"] == 1 and share["of_misses"] == 2
+    assert share["uncached_tokens"] == 9_900 and share["of_uncached_tokens"] == 19_900
+
+
+def test_blind_rows_are_found_with_text_appended_to_their_evidence(tmp_path):
+    """Found by review: the collector appends to the evidence (an interleaved conversation, a detail),
+    so the blind check must match the start, not the whole string."""
+    led = Ledger(str(tmp_path / "l.db"))
+    _rec(led, "first_write", 5_000, 0, legit=True)
+    _rec(led, "unknown", 5_100, 0, evidence=CACHE_NOT_REPORTED + "; compared with this conversation's last turn")
+    f = findings(led)
+    assert f["cache_not_reported"] == 1 and f["unexplained_share"] is None
+    assert "Cause not determined" not in render(f)
+
+
+def test_the_window_applies_to_the_share(tmp_path):
+    led = Ledger(str(tmp_path / "l.db"))
+    _rec(led, "unknown", 1_000, 0, evidence="prefix reusable but cache_read low")
+    _rec(led, "first_write", 1_000, 0, legit=True)
+    import sqlite3
+    with sqlite3.connect(str(tmp_path / "l.db")) as conn:  # place the two rows a day apart
+        conn.execute("UPDATE entries SET recorded_at = 1000 WHERE cause = 'unknown'")
+        conn.execute("UPDATE entries SET recorded_at = 90000 WHERE cause = 'first_write'")
+    assert findings(led)["unexplained_share"]["of_misses"] == 2
+    assert findings(led, since=50_000)["unexplained_share"] is None
+    assert findings(led, until=50_000)["unexplained_share"]["of_misses"] == 1
+
+
+def test_failed_requests_and_hits_are_not_misses(tmp_path):
+    led = Ledger(str(tmp_path / "l.db"))
+    _rec(led, "unknown", 1_000, 0, evidence="prefix reusable but cache_read low")
+    _rec(led, "none", 1_000, 1_000)
+    led.record(LedgerEntry(session_id="s", agent_id="a", provider="openai", model="gpt-5", cause=None, legit=None,
+                           prompt_tokens=0, cached_tokens=0, avoidable_tokens=0, avoidable_cost=0.0,
+                           task_success=None, error="http_500", status=500))
+    share = findings(led)["unexplained_share"]
+    assert share["requests"] == 1 and share["of_misses"] == 1 and share["share_of_misses"] == 1.0
