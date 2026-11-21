@@ -494,11 +494,24 @@ def test_a_stream_asked_for_usage_that_got_litellms_estimate_is_not_recorded():
     assert len(spy.calls) == 2
 
 
-def test_a_stream_usage_option_set_through_optional_params_counts():
+def test_openais_own_count_is_believed_even_when_it_equals_litellms_tokenizer():
+    """OpenAI's prompt count can equal LiteLLM's tiktoken estimate exactly; its usage carries
+    prompt_tokens_details even with nothing cached, which the estimate never does. A first turn or
+    a real miss must not be skipped."""
     spy = _Spy()
     c = PrefixwiseCallback(recorder=spy)
-    kw = _stream_kw(optional_params={"stream_options": {"include_usage": True}})
-    c._record(kw, {"id": "r", "model": "gpt-5.6", "usage": {"prompt_tokens": _estimate(kw) + 7, "completion_tokens": 3}},
+    kw = _stream_kw(stream_options={"include_usage": True})
+    c._record(kw, {"id": "r", "model": "gpt-5.6", "usage": {"prompt_tokens": _estimate(kw), "completion_tokens": 3,
+                                                            "prompt_tokens_details": {"cached_tokens": 0}}},
+              None, None)
+    assert len(spy.calls) == 1
+
+
+def test_a_claude_stream_with_its_cache_fields_is_believed():
+    spy = _Spy()
+    c = PrefixwiseCallback(recorder=spy)
+    c._record(_kwargs(stream=True), _response({"prompt_tokens": 9, "completion_tokens": 1,
+                                               "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}),
               None, None)
     assert len(spy.calls) == 1
 

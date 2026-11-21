@@ -18,10 +18,11 @@ A stream is recorded once, when LiteLLM has assembled it, with the usage the pro
 Claude streams always carry usage. An OpenAI-format stream carries it only when it was asked for: the
 LiteLLM proxy server asks by default (`always_include_stream_usage`), and an SDK caller sets
 `stream_options={"include_usage": True}`. Where no usage came back, LiteLLM fills in its own estimate
-(its tokenizer's count of the messages, nothing cached): such a stream is not recorded, with one
-warning saying so, since an estimate with nothing cached would read as a miss that never happened.
-So an OpenAI-format stream is recorded only when usage was asked for and the count is not that
-estimate.
+(its tokenizer's count of the messages, with no prompt-token details): such a stream is not
+recorded, with one warning saying so, since an estimate with nothing cached would read as a miss
+that never happened. Usage counts as the provider's when it carries prompt-token details (OpenAI
+reports them even with nothing cached) or Claude's cache fields, or failing those, a prompt count
+other than LiteLLM's estimate.
 
 What is classified is the request body LiteLLM actually sent the provider (its
 `complete_input_dict`): after its translation to the provider's format, the breakpoints it
@@ -320,8 +321,7 @@ class PrefixwiseCallback(_Base):
             details = details if isinstance(details, dict) else _dump(details)
             claude = provider == "anthropic" or "claude" in model.lower() \
                 or "cache_creation_input_tokens" in usage
-            if kwargs.get("stream") and not self._stream_usage_reported(kwargs, model, messages, prompt,
-                                                                       details, claude):
+            if kwargs.get("stream") and not self._stream_usage_reported(usage, model, messages, prompt, details):
                 self._no_stream_usage()
                 return
             if claude:
@@ -367,17 +367,16 @@ class PrefixwiseCallback(_Base):
                 print(f"prefixwise: LiteLLM call not recorded ({type(exc).__name__}: {exc})", file=sys.stderr)
 
     @staticmethod
-    def _stream_usage_reported(kwargs, model, messages, prompt: int, details: dict, claude: bool) -> bool:
+    def _stream_usage_reported(usage: dict, model, messages, prompt: int, details: dict) -> bool:
         """Did the provider report this stream's usage, or is it LiteLLM's estimate? With no usage
-        in the stream, LiteLLM counts the messages with its tokenizer and reports nothing cached."""
+        in the stream, LiteLLM counts the messages with its tokenizer and leaves the prompt-token
+        details out. The provider's usage has them (OpenAI's, even with nothing cached) or Claude's
+        cache fields; a server that reports neither is believed when its count is not the estimate
+        (OpenAI's own count can equal LiteLLM's tokenizer, so the count alone cannot decide)."""
         if prompt <= 0:
             return False
-        if not claude:
-            options = kwargs.get("stream_options") or (kwargs.get("optional_params") or {}).get("stream_options")
-            if not (isinstance(options, dict) and options.get("include_usage") is True):
-                return False  # not asked for: whatever is there is the estimate
-        if _int(details.get("cached_tokens")) or _int(details.get("cache_creation_tokens")):
-            return True  # an estimate never has cached tokens
+        if details or "cache_read_input_tokens" in usage or "cache_creation_input_tokens" in usage:
+            return True
         try:
             from litellm import token_counter
             return prompt != token_counter(model=model, messages=messages)
