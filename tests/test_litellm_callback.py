@@ -596,3 +596,13 @@ def test_an_image_counted_locally_is_compared_as_litellm_counts_it():
             is False
         assert PrefixwiseCallback._stream_usage_reported({"prompt_tokens": estimate + 3}, "gpt-5.6", msgs,
                                                          estimate + 3, {}) is True
+
+
+def test_a_high_detail_image_inside_a_tool_result_is_not_fetched(monkeypatch):
+    """Review: the counter walks a tool_result's own content list, so a nested image must count too."""
+    seen = []
+    monkeypatch.setattr(litellm, "token_counter", lambda **kw: seen.append(kw) or 10)
+    nested = [{"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t", "content": [
+        {"type": "image_url", "image_url": {"url": "https://example.com/c.png", "detail": "high"}}]}]}]
+    assert PrefixwiseCallback._stream_usage_reported({"prompt_tokens": 800}, "gpt-4o", nested, 800, {}) is False
+    assert seen == []

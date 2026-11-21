@@ -120,15 +120,23 @@ def _sent_body(value) -> dict | None:
 
 def _fetches_image(messages) -> bool:
     """Would LiteLLM's token_counter fetch an image to size it? Only for a high-detail image given by
-    an http(s) URL; base64 images and auto or low detail are counted locally."""
-    for m in messages or []:
-        content = m.get("content") if isinstance(m, dict) else None
-        for b in content if isinstance(content, list) else []:
-            image = b.get("image_url") if isinstance(b, dict) and b.get("type") == "image_url" else None
+    an http(s) URL; base64 images and auto or low detail are counted locally. Blocks nest (a
+    tool_result holds its own content list, which the counter walks too), so every level is looked at."""
+    def walk(blocks, depth=0) -> bool:
+        if depth > 16 or not isinstance(blocks, list):
+            return False
+        for b in blocks:
+            if not isinstance(b, dict):
+                continue
+            image = b.get("image_url") if b.get("type") == "image_url" else None
             if isinstance(image, dict) and image.get("detail") == "high" \
                     and str(image.get("url") or "").lower().startswith(("http://", "https://")):
                 return True
-    return False
+            if walk(b.get("content"), depth + 1):
+                return True
+        return False
+
+    return any(isinstance(m, dict) and walk(m.get("content")) for m in messages or [])
 
 
 def _text(content) -> str:
