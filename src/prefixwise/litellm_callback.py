@@ -14,11 +14,14 @@ Sessions: LiteLLM's own `litellm_session_id`, else `metadata={"session_id": ...,
 (other call types pass through unrecorded); nothing is sent anywhere and LiteLLM's behaviour is
 unchanged. Answers from LiteLLM's own response cache reached no provider and are not recorded.
 
-A stream is recorded once, when LiteLLM has assembled it, with the usage it carried. Claude streams
-always carry usage. An OpenAI-format stream carries it only when it was asked for: the LiteLLM proxy
-server asks by default (`always_include_stream_usage`), and an SDK caller sets
-`stream_options={"include_usage": True}`. A stream without usage is not recorded, with one warning
-saying so: zero prompt tokens would read as a miss that never happened.
+A stream is recorded once, when LiteLLM has assembled it, with the usage the provider reported.
+Claude streams always carry usage. An OpenAI-format stream carries it only when it was asked for: the
+LiteLLM proxy server asks by default (`always_include_stream_usage`), and an SDK caller sets
+`stream_options={"include_usage": True}`. Where no usage came back, LiteLLM fills in its own estimate
+(its tokenizer's count of the messages, nothing cached): such a stream is not recorded, with one
+warning saying so, since an estimate with nothing cached would read as a miss that never happened.
+So an OpenAI-format stream is recorded only when usage was asked for and the count is not that
+estimate.
 
 What is classified is the request body LiteLLM actually sent the provider (its
 `complete_input_dict`): after its translation to the provider's format, the breakpoints it
@@ -61,9 +64,9 @@ ORDER_FORGET_SECONDS = 900.0
 ORDER_MAX_CALLS = 10_000
 _REDACTED = "redacted-by-litellm"  # what LiteLLM logs in place of messages with logging turned off
 # A sync stream's success callback carries no sent body; the one LiteLLM logged before the call is
-# kept until the stream ends, for streams of a known conversation only, and let go with the call's
-# turn (a stream abandoned unread is forgotten as any lost call is). At most this many are kept; past
-# that the oldest is let go, and its stream is classified from LiteLLM's messages instead.
+# kept until the stream ends, for every stream, and let go when it is recorded or fails, or
+# ORDER_FORGET_SECONDS after it was sent (a stream abandoned unread sends no callback). At most this
+# many are kept; past that the oldest is let go, and its stream is classified from LiteLLM's messages.
 STREAM_BODIES_MAX = 256
 
 
@@ -184,11 +187,17 @@ class PrefixwiseCallback(_Base):
     # LiteLLM calls these with keyword arguments: the parameter names must be exactly these.
     def log_pre_api_call(self, model, messages, kwargs):
         key, call = _conversation(model, messages, kwargs), kwargs.get("litellm_call_id")
+        now = time.monotonic()
+        if call and kwargs.get("stream"):
+            body = _sent_body((kwargs.get("additional_args") or {}).get("complete_input_dict"))
+            with self._order:
+                self._sweep_bodies(now)
+                if body is not None:
+                    self._stream_bodies[call] = (body, now)
+                    while len(self._stream_bodies) > STREAM_BODIES_MAX:
+                        self._stream_bodies.popitem(last=False)
         if key is None or not call:
             return
-        body = _sent_body((kwargs.get("additional_args") or {}).get("complete_input_dict")) \
-            if kwargs.get("stream") else None
-        now = time.monotonic()
         with self._order:
             turns = self._turns.setdefault(key, OrderedDict())
             for c, due in list(turns.items()):  # this conversation's earlier turns have been answered
@@ -200,10 +209,6 @@ class PrefixwiseCallback(_Base):
             self._sweep(now)
             self._turns.setdefault(key, OrderedDict())[call] = None
             self._key[call] = (key, now)
-            if body is not None:
-                self._stream_bodies[call] = body
-                while len(self._stream_bodies) > STREAM_BODIES_MAX:
-                    self._stream_bodies.popitem(last=False)
 
     def log_success_event(self, kwargs, response_obj, start_time, end_time):
         try:
@@ -263,6 +268,13 @@ class PrefixwiseCallback(_Base):
         if dropped:
             self._order.notify_all()
 
+    def _sweep_bodies(self, now: float) -> None:
+        """Let go of kept stream bodies sent ORDER_FORGET_SECONDS ago (kept in send order). Caller
+        holds _order."""
+        stale = now - ORDER_FORGET_SECONDS
+        while self._stream_bodies and next(iter(self._stream_bodies.values()))[1] < stale:
+            self._stream_bodies.popitem(last=False)
+
     def _done(self, kwargs) -> None:
         with self._order:
             self._drop(kwargs.get("litellm_call_id"))
@@ -288,7 +300,8 @@ class PrefixwiseCallback(_Base):
             sent = _sent_body((kwargs.get("additional_args") or {}).get("complete_input_dict"))
             if sent is None and kwargs.get("stream"):
                 with self._order:
-                    sent = self._stream_bodies.get(kwargs.get("litellm_call_id"))
+                    kept = self._stream_bodies.get(kwargs.get("litellm_call_id"))
+                sent = kept[0] if kept else None
             messages = list(kwargs.get("messages") or [])
             tools = kwargs.get("tools") or (kwargs.get("optional_params") or {}).get("tools")
             latency = ended = None
@@ -303,13 +316,14 @@ class PrefixwiseCallback(_Base):
                           ended_at=ended, genai_provider=provider_name(provider) if provider else None)
             returned = str(response.get("model") or model)
             prompt, completion = _int(usage.get("prompt_tokens")), _int(usage.get("completion_tokens"))
-            if kwargs.get("stream") and prompt <= 0:
-                self._no_stream_usage()
-                return
             details = usage.get("prompt_tokens_details") or {}
             details = details if isinstance(details, dict) else _dump(details)
             claude = provider == "anthropic" or "claude" in model.lower() \
                 or "cache_creation_input_tokens" in usage
+            if kwargs.get("stream") and not self._stream_usage_reported(kwargs, model, messages, prompt,
+                                                                       details, claude):
+                self._no_stream_usage()
+                return
             if claude:
                 if _is_anthropic_body(sent):
                     body = sent
@@ -352,12 +366,30 @@ class PrefixwiseCallback(_Base):
                 self._warned = True
                 print(f"prefixwise: LiteLLM call not recorded ({type(exc).__name__}: {exc})", file=sys.stderr)
 
+    @staticmethod
+    def _stream_usage_reported(kwargs, model, messages, prompt: int, details: dict, claude: bool) -> bool:
+        """Did the provider report this stream's usage, or is it LiteLLM's estimate? With no usage
+        in the stream, LiteLLM counts the messages with its tokenizer and reports nothing cached."""
+        if prompt <= 0:
+            return False
+        if not claude:
+            options = kwargs.get("stream_options") or (kwargs.get("optional_params") or {}).get("stream_options")
+            if not (isinstance(options, dict) and options.get("include_usage") is True):
+                return False  # not asked for: whatever is there is the estimate
+        if _int(details.get("cached_tokens")) or _int(details.get("cache_creation_tokens")):
+            return True  # an estimate never has cached tokens
+        try:
+            from litellm import token_counter
+            return prompt != token_counter(model=model, messages=messages)
+        except Exception:  # noqa: BLE001 - no tokenizer at hand: take the count as reported
+            return True
+
     def _no_stream_usage(self) -> None:
         if not self._warned_stream_usage:
             self._warned_stream_usage = True
-            print("prefixwise: a LiteLLM stream ended without usage, so it is not recorded; ask for it with "
-                  'stream_options={"include_usage": True} (the LiteLLM proxy server asks by default)',
-                  file=sys.stderr)
+            print("prefixwise: a LiteLLM stream ended without usage from the provider (LiteLLM estimated it), "
+                  'so it is not recorded; ask for it with stream_options={"include_usage": True} (the LiteLLM '
+                  "proxy server asks by default)", file=sys.stderr)
 
     def _redacted(self, messages: list) -> bool:
         """With turn_off_message_logging and no sent body, every request would look the same."""

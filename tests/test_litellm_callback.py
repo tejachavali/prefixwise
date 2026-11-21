@@ -107,6 +107,14 @@ async def _astream(base, model, messages, **kw):
     return [c async for c in r]
 
 
+def _released(cb, timeout=5.0):
+    """The kept body is let go just after the row is written (the callback's `finally`)."""
+    deadline = time.monotonic() + timeout
+    while cb._stream_bodies and time.monotonic() < deadline:
+        time.sleep(0.02)
+    return not cb._stream_bodies
+
+
 def test_an_openai_stream_with_usage_is_recorded_like_a_call(base, cb):
     msgs = [{"role": "system", "content": SYSTEM + "stream"}, {"role": "user", "content": "hi"}]
     usage = {"stream_options": {"include_usage": True}}
@@ -151,7 +159,7 @@ def test_a_claude_stream_is_recorded_with_the_body_litellm_sent(base, cb, asynch
         _stream(base, "anthropic/claude-haiku-5-5", msgs, **kw)
     assert causes(cb, 1) == ["first_write"]
     assert bodies[0]["system"][-1]["cache_control"] == {"type": "ephemeral"}  # the injected breakpoint
-    assert not cb._stream_bodies  # nothing kept once recorded
+    assert _released(cb)  # nothing kept once recorded
 
 
 def test_recording_never_breaks_litellm(base, cb, capsys):
@@ -444,3 +452,95 @@ def test_conversation_key_survives_moved_markers_and_content_shape():
     blocks = [{"role": "user", "content": [{"type": "text", "text": "fix the bug"}]}]
     assert _conversation("m", marked, kw) == _conversation("m", plain, kw) == _conversation("m", blocks, kw)
     assert _conversation("m", [{"role": "user", "content": "another"}], kw) != _conversation("m", plain, kw)
+
+
+# Review of the stream support: LiteLLM's own estimate is not usage, and every stream keeps its body.
+
+def _stream_kw(**over):
+    kw = {"litellm_call_id": "s1", "call_type": "completion", "model": "gpt-5.6", "stream": True,
+          "messages": [{"role": "system", "content": SYSTEM}, {"role": "user", "content": "hi"}],
+          "litellm_params": {"litellm_session_id": "est", "custom_llm_provider": "openai"}}
+    kw.update(over)
+    return kw
+
+
+def _estimate(kw):
+    return litellm.token_counter(model=kw["model"], messages=kw["messages"])
+
+
+def test_a_stream_whose_usage_was_not_asked_for_is_not_recorded(capsys):
+    """No usage in the stream: LiteLLM fills in its tokenizer's estimate, which would read as a miss."""
+    spy = _Spy()
+    c = PrefixwiseCallback(recorder=spy)
+    kw = _stream_kw()  # no stream_options
+    c._record(kw, {"id": "r", "model": "gpt-5.6", "usage": {"prompt_tokens": _estimate(kw), "completion_tokens": 3}},
+              None, None)
+    assert spy.calls == [] and "LiteLLM estimated it" in capsys.readouterr().err
+
+
+def test_a_stream_asked_for_usage_that_got_litellms_estimate_is_not_recorded():
+    """Asked for usage, but the server ignored stream_options: the count is LiteLLM's estimate."""
+    spy = _Spy()
+    c = PrefixwiseCallback(recorder=spy)
+    kw = _stream_kw(stream_options={"include_usage": True})
+    c._record(kw, {"id": "r", "model": "gpt-5.6", "usage": {"prompt_tokens": _estimate(kw), "completion_tokens": 3}},
+              None, None)
+    assert spy.calls == []
+    c._record(kw, {"id": "r", "model": "gpt-5.6", "usage": {"prompt_tokens": _estimate(kw) + 7, "completion_tokens": 3}},
+              None, None)  # the provider's own count differs from LiteLLM's tokenizer
+    c._record(kw, {"id": "r", "model": "gpt-5.6", "usage": {"prompt_tokens": _estimate(kw), "completion_tokens": 3,
+                                                            "prompt_tokens_details": {"cached_tokens": 64}}},
+              None, None)  # an estimate never reports cached tokens
+    assert len(spy.calls) == 2
+
+
+def test_a_stream_usage_option_set_through_optional_params_counts():
+    spy = _Spy()
+    c = PrefixwiseCallback(recorder=spy)
+    kw = _stream_kw(optional_params={"stream_options": {"include_usage": True}})
+    c._record(kw, {"id": "r", "model": "gpt-5.6", "usage": {"prompt_tokens": _estimate(kw) + 7, "completion_tokens": 3}},
+              None, None)
+    assert len(spy.calls) == 1
+
+
+def test_a_sessionless_sync_claude_stream_keeps_the_body_litellm_sent(base, cb):
+    """Review: a sync stream's success callback has no body; without a session the body logged before
+    the call was not kept, the injected breakpoint was lost, and the miss could be blamed on it."""
+    bodies = []
+    record = cb.recorder.record
+    cb.recorder.record = lambda provider, body, *a, **k: (bodies.append(body), record(provider, body, *a, **k))[1]
+    msgs = [{"role": "system", "content": SYSTEM + "sessionless"}, {"role": "user", "content": "hi"}]
+    _stream(base, "anthropic/claude-haiku-5-5", msgs,
+            cache_control_injection_points=[{"location": "message", "role": "system"}])
+    deadline = time.monotonic() + 10
+    while not bodies and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert bodies and bodies[0]["system"][-1]["cache_control"] == {"type": "ephemeral"}
+    assert _released(cb)
+
+
+def test_the_json_litellm_sent_on_an_anthropic_stream_is_read():
+    """An async Anthropic stream carries the body it sent as a JSON string."""
+    import json
+    spy = _Spy()
+    c = PrefixwiseCallback(recorder=spy)
+    sent = {"model": "claude-haiku-5-5", "stream": True,
+            "system": [{"type": "text", "text": "s", "cache_control": {"type": "ephemeral"}}],
+            "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}]}
+    c._record(_kwargs(stream=True, additional_args={"complete_input_dict": json.dumps(sent)}),
+              _response({"prompt_tokens": 900, "completion_tokens": 1, "cache_read_input_tokens": 0,
+                         "cache_creation_input_tokens": 0}), None, None)
+    assert spy.calls and spy.calls[0][1] == sent
+
+
+def test_kept_stream_bodies_are_let_go_after_the_forget_time():
+    import prefixwise.litellm_callback as mod
+    c = PrefixwiseCallback(recorder=Recorder(":memory:"))
+    body = {"model": "gpt-5.6", "messages": [{"role": "user", "content": "hi"}]}
+    c.log_pre_api_call("gpt-5.6", body["messages"], {"litellm_call_id": "old", "stream": True, "call_type": "completion",
+                                                     "additional_args": {"complete_input_dict": body}})
+    assert "old" in c._stream_bodies  # kept although the call has no session
+    c._stream_bodies["old"] = (body, time.monotonic() - mod.ORDER_FORGET_SECONDS - 1)
+    c.log_pre_api_call("gpt-5.6", body["messages"], {"litellm_call_id": "new", "stream": True, "call_type": "completion",
+                                                     "additional_args": {"complete_input_dict": body}})
+    assert list(c._stream_bodies) == ["new"]
