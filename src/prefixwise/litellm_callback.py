@@ -25,7 +25,8 @@ reports them even with nothing cached) or Claude's cache fields, or failing thos
 other than LiteLLM's estimate. Two cases cannot be counted locally: a prompt with a high-detail image
 by URL (LiteLLM would fetch it to size it) is not recorded, and a model whose tokenizer LiteLLM
 would download (Llama, Cohere) is believed only when usage was asked for; a server that ignores the
-request would then have LiteLLM's estimate recorded.
+request would then have LiteLLM's estimate recorded, and one that sends usage unasked (vLLM with
+`--enable-force-include-usage`) has it dropped unless the caller asks.
 
 What is classified is the request body LiteLLM actually sent the provider (its
 `complete_input_dict`): after its translation to the provider's format, the breakpoints it
