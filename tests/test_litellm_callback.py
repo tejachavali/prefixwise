@@ -575,9 +575,16 @@ def test_the_estimate_check_never_reaches_the_network(monkeypatch):
     images = [{"role": "user", "content": [{"type": "image_url", "image_url": {"url": "https://example.com/c.png",
                                                                             "detail": "high"}}]}]
     assert PrefixwiseCallback._stream_usage_reported({"prompt_tokens": 99}, "gpt-5.6", images, 99, {}) is False
-    assert lu.huggingface_tokenizer_kind("meta-llama/Llama-3.1-8B-Instruct") is not None
-    assert PrefixwiseCallback._stream_usage_reported({"prompt_tokens": 10}, "meta-llama/Llama-3.1-8B-Instruct",
-                                                     [{"role": "user", "content": "hi"}], 10, {}) is True
+    llama = "meta-llama/Llama-3.1-8B-Instruct"
+    assert lu.huggingface_tokenizer_kind(llama) is not None
+    hi = [{"role": "user", "content": "hi"}]
+    # Review: not counted, so believed only when usage was asked for (unasked, a server sends none
+    # and what is there is LiteLLM's estimate).
+    assert PrefixwiseCallback._stream_usage_reported({"prompt_tokens": 10}, llama, hi, 10, {}, {}) is False
+    assert PrefixwiseCallback._stream_usage_reported({"prompt_tokens": 10}, llama, hi, 10, {},
+                                                     {"stream_options": {"include_usage": True}}) is True
+    assert PrefixwiseCallback._stream_usage_reported({"prompt_tokens": 10}, llama, hi, 10, {},
+                                                     {"optional_params": {"stream_options": {"include_usage": True}}}) is True
     assert seen == []  # never counted: no image fetched, no tokenizer downloaded
 
 

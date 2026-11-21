@@ -22,7 +22,10 @@ LiteLLM proxy server asks by default (`always_include_stream_usage`), and an SDK
 recorded, with one warning saying so, since an estimate with nothing cached would read as a miss
 that never happened. Usage counts as the provider's when it carries prompt-token details (OpenAI
 reports them even with nothing cached) or Claude's cache fields, or failing those, a prompt count
-other than LiteLLM's estimate.
+other than LiteLLM's estimate. Two cases cannot be counted locally: a prompt with a high-detail image
+by URL (LiteLLM would fetch it to size it) is not recorded, and a model whose tokenizer LiteLLM
+would download (Llama, Cohere) is believed only when usage was asked for; a server that ignores the
+request would then have LiteLLM's estimate recorded.
 
 What is classified is the request body LiteLLM actually sent the provider (its
 `complete_input_dict`): after its translation to the provider's format, the breakpoints it
@@ -342,7 +345,8 @@ class PrefixwiseCallback(_Base):
             details = details if isinstance(details, dict) else _dump(details)
             claude = provider == "anthropic" or "claude" in model.lower() \
                 or "cache_creation_input_tokens" in usage
-            if kwargs.get("stream") and not self._stream_usage_reported(usage, model, messages, prompt, details):
+            if kwargs.get("stream") and not self._stream_usage_reported(usage, model, messages, prompt, details,
+                                                                       kwargs):
                 self._no_stream_usage()
                 return
             if claude:
@@ -388,7 +392,7 @@ class PrefixwiseCallback(_Base):
                 print(f"prefixwise: LiteLLM call not recorded ({type(exc).__name__}: {exc})", file=sys.stderr)
 
     @staticmethod
-    def _stream_usage_reported(usage: dict, model, messages, prompt: int, details: dict) -> bool:
+    def _stream_usage_reported(usage: dict, model, messages, prompt: int, details: dict, kwargs=None) -> bool:
         """Did the provider report this stream's usage, or is it LiteLLM's estimate? With no usage
         in the stream, LiteLLM counts the messages with its tokenizer and leaves the prompt-token
         details out. The provider's usage has them (OpenAI's, even with nothing cached) or Claude's
@@ -399,17 +403,21 @@ class PrefixwiseCallback(_Base):
         if details or "cache_read_input_tokens" in usage or "cache_creation_input_tokens" in usage:
             return True
         # The comparison counts exactly as LiteLLM's estimate does, and stays local: it runs inside
-        # LiteLLM's logging, on the event loop for async calls, so nothing may block it. A model whose
-        # tokenizer LiteLLM would download from Hugging Face is not counted (its count is taken as
-        # reported); a prompt whose count would fetch an image (a high-detail image by URL) is not
-        # either, and is not recorded: it cannot be told from an estimate without the fetch.
+        # LiteLLM's logging, on the event loop for async calls, so nothing may block it. A prompt whose
+        # count would fetch an image (a high-detail image by URL) is not counted and not recorded: it
+        # cannot be told from an estimate without the fetch. A model whose tokenizer LiteLLM would
+        # download from Hugging Face (Llama, Cohere) is not counted either: its count is believed
+        # only when usage was asked for (stream_options.include_usage, as the LiteLLM proxy server asks
+        # by default), since an OpenAI-format server sends none unasked.
         if _fetches_image(messages):
             return False
         try:
             from litellm import token_counter
             from litellm.utils import huggingface_tokenizer_kind
             if huggingface_tokenizer_kind(str(model)) is not None:
-                return True
+                kwargs = kwargs or {}
+                options = kwargs.get("stream_options") or (kwargs.get("optional_params") or {}).get("stream_options")
+                return isinstance(options, dict) and options.get("include_usage") is True
             return prompt != token_counter(model=model, messages=messages)
         except Exception:  # noqa: BLE001 - no local tokenizer at hand: take the count as reported
             return True
