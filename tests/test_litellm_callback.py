@@ -560,9 +560,10 @@ def test_kept_stream_bodies_are_let_go_after_the_forget_time():
 
 
 def test_the_estimate_check_never_reaches_the_network(monkeypatch):
-    """Review: token_counter fetches image URLs for their size and downloads Hugging Face tokenizers
-    (llama-3 and others), inside LiteLLM's logging and on the event loop for async calls. The check
-    asks for the default image size and leaves those models' counts as reported."""
+    """Review: token_counter fetches high-detail image URLs to size them and downloads Hugging Face
+    tokenizers (llama-3 and others), inside LiteLLM's logging and on the event loop for async calls.
+    Neither happens: such an image prompt is not counted (and not recorded), such a model's count is
+    taken as reported."""
     import litellm.utils as lu
     seen = []
 
@@ -573,10 +574,25 @@ def test_the_estimate_check_never_reaches_the_network(monkeypatch):
     monkeypatch.setattr(litellm, "token_counter", counter)
     images = [{"role": "user", "content": [{"type": "image_url", "image_url": {"url": "https://example.com/c.png",
                                                                             "detail": "high"}}]}]
-    assert PrefixwiseCallback._stream_usage_reported({"prompt_tokens": 10}, "gpt-5.6", images, 10, {}) is False
-    assert seen and seen[0]["use_default_image_token_count"] is True
-    seen.clear()
+    assert PrefixwiseCallback._stream_usage_reported({"prompt_tokens": 99}, "gpt-5.6", images, 99, {}) is False
     assert lu.huggingface_tokenizer_kind("meta-llama/Llama-3.1-8B-Instruct") is not None
     assert PrefixwiseCallback._stream_usage_reported({"prompt_tokens": 10}, "meta-llama/Llama-3.1-8B-Instruct",
                                                      [{"role": "user", "content": "hi"}], 10, {}) is True
-    assert seen == []  # never counted, so no tokenizer download
+    assert seen == []  # never counted: no image fetched, no tokenizer downloaded
+
+
+def test_an_image_counted_locally_is_compared_as_litellm_counts_it():
+    """Review: counting images at a default size differed from LiteLLM's own estimate, so an estimate
+    with an image passed as real usage. Auto-detail and base64 images are counted as LiteLLM does."""
+    import base64
+    png = "data:image/png;base64," + base64.b64encode(
+        bytes.fromhex("89504e470d0a1a0a0000000d4948445200000001000000010806000000"
+                      "1f15c4890000000d49444154789c6360000002000154a24f5d0000000049454e44ae426082")).decode()
+    for url in (png, "https://example.com/c.png"):  # auto detail: no fetch
+        msgs = [{"role": "user", "content": [{"type": "text", "text": "what is this"},
+                                             {"type": "image_url", "image_url": {"url": url}}]}]
+        estimate = litellm.token_counter(model="gpt-5.6", messages=msgs)
+        assert PrefixwiseCallback._stream_usage_reported({"prompt_tokens": estimate}, "gpt-5.6", msgs, estimate, {}) \
+            is False
+        assert PrefixwiseCallback._stream_usage_reported({"prompt_tokens": estimate + 3}, "gpt-5.6", msgs,
+                                                         estimate + 3, {}) is True

@@ -118,6 +118,19 @@ def _sent_body(value) -> dict | None:
     return None
 
 
+def _fetches_image(messages) -> bool:
+    """Would LiteLLM's token_counter fetch an image to size it? Only for a high-detail image given by
+    an http(s) URL; base64 images and auto or low detail are counted locally."""
+    for m in messages or []:
+        content = m.get("content") if isinstance(m, dict) else None
+        for b in content if isinstance(content, list) else []:
+            image = b.get("image_url") if isinstance(b, dict) and b.get("type") == "image_url" else None
+            if isinstance(image, dict) and image.get("detail") == "high" \
+                    and str(image.get("url") or "").lower().startswith(("http://", "https://")):
+                return True
+    return False
+
+
 def _text(content) -> str:
     """A message's content as the same string turn after turn: a string and text blocks with the
     same text agree, and markers (cache_control, which clients move to the last message) are
@@ -377,15 +390,19 @@ class PrefixwiseCallback(_Base):
             return False
         if details or "cache_read_input_tokens" in usage or "cache_creation_input_tokens" in usage:
             return True
-        # The comparison stays local: no image is fetched for its size, and a model whose tokenizer
-        # LiteLLM would download from Hugging Face is not counted (its count is taken as reported).
-        # It runs inside LiteLLM's logging, on the event loop for async calls; nothing may block it.
+        # The comparison counts exactly as LiteLLM's estimate does, and stays local: it runs inside
+        # LiteLLM's logging, on the event loop for async calls, so nothing may block it. A model whose
+        # tokenizer LiteLLM would download from Hugging Face is not counted (its count is taken as
+        # reported); a prompt whose count would fetch an image (a high-detail image by URL) is not
+        # either, and is not recorded: it cannot be told from an estimate without the fetch.
+        if _fetches_image(messages):
+            return False
         try:
             from litellm import token_counter
             from litellm.utils import huggingface_tokenizer_kind
             if huggingface_tokenizer_kind(str(model)) is not None:
                 return True
-            return prompt != token_counter(model=model, messages=messages, use_default_image_token_count=True)
+            return prompt != token_counter(model=model, messages=messages)
         except Exception:  # noqa: BLE001 - no local tokenizer at hand: take the count as reported
             return True
 
