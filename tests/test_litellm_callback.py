@@ -557,3 +557,26 @@ def test_kept_stream_bodies_are_let_go_after_the_forget_time():
     c.log_pre_api_call("gpt-5.6", body["messages"], {"litellm_call_id": "new", "stream": True, "call_type": "completion",
                                                      "additional_args": {"complete_input_dict": body}})
     assert list(c._stream_bodies) == ["new"]
+
+
+def test_the_estimate_check_never_reaches_the_network(monkeypatch):
+    """Review: token_counter fetches image URLs for their size and downloads Hugging Face tokenizers
+    (llama-3 and others), inside LiteLLM's logging and on the event loop for async calls. The check
+    asks for the default image size and leaves those models' counts as reported."""
+    import litellm.utils as lu
+    seen = []
+
+    def counter(**kw):
+        seen.append(kw)
+        return 10
+
+    monkeypatch.setattr(litellm, "token_counter", counter)
+    images = [{"role": "user", "content": [{"type": "image_url", "image_url": {"url": "https://example.com/c.png",
+                                                                            "detail": "high"}}]}]
+    assert PrefixwiseCallback._stream_usage_reported({"prompt_tokens": 10}, "gpt-5.6", images, 10, {}) is False
+    assert seen and seen[0]["use_default_image_token_count"] is True
+    seen.clear()
+    assert lu.huggingface_tokenizer_kind("meta-llama/Llama-3.1-8B-Instruct") is not None
+    assert PrefixwiseCallback._stream_usage_reported({"prompt_tokens": 10}, "meta-llama/Llama-3.1-8B-Instruct",
+                                                     [{"role": "user", "content": "hi"}], 10, {}) is True
+    assert seen == []  # never counted, so no tokenizer download

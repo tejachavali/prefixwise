@@ -377,10 +377,16 @@ class PrefixwiseCallback(_Base):
             return False
         if details or "cache_read_input_tokens" in usage or "cache_creation_input_tokens" in usage:
             return True
+        # The comparison stays local: no image is fetched for its size, and a model whose tokenizer
+        # LiteLLM would download from Hugging Face is not counted (its count is taken as reported).
+        # It runs inside LiteLLM's logging, on the event loop for async calls; nothing may block it.
         try:
             from litellm import token_counter
-            return prompt != token_counter(model=model, messages=messages)
-        except Exception:  # noqa: BLE001 - no tokenizer at hand: take the count as reported
+            from litellm.utils import huggingface_tokenizer_kind
+            if huggingface_tokenizer_kind(str(model)) is not None:
+                return True
+            return prompt != token_counter(model=model, messages=messages, use_default_image_token_count=True)
+        except Exception:  # noqa: BLE001 - no local tokenizer at hand: take the count as reported
             return True
 
     def _no_stream_usage(self) -> None:
