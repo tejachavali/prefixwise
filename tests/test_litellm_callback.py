@@ -705,25 +705,107 @@ def test_a_messages_api_call_is_classified_with_the_body_logged_before_it():
     assert not c._stream_bodies  # let go once recorded
 
 
-def test_claude_through_the_messages_api_is_recorded_only_from_anthropics_format():
+# The bodies LiteLLM 1.112.0.dev2 sent for one Messages API request (a system prompt and the last
+# message marked, a tool call and its result), captured before sending.
+_CONVERSE = {"messages": [{"role": "user", "content": [{"text": "q1"}]},
+                          {"role": "assistant", "content": [{"toolUse": {"input": {"cmd": "ls"}, "name": "bash", "toolUseId": "t1"}}]},
+                          {"role": "user", "content": [{"toolResult": {"content": [{"text": "a.py"}], "toolUseId": "t1"}},
+                                                       {"text": "next"}, {"cachePoint": {"type": "default"}}]}],
+             "inferenceConfig": {"maxTokens": 20},
+             "system": [{"text": "SYSTEM PROMPT"}, {"cachePoint": {"type": "default"}}],
+             "toolConfig": {"tools": [{"toolSpec": {"inputSchema": {"json": {"type": "object"}}, "name": "bash",
+                                                    "description": "run"}}]}}
+_OPENROUTER = {"model": "anthropic/claude-sonnet-4.5",
+               "messages": [{"role": "system", "content": [{"type": "text", "text": "SYSTEM PROMPT",
+                                                            "cache_control": {"type": "ephemeral"}}]},
+                            {"role": "user", "content": "q1"},
+                            {"role": "assistant", "tool_calls": [{"id": "t1", "type": "function",
+                                                                  "function": {"name": "bash", "arguments": "{\"cmd\": \"ls\"}"}}]},
+                            {"role": "tool", "tool_call_id": "t1", "content": "a.py"},
+                            {"role": "user", "content": [{"type": "text", "text": "next", "cache_control": {"type": "ephemeral"}}]}],
+               "tools": [{"type": "function", "function": {"name": "bash", "parameters": {"type": "object"}, "description": "run"}}]}
+_RESPONSES = {"model": "gpt-4o",
+              "input": [{"type": "message", "role": "developer", "content": [{"type": "input_text", "text": "SYSTEM PROMPT"}]},
+                        {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "q1"}]},
+                        {"type": "function_call", "call_id": "t1", "name": "bash", "arguments": "{\"cmd\": \"ls\"}"},
+                        {"type": "function_call_output", "call_id": "t1", "output": "a.py"}],
+              "max_output_tokens": 20, "tools": [{"type": "function", "name": "bash", "parameters": {"type": "object"}}]}
+
+
+def _marks(body):
+    """Where the body carries cache_control: (part, index) pairs."""
+    out = [("system", i) for i, b in enumerate(body.get("system") or []) if "cache_control" in b]
+    out += [("tools", i) for i, t in enumerate(body.get("tools") or []) if "cache_control" in t]
+    for n, m in enumerate(body["messages"]):
+        content = m.get("content")
+        out += [(f"messages[{n}]", i) for i, b in enumerate(content if isinstance(content, list) else [])
+                if isinstance(b, dict) and "cache_control" in b]
+    return out
+
+
+def test_claude_on_bedrock_converse_is_classified_from_the_converse_body():
     spy = _Spy()
     c = PrefixwiseCallback(recorder=spy)
     usage = {"prompt_tokens": 10, "completion_tokens": 1, "cache_read_input_tokens": 0}
-    # Bedrock Converse: LiteLLM translated the call to a chat completion and then to Converse. Its
-    # system prompt and markers are in neither the caller's messages (kwargs) nor an Anthropic body.
-    converse = {"messages": [{"role": "user", "content": [{"text": "hi"}]}], "system": [{"text": "s"}]}
-    c._record(_messages_kw(sent=converse, model="converse/anthropic.claude-haiku-5-5", system=None,
-                           tools=[{"type": "function", "function": {"name": "bash"}}],
+    c._record(_messages_kw(sent=_CONVERSE, model="converse/anthropic.claude-sonnet-4-5", system=None,
                            litellm_params={"custom_llm_provider": "bedrock", "metadata": {}}),
               _response(usage), None, None)
-    assert spy.calls == []
+    provider, body, _, _ = spy.calls[0]
+    assert provider == "anthropic"
+    assert body["system"] == [{"type": "text", "text": "SYSTEM PROMPT", "cache_control": {"type": "ephemeral"}}]
+    assert body["tools"] == [{"name": "bash", "description": "run", "input_schema": {"type": "object"}}]
+    assert [b["type"] for m in body["messages"] for b in m["content"]] == ["text", "tool_use", "tool_result", "text"]
+    assert _marks(body) == [("system", 0), ("messages[2]", 1)]  # each cachePoint on the block before it
+
+
+def test_claude_sent_as_a_chat_completion_keeps_its_breakpoints():
+    # OpenRouter: LiteLLM translated the call to a chat completion, cache_control markers included.
+    spy = _Spy()
+    c = PrefixwiseCallback(recorder=spy)
+    usage = {"prompt_tokens": 10, "completion_tokens": 1,
+             "prompt_tokens_details": {"cached_tokens": 4, "cache_creation_tokens": 6}}
+    c._record(_messages_kw(sent=_OPENROUTER, model="anthropic/claude-sonnet-4.5", system=None,
+                           litellm_params={"custom_llm_provider": "openrouter", "metadata": {}}),
+              _response(usage), None, None)
+    provider, body, response, _ = spy.calls[0]
+    assert provider == "anthropic" and response["usage"]["cache_creation_input_tokens"] == 6
+    assert body["system"][0]["cache_control"] == {"type": "ephemeral"}
+    assert _marks(body)[-1][0] == f"messages[{len(body['messages']) - 1}]"  # the last message's breakpoint
     # Bedrock invoke under an inference-profile ARN: no "claude" in the name, but Anthropic's body.
     invoke = {"anthropic_version": "bedrock-2023-05-31", "system": [{"type": "text", "text": "s"}],
               "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}]}
     arn = "arn:aws:bedrock:us-east-1:111122223333:application-inference-profile/abc"
     c._record(_messages_kw(sent=invoke, model=arn, litellm_params={"custom_llm_provider": "bedrock", "metadata": {}}),
               _response(usage), None, None)
-    assert [(p, b) for p, b, _, _ in spy.calls] == [("anthropic", {**invoke, "model": arn})]
+    assert spy.calls[1][:2] == ("anthropic", {**invoke, "model": arn})
+
+
+def test_an_openai_model_through_the_messages_api_is_classified_as_a_responses_call():
+    spy = _Spy()
+    c = PrefixwiseCallback(recorder=spy)
+    usage = {"prompt_tokens": 1300, "completion_tokens": 5, "prompt_tokens_details": {"cached_tokens": 1024}}
+    c._record(_messages_kw(sent=_RESPONSES, model="gpt-4o", litellm_params={"custom_llm_provider": "openai", "metadata": {}}),
+              _response(usage, "gpt-4o"), None, None)
+    provider, body, response, kw = spy.calls[0]
+    assert (provider, kw["api"], body) == ("openai", "responses", _RESPONSES)
+    assert response["usage"] == {"input_tokens": 1300, "output_tokens": 5, "input_tokens_details": {"cached_tokens": 1024}}
+
+
+def test_a_system_prompt_sent_as_the_opening_developer_item_is_the_system_prompt():
+    # LiteLLM 1.112 sends a Messages API system prompt to the Responses API as the first input item.
+    rec = Recorder(":memory:")
+    def turn(system, items, cached):
+        body = {**_RESPONSES, "input": [{**_RESPONSES["input"][0], "content": [{"type": "input_text", "text": system}]}] + items}
+        rec.record("openai", body, {"id": "r", "model": "gpt-4o", "usage": {
+            "input_tokens": 3000, "output_tokens": 5, "input_tokens_details": {"cached_tokens": cached}}},
+            api="responses", session_id="dev")
+    history = [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "q " * 400}]}]
+    turn("You are careful. " * 200, history, 0)
+    turn("You are careful. " * 200, history + history, 2900)
+    turn("You are concise. " * 200, history + history + history, 0)
+    with rec.ledger.reader() as cur:
+        causes = [r[0] for r in cur.execute("SELECT cause FROM entries ORDER BY id")]
+    assert causes == ["first_write", "none", "system_edit"]
 
 
 def test_another_model_through_the_messages_api_is_recorded_only_as_a_chat_completion():
@@ -742,10 +824,6 @@ def test_another_model_through_the_messages_api_is_recorded_only_as_a_chat_compl
                    {"model": "deepseek-chat", "max_tokens": 20, "messages": [{"role": "user", "content": "hi"}]}):
         c._record(_messages_kw(sent=native, model="deepseek-chat", litellm_params=deepseek),
                   _response(usage, "deepseek-chat"), None, None)
-    # OpenAI's Responses API (LiteLLM's route for OpenAI models): no messages to compare.
-    c._record(_messages_kw(sent={"model": "gpt-5.6", "input": [{"role": "user", "content": "hi"}]}, model="gpt-5.6",
-                           litellm_params={"custom_llm_provider": "openai", "metadata": {}}),
-              _response(usage, "gpt-5.6"), None, None)
     # No body at all (its kept copy let go): nothing to classify faithfully.
     c._record(_messages_kw(), _response(usage), None, None)
     assert len(spy.calls) == 1

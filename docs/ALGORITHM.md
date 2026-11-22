@@ -14,7 +14,8 @@ own KV-cache events. Where that evidence does not decide, the verdict is `unknow
 
 **A request** is the body the client sent, as the provider will render it. **A block** is one tool
 definition, the system prompt (`system`, or each system or developer message that opens an OpenAI
-chat conversation; the Responses API's `instructions`), one message, or one tool result. A system or
+chat conversation; the Responses API's `instructions`, and each system or developer item that opens
+its input when the turn does not continue a stored response), one message, or one tool result. A system or
 developer message sent later in a conversation (an agent's reminder) is a message where it was sent.
 Cache markers (`cache_control`) are removed before fingerprinting: they say where to cache, not what
 the prompt is. Equivalent encodings of one Anthropic prompt (string or text-block content) are

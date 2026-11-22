@@ -19,11 +19,11 @@ Anthropic's `metadata.user_id` (Claude Code's names its session). Completed chat
 Messages API calls (`litellm.anthropic.messages`, the proxy server's /v1/messages, Claude Code's
 route; the proxy server turns its `x-claude-code-session-id` header into `litellm_session_id`) are
 recorded, streamed or not; other call types pass through unrecorded. Through the Messages API,
-Claude is classified by Anthropic's rules when LiteLLM sent it Anthropic's format (not when LiteLLM
-sends it as a chat completion, as to OpenRouter, or on to Bedrock Converse), and another model when
-LiteLLM sent it a chat completion (vLLM); not a provider's own Anthropic-compatible API (DeepSeek's or
-MiniMax's: their cache rules are not Anthropic's) nor OpenAI's Responses API, LiteLLM's route for
-OpenAI models. Nothing is sent anywhere
+each call is classified from the body LiteLLM sent: Claude by Anthropic's rules, in Anthropic's
+format, on Bedrock Converse (its cachePoints as breakpoints) or as a chat completion with its
+cache_control markers (OpenRouter); OpenAI's models as the Responses API calls LiteLLM makes of them;
+another model when LiteLLM sent it a chat completion (vLLM). Not a provider's own Anthropic-compatible
+API (DeepSeek's or MiniMax's): their cache rules are not Anthropic's. Nothing is sent anywhere
 and LiteLLM's behaviour is unchanged. Answers from LiteLLM's own response cache reached no provider
 and are not recorded.
 
@@ -235,6 +235,69 @@ def _is_anthropic_body(body) -> bool:
     return True
 
 
+def _marked(block: dict, point: dict) -> dict:
+    """A Converse cachePoint as Anthropic's cache_control on the block before it."""
+    marker = {"type": "ephemeral"}
+    if isinstance(point, dict) and point.get("ttl"):
+        marker["ttl"] = point["ttl"]
+    return {**block, "cache_control": marker}
+
+
+def _converse_blocks(blocks) -> list:
+    """Bedrock Converse content blocks as Anthropic's; a cachePoint marks the block before it."""
+    out: list = []
+    for b in blocks if isinstance(blocks, list) else []:
+        if not isinstance(b, dict):
+            continue
+        if "cachePoint" in b:
+            if out:
+                out[-1] = _marked(out[-1], b["cachePoint"])
+        elif "text" in b and len(b) == 1:
+            out.append({"type": "text", "text": b["text"]})
+        elif "toolUse" in b:
+            u = b["toolUse"] or {}
+            out.append({"type": "tool_use", "id": u.get("toolUseId"), "name": u.get("name"), "input": u.get("input")})
+        elif "toolResult" in b:
+            r = b["toolResult"] or {}
+            block = {"type": "tool_result", "tool_use_id": r.get("toolUseId"),
+                     "content": [{"type": "text", "text": c["text"]} if isinstance(c, dict) and "text" in c and len(c) == 1
+                                 else c for c in r.get("content") or []]}
+            if r.get("status"):
+                block["is_error"] = r["status"] == "error"
+            out.append(block)
+        else:  # images, documents, reasoning: kept as sent, each its own block
+            key = next(iter(b))
+            out.append({"type": key, key: b[key]})
+    return out
+
+
+def _anthropic_from_converse(sent: dict, model: str) -> dict:
+    """The body LiteLLM sent to Bedrock Converse, in Anthropic's format: the same blocks in the same
+    order, with each cachePoint as cache_control on the block before it, as Bedrock caches them."""
+    body: dict = {"model": model, "messages": [{"role": m.get("role"), "content": _converse_blocks(m.get("content"))}
+                                               for m in sent.get("messages") or [] if isinstance(m, dict)]}
+    system = _converse_blocks(sent.get("system"))
+    if system:
+        body["system"] = system
+    tools: list = []
+    for t in (sent.get("toolConfig") or {}).get("tools") or []:
+        if not isinstance(t, dict):
+            continue
+        if "cachePoint" in t:
+            if tools:
+                tools[-1] = _marked(tools[-1], t["cachePoint"])
+        elif "toolSpec" in t:
+            spec = t["toolSpec"] or {}
+            tools.append({"name": spec.get("name"), "description": spec.get("description"),
+                          "input_schema": (spec.get("inputSchema") or {}).get("json")})
+    if tools:
+        body["tools"] = tools
+    choice = (sent.get("toolConfig") or {}).get("toolChoice")
+    if choice:
+        body["tool_choice"] = choice
+    return body
+
+
 def _sent_natively(model: str, provider: str, sent) -> bool:
     """Did LiteLLM send a Messages API call on in Anthropic's format (the provider's own Messages
     API), rather than translate it to a chat completion? LiteLLM's own answer; failing that, the body."""
@@ -441,22 +504,35 @@ class PrefixwiseCallback(_Base):
             prompt, completion = _int(usage.get("prompt_tokens")), _int(usage.get("completion_tokens"))
             details = usage.get("prompt_tokens_details") or {}
             details = details if isinstance(details, dict) else _dump(details)
+            responses = False
             if messages_api:
                 # Classified only from the body LiteLLM sent: the caller's request has no cache
                 # breakpoints LiteLLM injected, and on the chat-completion route its system prompt and
                 # markers are gone. Claude (by name, or by Anthropic's body on Bedrock or Vertex AI) is
-                # recorded when that body is Anthropic's format; not when LiteLLM sent it a chat
-                # completion (OpenRouter) or on to Bedrock Converse.
-                # Another model is recorded when LiteLLM sent it a chat completion; not a provider's own
-                # Messages API (DeepSeek's, MiniMax's), whose cache rules are not Anthropic's, nor OpenAI's
-                # Responses API, which has no messages to compare.
-                if not isinstance(sent, dict) or not isinstance(sent.get("messages"), list):
+                # judged by Anthropic's rules in whatever format LiteLLM sent it: Anthropic's, Bedrock
+                # Converse (translated back block for block, cachePoints as breakpoints), or a chat
+                # completion with its cache_control markers (OpenRouter). Another model is recorded when
+                # LiteLLM sent it a chat completion, or OpenAI's Responses API (OpenAI's models); not a
+                # provider's own Messages API (DeepSeek's, MiniMax's), whose cache rules are not Anthropic's.
+                if not isinstance(sent, dict):
                     return
                 claude = provider == "anthropic" or "claude" in model.lower() or "anthropic_version" in sent
-                native = _sent_natively(model, provider, sent)
-                if claude and not ("anthropic_version" in sent or (native and _is_anthropic_body(sent))):
-                    return
-                if not claude and native:
+                listed = isinstance(sent.get("messages"), list)
+                if claude:
+                    if not listed:
+                        return
+                    if "anthropic_version" in sent or (_sent_natively(model, provider, sent) and _is_anthropic_body(sent)):
+                        pass  # Anthropic's own format
+                    elif not _is_anthropic_body(sent) or "toolConfig" in sent or "inferenceConfig" in sent:
+                        sent = _anthropic_from_converse(sent, model)
+                    else:
+                        sent = _anthropic_from_openai(sent["messages"], sent.get("tools"), model)
+                elif listed:
+                    if _sent_natively(model, provider, sent):
+                        return
+                elif isinstance(sent.get("input"), list):
+                    responses = True
+                else:
                     return
             else:
                 claude = provider == "anthropic" or "claude" in model.lower() or "cache_creation_input_tokens" in usage
@@ -465,7 +541,7 @@ class PrefixwiseCallback(_Base):
                 self._no_stream_usage()
                 return
             if claude:
-                if _is_anthropic_body(sent):
+                if messages_api or _is_anthropic_body(sent):
                     body = sent
                 else:
                     if self._redacted(messages):
@@ -484,6 +560,15 @@ class PrefixwiseCallback(_Base):
                                                 ("ephemeral_5m_input_tokens", "ephemeral_1h_input_tokens")}
                 self.recorder.record("anthropic", body, {"id": response.get("id"), "model": returned, "usage": shaped},
                                      **common)
+            elif responses:  # OpenAI's Responses API, as LiteLLM sent it
+                body = dict(sent)
+                body.setdefault("model", model)
+                shaped = {"input_tokens": prompt, "output_tokens": completion}
+                if details or usage.get("cached_tokens") is not None:
+                    shaped["input_tokens_details"] = {"cached_tokens": _int(details.get("cached_tokens")
+                                                                            or usage.get("cached_tokens"))}
+                self.recorder.record("openai", body, {"id": response.get("id"), "model": returned, "usage": shaped},
+                                     api="responses", **common)
             else:
                 if sent and isinstance(sent.get("messages"), list):
                     body = sent
