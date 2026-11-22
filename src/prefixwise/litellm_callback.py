@@ -19,9 +19,11 @@ Anthropic's `metadata.user_id` (Claude Code's names its session). Completed chat
 Messages API calls (`litellm.anthropic.messages`, the proxy server's /v1/messages, Claude Code's
 route; the proxy server turns its `x-claude-code-session-id` header into `litellm_session_id`) are
 recorded, streamed or not; other call types pass through unrecorded. Through the Messages API,
-Claude is classified by Anthropic's rules when LiteLLM sent it Anthropic's format (not on Bedrock
-Converse), and another model when LiteLLM sent it a chat completion (vLLM); not a provider's own Anthropic-compatible API (DeepSeek's, Kimi's: their cache rules are not
-Anthropic's) nor OpenAI's Responses API, LiteLLM's route for OpenAI models. Nothing is sent anywhere
+Claude is classified by Anthropic's rules when LiteLLM sent it Anthropic's format (not when LiteLLM
+sends it as a chat completion, as to OpenRouter, or on to Bedrock Converse), and another model when
+LiteLLM sent it a chat completion (vLLM); not a provider's own Anthropic-compatible API (DeepSeek's or
+MiniMax's: their cache rules are not Anthropic's) nor OpenAI's Responses API, LiteLLM's route for
+OpenAI models. Nothing is sent anywhere
 and LiteLLM's behaviour is unchanged. Answers from LiteLLM's own response cache reached no provider
 and are not recorded.
 
@@ -443,9 +445,10 @@ class PrefixwiseCallback(_Base):
                 # Classified only from the body LiteLLM sent: the caller's request has no cache
                 # breakpoints LiteLLM injected, and on the chat-completion route its system prompt and
                 # markers are gone. Claude (by name, or by Anthropic's body on Bedrock or Vertex AI) is
-                # recorded when that body is Anthropic's format; Claude on Bedrock Converse is not.
+                # recorded when that body is Anthropic's format; not when LiteLLM sent it a chat
+                # completion (OpenRouter) or on to Bedrock Converse.
                 # Another model is recorded when LiteLLM sent it a chat completion; not a provider's own
-                # Messages API (DeepSeek's, Kimi's), whose cache rules are not Anthropic's, nor OpenAI's
+                # Messages API (DeepSeek's, MiniMax's), whose cache rules are not Anthropic's, nor OpenAI's
                 # Responses API, which has no messages to compare.
                 if not isinstance(sent, dict) or not isinstance(sent.get("messages"), list):
                     return
