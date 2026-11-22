@@ -1,0 +1,117 @@
+{
+ "litellm": "1.112.0.dev2",
+ "seed": 11,
+ "trajectories": 70,
+ "seconds": 1290,
+ "summary": {
+  "openai/unchanged": {
+   "replays": 70,
+   "calls": 2249,
+   "recorded": 2249,
+   "false_alarms": 0,
+   "injected_named": 0,
+   "injected_seen_cost_nothing": 0,
+   "injected_missed": 0
+  },
+  "openai/volatile_system": {
+   "replays": 70,
+   "calls": 2249,
+   "recorded": 2249,
+   "false_alarms": 0,
+   "injected_named": 70,
+   "injected_seen_cost_nothing": 0,
+   "injected_missed": 0
+  },
+  "openai/system_edit": {
+   "replays": 70,
+   "calls": 2249,
+   "recorded": 2249,
+   "false_alarms": 0,
+   "injected_named": 70,
+   "injected_seen_cost_nothing": 0,
+   "injected_missed": 0
+  },
+  "openai/history_edit": {
+   "replays": 70,
+   "calls": 2249,
+   "recorded": 2249,
+   "false_alarms": 0,
+   "injected_named": 68,
+   "injected_seen_cost_nothing": 2,
+   "injected_missed": 0
+  },
+  "openai/tool_result_mutation": {
+   "replays": 67,
+   "calls": 2211,
+   "recorded": 2211,
+   "false_alarms": 0,
+   "injected_named": 59,
+   "injected_seen_cost_nothing": 8,
+   "injected_missed": 0
+  },
+  "anthropic/unchanged": {
+   "replays": 70,
+   "calls": 2249,
+   "recorded": 2249,
+   "false_alarms": 0,
+   "injected_named": 0,
+   "injected_seen_cost_nothing": 0,
+   "injected_missed": 0
+  },
+  "anthropic/volatile_system": {
+   "replays": 70,
+   "calls": 2249,
+   "recorded": 2249,
+   "false_alarms": 0,
+   "injected_named": 70,
+   "injected_seen_cost_nothing": 0,
+   "injected_missed": 0
+  },
+  "anthropic/system_edit": {
+   "replays": 70,
+   "calls": 2249,
+   "recorded": 2249,
+   "false_alarms": 0,
+   "injected_named": 70,
+   "injected_seen_cost_nothing": 0,
+   "injected_missed": 0
+  },
+  "anthropic/history_edit": {
+   "replays": 70,
+   "calls": 2249,
+   "recorded": 2249,
+   "false_alarms": 0,
+   "injected_named": 70,
+   "injected_seen_cost_nothing": 0,
+   "injected_missed": 0
+  },
+  "anthropic/tool_result_mutation": {
+   "replays": 67,
+   "calls": 2211,
+   "recorded": 2211,
+   "false_alarms": 0,
+   "injected_named": 67,
+   "injected_seen_cost_nothing": 0,
+   "injected_missed": 0
+  },
+  "openai/tool_reserialize": {
+   "replays": 37,
+   "calls": 518,
+   "recorded": 518,
+   "false_alarms": 0,
+   "injected_named": 37,
+   "injected_seen_cost_nothing": 0,
+   "injected_missed": 0
+  },
+  "anthropic/tool_reserialize": {
+   "replays": 37,
+   "calls": 518,
+   "recorded": 518,
+   "false_alarms": 0,
+   "injected_named": 37,
+   "injected_seen_cost_nothing": 0,
+   "injected_missed": 0
+  }
+ },
+ "problems": []
+}
