@@ -921,3 +921,85 @@ def test_a_streamed_messages_api_call_is_recorded(base, cb, bodies):
                                                  ("anthropic", "msgs-stream", "none")]
     assert all(_marked_last(b) for b in bodies)
     assert _released(cb)
+
+
+def _stitched_causes(developer: bool):
+    """Prefixwise's own path: a Responses turn opened by a developer item, then one continuing it."""
+    rec = Recorder(":memory:")
+    opening = [{"type": "message", "role": "developer", "content": "Sandbox: read-only. " * 50}] if developer else []
+    first = {"model": "gpt-5.6", "instructions": "You are a coding agent. " * 100,
+             "input": opening + [{"type": "message", "role": "user", "content": "fix it " * 300}]}
+    rec.record("openai", first, {"id": "resp_1", "model": "gpt-5.6", "usage": {
+        "input_tokens": 3000, "output_tokens": 5, "input_tokens_details": {"cached_tokens": 0}}},
+        api="responses", session_id="st")
+    nxt = {"model": "gpt-5.6", "instructions": first["instructions"], "previous_response_id": "resp_1",
+           "input": [{"type": "message", "role": "user", "content": "go on"}]}
+    rec.record("openai", nxt, {"id": "resp_2", "model": "gpt-5.6", "usage": {
+        "input_tokens": 3010, "output_tokens": 5, "input_tokens_details": {"cached_tokens": 0}}},
+        api="responses", session_id="st")
+    with rec.ledger.reader() as cur:
+        return [r[0] for r in cur.execute("SELECT cause FROM entries ORDER BY id")]
+
+
+def test_a_continued_responses_turn_keeps_the_developer_items_its_input_opened_with():
+    with_dev, without = _stitched_causes(True), _stitched_causes(False)
+    assert with_dev == without and "system_edit" not in with_dev
+
+
+def test_claude_in_anthropics_format_is_classified_as_sent_whatever_the_route():
+    # A /v1/messages passthrough deployment: Anthropic's body, though LiteLLM has no native config for it.
+    spy = _Spy()
+    c = PrefixwiseCallback(recorder=spy)
+    sent = {"model": "claude-sonnet-4-5", "system": [{"type": "text", "text": "s", "cache_control": {"type": "ephemeral"}}],
+            "messages": [{"role": "user", "content": [{"type": "text", "text": "q"}]},
+                         {"role": "assistant", "content": [{"type": "tool_use", "id": "t1", "name": "bash", "input": {}}]},
+                         {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "ok"}]}]}
+    c._record(_messages_kw(sent=sent, model="claude-sonnet-4-5", litellm_params={"custom_llm_provider": "openai", "metadata": {}}),
+              _response({"prompt_tokens": 10, "completion_tokens": 1}), None, None)
+    assert spy.calls[0][:2] == ("anthropic", sent)
+
+
+def test_openrouter_claude_keeps_its_parameters_its_name_and_its_one_hour_writes():
+    spy = _Spy()
+    c = PrefixwiseCallback(recorder=spy)
+    sent = {**_OPENROUTER, "thinking": {"type": "enabled", "budget_tokens": 1024}, "tool_choice": "auto",
+            "messages": [{**m, "content": [{**b, "cache_control": {"type": "ephemeral", "ttl": "1h"}} for b in m["content"]]}
+                         if isinstance(m.get("content"), list) else m for m in _OPENROUTER["messages"]]}
+    usage = {"prompt_tokens": 10, "completion_tokens": 1,
+             "prompt_tokens_details": {"cached_tokens": 4, "cache_creation_tokens": 6}}
+    c._record(_messages_kw(sent=sent, model="anthropic/claude-sonnet-4.5", system=None,
+                           litellm_params={"custom_llm_provider": "openrouter", "metadata": {}}),
+              _response(usage, "anthropic/claude-sonnet-4.5"), None, None)
+    _, body, response, _ = spy.calls[0]
+    assert body["thinking"] == sent["thinking"] and body["tool_choice"] == "auto"
+    assert body["model"] == "claude-sonnet-4-5" and response["model"] == "claude-sonnet-4-5"
+    assert response["usage"]["cache_creation"] == {"ephemeral_5m_input_tokens": 0, "ephemeral_1h_input_tokens": 6}
+
+
+def test_the_converse_body_keeps_reasoning_system_tools_and_every_breakpoint():
+    from prefixwise.litellm_callback import _anthropic_from_converse
+    body = _anthropic_from_converse({
+        "messages": [{"role": "user", "content": [{"text": "a"}]},
+                     {"role": "assistant", "content": [{"cachePoint": {"type": "default"}},
+                                                       {"reasoningContent": {"reasoningText": {"text": "t", "signature": "s"}}},
+                                                       {"reasoningContent": {"redactedContent": "eA=="}}, {"text": "x"}]}],
+        "toolConfig": {"tools": [{"toolSpec": {"name": "a", "inputSchema": {"json": {}}}}, {"systemTool": {"name": "web"}},
+                                 {"cachePoint": {"type": "default", "ttl": "1h"}}]},
+        "additionalModelRequestFields": {"thinking": {"type": "enabled", "budget_tokens": 2048}}}, "claude-sonnet-4-5")
+    assert body["messages"][0]["content"][0]["cache_control"] == {"type": "ephemeral"}  # a cachePoint opening the next message
+    assert [b["type"] for b in body["messages"][1]["content"]] == ["thinking", "redacted_thinking", "text"]
+    assert body["messages"][1]["content"][0] == {"type": "thinking", "thinking": "t", "signature": "s"}
+    assert body["tools"][1]["cache_control"] == {"type": "ephemeral", "ttl": "1h"}  # on the system tool before it
+    assert body["thinking"] == {"type": "enabled", "budget_tokens": 2048}
+
+
+def test_another_model_in_converse_or_anthropics_format_is_not_recorded():
+    spy = _Spy()
+    c = PrefixwiseCallback(recorder=spy)
+    usage = {"prompt_tokens": 10, "completion_tokens": 1, "prompt_tokens_details": {"cached_tokens": 0}}
+    c._record(_messages_kw(sent=_CONVERSE, model="converse/amazon.nova-pro-v1:0",
+                           litellm_params={"custom_llm_provider": "bedrock", "metadata": {}}), _response(usage, "nova"), None, None)
+    anthropic_body = {"model": "glm-4.6", "system": "s", "messages": [{"role": "user", "content": "hi"}]}
+    c._record(_messages_kw(sent=anthropic_body, model="glm-4.6", litellm_params={"custom_llm_provider": "openai", "metadata": {}}),
+              _response(usage, "glm-4.6"), None, None)
+    assert spy.calls == []

@@ -254,7 +254,11 @@ class Collector:
         head = [b for b in fps if b.role not in ("messages", "tool_results")]
         new_msgs = [b for b in fps if b.role in ("messages", "tool_results")]
         old_msgs = [b for b in prior.blocks if b.role in ("messages", "tool_results")]
-        return head + old_msgs + new_msgs, prior
+        # The prior turn's system and developer items that opened its input are in the stored
+        # response too, after its instructions; a continuing turn resends only the instructions.
+        prior_system = [b for b in prior.blocks if b.role == "system"]
+        carried = prior_system[sum(1 for b in head if b.role == "system"):]
+        return head + carried + old_msgs + new_msgs, prior
 
     def _ingest_locked(self, rec: TurnRecord, write: bool = True) -> tuple[dict, LedgerEntry]:
         """Classify against the conversation's previous turn, write the row, then commit the new
