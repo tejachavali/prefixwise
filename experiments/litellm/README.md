@@ -18,6 +18,7 @@ agent conversations cache-friendly (translation, routing)?
   - OpenAI format caches automatically at every block boundary, from 1,024 tokens up.
   - Anthropic format caches only at `cache_control` markers, and bills writes as `cache_creation_input_tokens`.
   - Both serve streamed and non-streamed responses, and usage in streams follows each API.
+  - It also serves the OpenAI Responses API (automatic, as chat completions), Claude in chat format (OpenRouter: at `cache_control` markers, writes as `cache_write_tokens`) and Bedrock Converse (at `cachePoint`s; not streamed).
   - The cache is updated as each request arrives, so results are deterministic.
 - **The `agent_eval` runs** use Prefixwise's own mock (`--mock` with tool calls), because the tool loop needs tool calls.
 
@@ -41,6 +42,7 @@ schema is rebuilt from the arguments the trajectory used, which is enough for th
 | C. Real conversations replayed through LiteLLM, with Prefixwise | 70 trajectories (30 + 40), each replayed unchanged and with one change injected at a random step (where the trajectory can carry it), in OpenAI and Anthropic formats: 768 replays, 23,450 calls, `replay_c.py` | **0 false alarms** in 23,450 calls; every call recorded. Of 628 injected changes, **618 named**, **10 seen and shown as costing nothing**, **0 missed**. The 10 are OpenAI-format edits that cost 17 to 107 tokens, under one 128-token reporting unit: Prefixwise treats a read within that tolerance as complete, by design (ALGORITHM.md section 1), and keeps the change as a secondary cause. |
 | D. The Router across two deployments | 12 trajectories (4 + 8) × {load-balanced, `prompt_caching`, `session_affinity`} × {OpenAI, Anthropic}, 373 calls each; two cachemock processes with separate caches; ground truth is the deployment that served each call (`model_id`); the session sent as both `litellm_session_id` and `metadata.session_id`. `router_d.py` | Turns moved to the other deployment, of the 361 that could move: load-balanced 171; `prompt_caching` 176 to 186; `session_affinity` **0** (96.7% from cache, against 93.6%). Prefixwise named every move to a cold deployment (nothing read) `routing_miss` (12 per setup and format), and never named one without a move. A move to a deployment holding an older, shorter part of the conversation reads part of it. With at least half read, it counts as a hit (finding below). With less than half read, it is `unknown` (3 to 6 per setup and format), with the evidence saying the reusable prefix was not read and why it cannot be told: on the OpenAI format, expiry or routing (the cache lifetime is not known); on the Anthropic format, no timing or usage evidence names a cause. |
 | E. Real provider numbers | The Claude Opus 4.6 run's 36 calls, each request rebuilt as LiteLLM sends it, with Anthropic's real usage, through `prefixwise import gateway`. `real_usage_e.py` | `first_write`, then `below_min_prefix` (call 1 was 2,054 tokens, under Opus's 4,096 minimum, and Anthropic indeed cached nothing), then 34 hits; 94.8% from cache; no false alarm |
+| G. Live: the Messages API on real APIs | `live_messages.py`: 4-turn conversations through LiteLLM's Messages API (the SDK, and the proxy server's `/v1/messages` with Claude Code's session header), one change injected at turn 3, streamed and not, on real Anthropic (claude-haiku-4-5) and OpenAI (gpt-4.1-mini); Prefixwise 0.12.4, LiteLLM 1.110.2; `openai_cache_probe.py` for OpenAI's misses | Anthropic: **20 of 20** conversations right, every verdict matching Anthropic's own cache numbers. OpenAI: every injected change named (16 of 16), but OpenAI read nothing on 38 of the 40 turns that only appended, named `routing_miss`; the probe showed those misses are OpenAI's Responses API without `prompt_cache_key` (directly too), not LiteLLM or Prefixwise (finding 6) |
 | F. `agent_eval` | 3 tasks × 2 trials, the tool loop, direct and through the LiteLLM proxy server. `eval_direct.py`, `eval_gw.py` | Before #144 (direct mode): one session for the whole eval; 5 of 12 calls were named `history_edit` when they were each a new run's first call. After #144, through the proxy server: 6 runs, 6 sessions with task and target, each `first_write` then a hit. Direct mode: LiteLLM passes no labels to the model call yet (finding below); with that one line passed, the same as through the proxy server. |
 
 ## Findings
@@ -63,6 +65,7 @@ schema is rebuilt from the arguments the trajectory used, which is enough for th
 3. **`session_affinity` reads `metadata.session_id`, not `litellm_session_id`** (`deployment_affinity_check._get_session_id_from_request_kwargs` reads only the metadata dicts). In a first, smaller run of D with the session given only as `litellm_session_id`, `session_affinity` moved 81 and 83 of the 157 turns that could move, about as many as load-balanced routing in the same run (89 and 69) (`runs/2026-11-22-router-litellm-session-id-only.json`). With `metadata.session_id`, no turn moved.
 4. **`agent_eval`'s tool loop labels its calls only through the gateway.** In direct mode, `llms/tool_loop/harness/transformation.py` `_routing_kwargs` passes no `metadata`, so no callback (Prefixwise, or any observability integration) can tell which run, task or target a call belongs to. Passing `metadata=dict(ctx.metadata)` there (one line) was checked to give the same result as the gateway.
 5. **`agent_eval`'s scorecard has no cache numbers.** `harness.types.Usage` holds input tokens, output tokens and calls only, so the scorecard cannot show how much of a task's cost was cache reads, writes or misses. Prefixwise's ledger, keyed by the eval's run, task and target (#144), can.
+6. **Messages API calls sent on to OpenAI's models carry no `prompt_cache_key`.** LiteLLM sends a `/v1/messages` call for an OpenAI model through the Responses API without one. Live (G), OpenAI then read nothing on 38 of 40 turns that only appended; with a `prompt_cache_key` set on the same requests sent directly, it read the prefix on 3 of 3, and through Chat Completions on 3 of 3 (`runs/2026-11-22-live.md`). LiteLLM has a stable key at hand: the session (`litellm_session_id`, which its proxy server takes from Claude Code's `x-claude-code-session-id`).
 
 ## Rerun
 
@@ -85,6 +88,12 @@ python eval_direct.py f.db                     # F, direct
 python mockserve.py 18531 &                    # F, through the proxy server
 PREFIXWISE_LEDGER_PATH=$PWD/gw.db LITELLM_DANGEROUSLY_PERMIT_WEAK_OR_UNSET_MASTER_KEY=true litellm --config gw.yaml --port 18532 &
 python eval_gw.py gw.db gpt-5.6
+# G, live (provider keys in the environment; see the scripts' docstrings for the proxy route)
+python live_messages.py live-anthropic.json --route sdk --model anthropic/claude-haiku-4-5
+python openai_cache_probe.py probe-openai.json --model gpt-4.1-mini
+# The same tests as B and C on agent conversations from Hugging Face (pip install datasets)
+python hf_litellm.py translate t.json --dataset nvidia/Open-SWE-Traces --split claudecode --limit 100
+python hf_litellm.py replay r.json --dataset nvidia/Open-SWE-Traces --split claudecode --limit 30
 ```
 
 Records:
@@ -94,5 +103,6 @@ Records:
 - D: `runs/2026-11-22-router.json`, with the session in both fields, and `runs/2026-11-22-router-litellm-session-id-only.json`, the earlier run with `litellm_session_id` only.
 - Finding 2: `runs/2026-11-22-router-prompt-caching.txt`, from `router_prompt_caching.py`.
 - E and F: `runs/2026-11-22-e-f.md`, the ledgers summarised.
+- G and finding 6: `runs/2026-11-22-live.md`, Muse's tables and the OpenAI probe.
 
 The F ledger from before #144 through the proxy server was overwritten while testing; its direct-mode counterpart is recorded.
