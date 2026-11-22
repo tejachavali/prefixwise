@@ -1,0 +1,83 @@
+{
+ "litellm": "1.112.0.dev2",
+ "trajectories": 664,
+ "seconds": 1190,
+ "results": {
+  "openai": {
+   "pairs": 17981,
+   "ok": 17981,
+   "untranslated": 0,
+   "examples": []
+  },
+  "anthropic": {
+   "pairs": 17981,
+   "ok": 17981,
+   "untranslated": 0,
+   "examples": []
+  },
+  "bedrock-converse": {
+   "pairs": 17981,
+   "ok": 17976,
+   "untranslated": 0,
+   "examples": [
+    {
+     "trajectory": "tau-bench/sonnet-35-new-airline.json#65",
+     "step": 18,
+     "other_fields_equal": true,
+     "changed_keys": [],
+     "first_changed_message": 14,
+     "before": "{\"role\": \"user\", \"content\": [{\"toolResult\": {\"content\": [{\"text\": \"\"}], \"toolUseId\": \"0\"}}]}",
+     "after": "{\"role\": \"user\", \"content\": [{\"toolResult\": {\"content\": [{\"text\": \"\"}], \"toolUseId\": \"0\"}}, {\"text\": \" Look, I just found my reservation ID in my email - it's GV1N64. Can you please hurry up with changing this to economy? I need this done quickly and want the refund sent back to my card.\"}]}"
+    },
+    {
+     "trajectory": "tau-bench/sonnet-35-new-airline.json#86",
+     "step": 14,
+     "other_fields_equal": true,
+     "changed_keys": [],
+     "first_changed_message": 10,
+     "before": "{\"role\": \"user\", \"content\": [{\"toolResult\": {\"content\": [{\"text\": \"\"}], \"toolUseId\": \"0\"}}]}",
+     "after": "{\"role\": \"user\", \"content\": [{\"toolResult\": {\"content\": [{\"text\": \"\"}], \"toolUseId\": \"0\"}}, {\"text\": \" Look, I don't mean to be difficult, but this is really important to me. My family and I always get travel insurance together, and I specifically remember selecting it. Could you at least check if t"
+    },
+    {
+     "trajectory": "tau-bench/sonnet-35-new-retail.json#49",
+     "step": 28,
+     "other_fields_equal": true,
+     "changed_keys": [],
+     "first_changed_message": 24,
+     "before": "{\"role\": \"user\", \"content\": [{\"toolResult\": {\"content\": [{\"text\": \"\"}], \"toolUseId\": \"0\"}}]}",
+     "after": "{\"role\": \"user\", \"content\": [{\"toolResult\": {\"content\": [{\"text\": \"\"}], \"toolUseId\": \"0\"}}, {\"text\": \" The Blue earbuds with 4 hours battery life and IPX4 water resistance (item_id: 6452271382) is the cheapest model. Would you like me to help you process the exchange?\"}]}"
+    },
+    {
+     "trajectory": "tau-bench/sonnet-35-new-retail.json#49",
+     "step": 32,
+     "other_fields_equal": true,
+     "changed_keys": [],
+     "first_changed_message": 26,
+     "before": "{\"role\": \"user\", \"content\": [{\"toolResult\": {\"content\": [{\"text\": \"\"}], \"toolUseId\": \"0\"}}]}",
+     "after": "{\"role\": \"user\", \"content\": [{\"toolResult\": {\"content\": [{\"text\": \"\"}], \"toolUseId\": \"0\"}}, {\"text\": \" Yes, please help me process the exchange. I'd be happy to proceed.\"}]}"
+    },
+    {
+     "trajectory": "tau-bench/sonnet-35-new-retail.json#50",
+     "step": 18,
+     "other_fields_equal": true,
+     "changed_keys": [],
+     "first_changed_message": 14,
+     "before": "{\"role\": \"user\", \"content\": [{\"toolResult\": {\"content\": [{\"text\": \"\"}], \"toolUseId\": \"0\"}}]}",
+     "after": "{\"role\": \"user\", \"content\": [{\"toolResult\": {\"content\": [{\"text\": \"\"}], \"toolUseId\": \"0\"}}, {\"text\": \" Look, this is really frustrating. Can you at least give me overnight shipping or something similar on my new order to make up for not being able to undo the cancellation? I'll place it right away i"
+    }
+   ]
+  },
+  "bedrock-invoke": {
+   "pairs": 17981,
+   "ok": 17981,
+   "untranslated": 0,
+   "examples": []
+  },
+  "gemini": {
+   "pairs": 17981,
+   "ok": 17981,
+   "untranslated": 0,
+   "examples": []
+  }
+ }
+}

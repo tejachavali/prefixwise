@@ -1,0 +1,6 @@
+# Router prompt_caching check, LiteLLM 1.112.0.dev2: deployment (0 or 1) serving each of 12 turns of one mini-swe-agent trajectory, fresh text per run
+[anthropic-markers claude-sonnet-4-5] anthropic-markers deployment per turn: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] tokens(turn1): 1242
+[anthropic-markers claude-haiku-5-5] anthropic-markers deployment per turn: [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1] tokens(turn1): 1240
+[anthropic-inject claude-sonnet-4-5] anthropic-inject deployment per turn: [1, 1, 0, 0, 1, 0, 1, 1, 1, 1, 0, 1] tokens(turn1): 1242
+[anthropic-inject claude-haiku-5-5] anthropic-inject deployment per turn: [1, 1, 0, 0, 1, 1, 0, 0, 0, 0, 0, 1] tokens(turn1): 1240
+[openai] openai deployment per turn: [1, 0, 0, 0, 1, 0, 1, 1, 1, 0, 1, 0] tokens(turn1): 1234
