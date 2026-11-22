@@ -613,3 +613,62 @@ def test_a_high_detail_image_inside_a_tool_result_is_not_fetched(monkeypatch):
         {"type": "image_url", "image_url": {"url": "https://example.com/c.png", "detail": "high"}}]}]}]
     assert PrefixwiseCallback._stream_usage_reported({"prompt_tokens": 800}, "gpt-4o", nested, 800, {}) is False
     assert seen == []
+
+
+# LiteLLM's agent_eval labels each model call of an evaluation run (agent_eval_run, agent_eval_task,
+# agent_eval_target). Without them every run fell into one session, and each new task or trial was
+# compared with the last call of the one before and named history_edit (checked with a real
+# agent_eval run on LiteLLM 1.112.0.dev2: 5 of 12 calls).
+
+def _eval_kw(where, run, task="task0", target="tool_loop:openai/gpt-5.6", call="c1", msgs=None):
+    labels = {"agent_eval_suite": "s", "agent_eval_run": run, "agent_eval_task": task,
+              "agent_eval_target": target, "agent_eval_trial": 0}
+    meta = labels if where == "metadata" else {"spend_logs_metadata": labels}
+    return {"litellm_call_id": call, "call_type": "acompletion", "model": "gpt-5.6",
+            "messages": msgs or [{"role": "user", "content": "Task 0: read the note"}],
+            "litellm_params": {"custom_llm_provider": "openai", "metadata": meta}}
+
+
+@pytest.mark.parametrize("where", ["metadata", "spend_logs_metadata"])
+def test_an_agent_eval_run_is_its_session_with_its_task_and_target(where):
+    """Direct (the call's metadata) and through the LiteLLM proxy server (spend_logs_metadata)."""
+    spy = _Spy()
+    c = PrefixwiseCallback(recorder=spy)
+    c._record(_eval_kw(where, "run-a"), _resp(1800, 0), None, None)
+    _, _, _, kw = spy.calls[0]
+    assert kw["session_id"] == "run-a" and kw["task_id"] == "task0"
+    assert kw["agent_id"] == "tool_loop:openai/gpt-5.6" and kw["session_is_user"] is False
+
+
+def test_two_trials_of_one_task_are_two_conversations_not_an_edit():
+    c = PrefixwiseCallback(recorder=Recorder(":memory:"))
+    first = [{"role": "user", "content": "Task 0: read the note"}]
+    longer = first + [{"role": "assistant", "content": "ok"}, {"role": "user", "content": "go on"}]
+    for run, call, msgs, cached in (("run-a", "a1", first, 0), ("run-a", "a2", longer, 1800),
+                                    ("run-b", "b1", first, 0)):
+        kw = _eval_kw("spend_logs_metadata", run, call=call, msgs=msgs)
+        c.log_pre_api_call("gpt-5.6", msgs, kw)
+        c.log_success_event(kw, _resp(1800, cached), None, None)
+    assert [r[4] for r in rows(c, 3)] == ["first_write", "none", "first_write"]
+
+
+def test_a_session_the_caller_named_wins_over_the_evaluation_run():
+    spy = _Spy()
+    c = PrefixwiseCallback(recorder=spy)
+    kw = _eval_kw("metadata", "run-a")
+    kw["litellm_params"]["litellm_session_id"] = "mine"
+    c._record(kw, _resp(1800, 0), None, None)
+    assert spy.calls[0][3]["session_id"] == "mine"
+
+
+def test_the_eval_judge_is_recorded_apart_from_the_agent():
+    """Review: agent_eval's judge (checks.py, agent_eval_stage "judge") carries the run's labels; its
+    call is not the target agent's turn and must not join the agent's conversation."""
+    spy = _Spy()
+    c = PrefixwiseCallback(recorder=spy)
+    kw = _eval_kw("metadata", "run-a")
+    kw["litellm_params"]["metadata"]["agent_eval_stage"] = "judge"
+    c._record(kw, _resp(1800, 0), None, None)
+    _, _, _, rec = spy.calls[0]
+    assert rec["session_id"] == "run-a:judge" and rec["agent_id"] == "agent_eval_judge"
+    assert rec["task_id"] == "task0"

@@ -10,7 +10,11 @@ LiteLLM proxy server (config.yaml):
       callbacks: prefixwise.litellm_callback.prefixwise_callback
 
 Sessions: LiteLLM's own `litellm_session_id`, else `metadata={"session_id": ..., "task_id": ...,
-"agent_id": ...}`, else the `user` field. Completed chat completions are recorded, streamed or not
+"agent_id": ...}`, else the run of a LiteLLM agent_eval (one attempt at one task by one target: the
+run is the session, the task the task, the target the agent; the eval's judge is recorded apart, as
+agent `agent_eval_judge` in session `<run>:judge`; read from the call's metadata, or through the
+LiteLLM proxy server from `spend_logs_metadata`: agent_eval's own tool loop labels its calls only
+through the gateway, its judge both ways), else the `user` field. Completed chat completions are recorded, streamed or not
 (other call types pass through unrecorded); nothing is sent anywhere and LiteLLM's behaviour is
 unchanged. Answers from LiteLLM's own response cache reached no provider and are not recorded.
 
@@ -89,10 +93,41 @@ def _int(v) -> int:
         return 0
 
 
+def _eval_labels(kwargs) -> dict:
+    """The labels LiteLLM's agent_eval puts on each model call of an evaluation run
+    (agent_eval_run, agent_eval_task, agent_eval_target, agent_eval_trial): in the call's metadata,
+    or, through the LiteLLM proxy server, under `spend_logs_metadata` (the x-litellm-spend-logs-metadata
+    header). Empty when the call is not part of an evaluation."""
+    params = kwargs.get("litellm_params") or {}
+    for meta in (params.get("metadata"), params.get("litellm_metadata"), kwargs.get("metadata")):
+        if not isinstance(meta, dict):
+            continue
+        for labels in (meta, meta.get("spend_logs_metadata")):
+            if isinstance(labels, dict) and labels.get("agent_eval_run"):
+                return labels
+    return {}
+
+
+def _eval_session(labels: dict) -> str | None:
+    """The run is the session; its judge's calls (agent_eval_stage "judge", grading the attempt) are a
+    conversation of their own, never part of the agent's."""
+    run = labels.get("agent_eval_run")
+    if not run:
+        return None
+    return f"{run}:judge" if labels.get("agent_eval_stage") == "judge" else run
+
+
+def _eval_agent(labels: dict) -> str | None:
+    if labels.get("agent_eval_stage") == "judge":
+        return "agent_eval_judge"  # the grader, not the target: its tokens are not the agent's
+    return labels.get("agent_eval_target")
+
+
 def _session_of(kwargs) -> str | None:
     params = kwargs.get("litellm_params") or {}
     meta = params.get("metadata") or {}
-    return params.get("litellm_session_id") or meta.get("session_id") or kwargs.get("user")
+    return (params.get("litellm_session_id") or meta.get("session_id")
+            or _eval_session(_eval_labels(kwargs)) or kwargs.get("user"))
 
 
 def _conversation(model, messages, kwargs) -> tuple | None:
@@ -336,9 +371,12 @@ class PrefixwiseCallback(_Base):
                 ended = end_time.timestamp()  # the response ended then, not when this callback runs
             except Exception:  # noqa: BLE001 - timing is optional
                 pass
-            session = params.get("litellm_session_id") or meta.get("session_id")  # (_session_of adds user)
+            labels = _eval_labels(kwargs)  # an agent_eval run: one attempt at one task, by one target
+            session = (params.get("litellm_session_id") or meta.get("session_id")
+                       or _eval_session(labels))  # (_session_of adds user)
             common = dict(session_id=session or kwargs.get("user"), session_is_user=not session,
-                          task_id=meta.get("task_id"), agent_id=meta.get("agent_id"), latency_ms=latency,
+                          task_id=meta.get("task_id") or labels.get("agent_eval_task"),
+                          agent_id=meta.get("agent_id") or _eval_agent(labels), latency_ms=latency,
                           ended_at=ended, genai_provider=provider_name(provider) if provider else None)
             returned = str(response.get("model") or model)
             prompt, completion = _int(usage.get("prompt_tokens")), _int(usage.get("completion_tokens"))
