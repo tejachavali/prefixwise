@@ -86,9 +86,7 @@ def expectation(change, markers):
         return "none", change
     return change, None
 cases = []
-GAP = 0.05  # seconds between turns, as an agent runs a tool between calls (the mock records each
-           # request on a background thread after replying; a turn sent in the same instant can
-           # reach it before the previous one is recorded, and the mock then serves nothing)
+GAP = 0.05  # seconds between turns, as an agent runs a tool between calls
 async def run_all_async(jobs):
     for kw in jobs:
         await run_async(kw)

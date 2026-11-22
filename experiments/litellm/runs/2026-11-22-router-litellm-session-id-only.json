@@ -1,0 +1,89 @@
+{
+ "litellm": "1.112.0.dev2",
+ "trajectories": 6,
+ "seconds": 52,
+ "summary": {
+  "load-balanced/openai": {
+   "calls": 163,
+   "recorded": 163,
+   "switches": 89,
+   "prompt": 3131145,
+   "cached": 2878547,
+   "routing_miss_on_switch": 6,
+   "other_cause_on_switch": {
+    "unknown": 2,
+    "none": 81
+   },
+   "routing_miss_without_switch": 0,
+   "share_from_cache": 0.919
+  },
+  "load-balanced/anthropic": {
+   "calls": 163,
+   "recorded": 163,
+   "switches": 69,
+   "prompt": 3099785,
+   "cached": 2851165,
+   "routing_miss_on_switch": 6,
+   "other_cause_on_switch": {
+    "none": 62,
+    "unknown": 1
+   },
+   "routing_miss_without_switch": 0,
+   "share_from_cache": 0.92
+  },
+  "prompt_caching/openai": {
+   "calls": 163,
+   "recorded": 163,
+   "switches": 78,
+   "prompt": 3131156,
+   "cached": 2878817,
+   "routing_miss_on_switch": 6,
+   "other_cause_on_switch": {
+    "unknown": 4,
+    "none": 68
+   },
+   "routing_miss_without_switch": 0,
+   "share_from_cache": 0.919
+  },
+  "prompt_caching/anthropic": {
+   "calls": 163,
+   "recorded": 163,
+   "switches": 81,
+   "prompt": 3099800,
+   "cached": 2848630,
+   "routing_miss_on_switch": 6,
+   "other_cause_on_switch": {
+    "unknown": 3,
+    "none": 72
+   },
+   "routing_miss_without_switch": 0,
+   "share_from_cache": 0.919
+  },
+  "session_affinity/openai": {
+   "calls": 163,
+   "recorded": 163,
+   "switches": 81,
+   "prompt": 3131171,
+   "cached": 2881145,
+   "routing_miss_on_switch": 6,
+   "other_cause_on_switch": {
+    "none": 75
+   },
+   "routing_miss_without_switch": 0,
+   "share_from_cache": 0.92
+  },
+  "session_affinity/anthropic": {
+   "calls": 163,
+   "recorded": 163,
+   "switches": 83,
+   "prompt": 3099948,
+   "cached": 2850656,
+   "routing_miss_on_switch": 6,
+   "other_cause_on_switch": {
+    "none": 77
+   },
+   "routing_miss_without_switch": 0,
+   "share_from_cache": 0.92
+  }
+ }
+}

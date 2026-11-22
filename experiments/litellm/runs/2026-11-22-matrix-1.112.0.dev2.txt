@@ -1,3 +1,4 @@
+# LiteLLM 1.112.0.dev2
 openai|sync|plain|none  ['first_write', 'none', 'none']  ('none', None)  PASS
 openai|sync|plain|tool_reserialize  ['first_write', 'none', 'tool_reserialize']  ('tool_reserialize', None)  PASS
 openai|sync|plain|volatile_system  ['first_write', 'none', 'volatile_system']  ('volatile_system', None)  PASS
