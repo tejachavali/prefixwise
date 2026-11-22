@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.12.4: 2026-11-22
+
+For anyone running Claude Code or another agent through LiteLLM's `/v1/messages` to a model other than Claude on Anthropic: Claude on Bedrock Converse, Claude through OpenRouter and OpenAI's models are now recorded too, each classified from the body LiteLLM sent. And on OpenAI's Responses API, a system prompt sent as the developer message that opens the input is the system prompt, through LiteLLM and through Prefixwise's own proxy.
+
+- **LiteLLM's Messages API, every route LiteLLM sends Claude or OpenAI's models by.** 0.12.3 recorded `/v1/messages` calls only when LiteLLM sent Claude on in Anthropic's format, or another model a chat completion. Now:
+  - **Claude on Bedrock Converse** is judged by Anthropic's rules on the Converse body translated back block for block: each `cachePoint` is a breakpoint on the block before it (its `ttl` included), reasoning blocks are thinking, and the fields in `additionalModelRequestFields` (thinking, betas) are compared.
+  - **Claude sent as a chat completion** (OpenRouter, for example) is judged by Anthropic's rules with the `cache_control` markers LiteLLM kept, its `thinking`, `tool_choice` and `response_format` compared, and its model id under Anthropic's name (`anthropic/claude-sonnet-4.5` as `claude-sonnet-4-5`), so its price and minimum apply. OpenRouter reports no split of cache writes by lifetime: writes under markers that all ask for one hour are counted as one-hour writes.
+  - **Claude in Anthropic's format on a route LiteLLM has no native configuration for** (a `/v1/messages` passthrough deployment) is classified as sent.
+  - **OpenAI's models,** which LiteLLM sends through the Responses API, are recorded as Responses API calls.
+
+  Still not recorded through `/v1/messages`: a provider's own Anthropic-compatible API (DeepSeek's or MiniMax's), and another model on Bedrock Converse (Nova, Llama), whose cache rules are not Anthropic's. The SDK's sync `litellm.anthropic.messages.create` reaches the callback as another call type and is classified as one. Checked against a simulated provider that caches by content (no model called), on LiteLLM 1.112.0.dev2 and 1.108.3, through `litellm.anthropic.messages`: on each route, tools reordered, a system prompt edited and an earlier message edited are each named, streamed or not (Bedrock Converse not streamed); through the LiteLLM proxy server with Claude Code's session header, as in 0.12.3 (#150).
+- **Responses API: a system prompt in the opening developer message is the system prompt.** As on chat completions, the system and developer messages that open a Responses API input are now the system prompt, so an edit there is `system_edit` (or `volatile_system`), no longer `history_edit`. LiteLLM 1.112 sends a system prompt this way, with no `instructions`. A turn continuing a stored response (`previous_response_id`) is compared with those messages carried over from the turn it continues (#150).
+
 ## 0.12.3: 2026-11-22
 
 For anyone running Claude Code or LiteLLM's `agent_eval` through LiteLLM: Claude Code's requests through a LiteLLM proxy reach LiteLLM's `/v1/messages`, which the callback skipped; they are now recorded when LiteLLM sends them on to Claude in Anthropic's format, or to another model as a chat completion. Through the LiteLLM proxy server, each run of an `agent_eval` is now its own session with its task and target, so a new run is no longer read as a rewrite of the last one. And `experiments/litellm` measures Prefixwise and LiteLLM together.
