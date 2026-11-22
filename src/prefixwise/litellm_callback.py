@@ -14,13 +14,13 @@ Sessions: LiteLLM's own `litellm_session_id`, else `metadata={"session_id": ...,
 run is the session, the task the task, the target the agent; the eval's judge is recorded apart, as
 agent `agent_eval_judge` in session `<run>:judge`; read from the call's metadata, or through the
 LiteLLM proxy server from `spend_logs_metadata`: agent_eval's own tool loop labels its calls only
-through the gateway, its judge both ways), else the `user` field, else Anthropic's
-`metadata.user_id` (Claude Code's names its session). Completed chat completions and Anthropic
+through the gateway, its judge both ways), else the `user` field, else, on a Messages API call,
+Anthropic's `metadata.user_id` (Claude Code's names its session). Completed chat completions and Anthropic
 Messages API calls (`litellm.anthropic.messages`, the proxy server's /v1/messages, Claude Code's
 route; the proxy server turns its `x-claude-code-session-id` header into `litellm_session_id`) are
 recorded, streamed or not; other call types pass through unrecorded. Through the Messages API,
-Claude is classified by Anthropic's rules, and another model when LiteLLM sent it a chat completion
-(vLLM); not a provider's own Anthropic-compatible API (DeepSeek's, Kimi's: their cache rules are not
+Claude is classified by Anthropic's rules when LiteLLM sent it Anthropic's format (not on Bedrock
+Converse), and another model when LiteLLM sent it a chat completion (vLLM); not a provider's own Anthropic-compatible API (DeepSeek's, Kimi's: their cache rules are not
 Anthropic's) nor OpenAI's Responses API, LiteLLM's route for OpenAI models. Nothing is sent anywhere
 and LiteLLM's behaviour is unchanged. Answers from LiteLLM's own response cache reached no provider
 and are not recorded.
@@ -136,10 +136,12 @@ def _eval_agent(labels: dict) -> str | None:
 
 
 def _user_of(kwargs) -> str | None:
-    """The end user: OpenAI's `user`, else Anthropic's `metadata.user_id` (a Messages API call's;
-    Claude Code's names its session)."""
+    """The end user: OpenAI's `user`, else, on a Messages API call, Anthropic's `metadata.user_id`
+    (Claude Code's names its session)."""
     if kwargs.get("user"):
         return str(kwargs["user"])
+    if kwargs.get("call_type") not in _MESSAGES_CALLS:
+        return None
     meta = (kwargs.get("litellm_params") or {}).get("metadata") or {}
     user_id = meta.get("user_id") if isinstance(meta, dict) else None
     return user_id if isinstance(user_id, str) and user_id else None
@@ -231,6 +233,18 @@ def _is_anthropic_body(body) -> bool:
     return True
 
 
+def _sent_natively(model: str, provider: str, sent) -> bool:
+    """Did LiteLLM send a Messages API call on in Anthropic's format (the provider's own Messages
+    API), rather than translate it to a chat completion? LiteLLM's own answer; failing that, the body."""
+    try:
+        from litellm import LlmProviders
+        from litellm.utils import ProviderConfigManager
+        return ProviderConfigManager.get_provider_anthropic_messages_config(
+            model=model, provider=LlmProviders(provider)) is not None
+    except Exception:  # noqa: BLE001 - another LiteLLM version, or an unknown provider
+        return _anthropic_shaped(sent)
+
+
 def _anthropic_shaped(body) -> bool:
     """Only Anthropic's format would have this: a top-level system prompt or anthropic_version, or
     tool_use / tool_result / thinking blocks. A chat completion body has none of them."""
@@ -245,15 +259,6 @@ def _anthropic_shaped(body) -> bool:
                                              for b in content):
             return True
     return False
-
-
-def _messages_request(kwargs, model: str) -> dict:
-    """A Messages API call's request as the caller sent it (already Anthropic's format)."""
-    body = {"model": model, "messages": list(kwargs.get("messages") or [])}
-    for key in ("system", "tools", "tool_choice", "thinking"):
-        if kwargs.get(key) is not None:
-            body[key] = kwargs[key]
-    return body
 
 
 def _anthropic_from_openai(messages: list, tools, model: str) -> dict:
@@ -434,9 +439,24 @@ class PrefixwiseCallback(_Base):
             prompt, completion = _int(usage.get("prompt_tokens")), _int(usage.get("completion_tokens"))
             details = usage.get("prompt_tokens_details") or {}
             details = details if isinstance(details, dict) else _dump(details)
-            # A Messages API call's usage has Anthropic's fields whatever the model: only the model says Claude.
-            claude = provider == "anthropic" or "claude" in model.lower() \
-                or (not messages_api and "cache_creation_input_tokens" in usage)
+            if messages_api:
+                # Classified only from the body LiteLLM sent: the caller's request has no cache
+                # breakpoints LiteLLM injected, and on the chat-completion route its system prompt and
+                # markers are gone. Claude (by name, or by Anthropic's body on Bedrock or Vertex AI) is
+                # recorded when that body is Anthropic's format; Claude on Bedrock Converse is not.
+                # Another model is recorded when LiteLLM sent it a chat completion; not a provider's own
+                # Messages API (DeepSeek's, Kimi's), whose cache rules are not Anthropic's, nor OpenAI's
+                # Responses API, which has no messages to compare.
+                if not isinstance(sent, dict) or not isinstance(sent.get("messages"), list):
+                    return
+                claude = provider == "anthropic" or "claude" in model.lower() or "anthropic_version" in sent
+                native = _sent_natively(model, provider, sent)
+                if claude and not ("anthropic_version" in sent or (native and _is_anthropic_body(sent))):
+                    return
+                if not claude and native:
+                    return
+            else:
+                claude = provider == "anthropic" or "claude" in model.lower() or "cache_creation_input_tokens" in usage
             if kwargs.get("stream") and not self._stream_usage_reported(usage, model, messages, prompt, details,
                                                                        kwargs):
                 self._no_stream_usage()
@@ -444,10 +464,6 @@ class PrefixwiseCallback(_Base):
             if claude:
                 if _is_anthropic_body(sent):
                     body = sent
-                elif messages_api:  # sent in another format (Bedrock Converse): the caller's request
-                    if self._redacted(messages):
-                        return
-                    body = _messages_request(kwargs, model)
                 else:
                     if self._redacted(messages):
                         return
@@ -466,11 +482,6 @@ class PrefixwiseCallback(_Base):
                 self.recorder.record("anthropic", body, {"id": response.get("id"), "model": returned, "usage": shaped},
                                      **common)
             else:
-                if messages_api and not (sent and isinstance(sent.get("messages"), list) and not _anthropic_shaped(sent)):
-                    # Another model through the Messages API: recorded when LiteLLM sent it a chat
-                    # completion; not when it went in Anthropic's format (a provider's own Messages API,
-                    # whose cache rules are not Anthropic's) or through OpenAI's Responses API.
-                    return
                 if sent and isinstance(sent.get("messages"), list):
                     body = sent
                 else:

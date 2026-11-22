@@ -705,19 +705,25 @@ def test_a_messages_api_call_is_classified_with_the_body_logged_before_it():
     assert not c._stream_bodies  # let go once recorded
 
 
-def test_a_messages_api_call_sent_in_another_format_is_classified_as_the_caller_sent_it():
-    # Claude on Bedrock Converse: what LiteLLM sent is not Anthropic's format; the caller's request is.
+def test_claude_through_the_messages_api_is_recorded_only_from_anthropics_format():
     spy = _Spy()
     c = PrefixwiseCallback(recorder=spy)
+    usage = {"prompt_tokens": 10, "completion_tokens": 1, "cache_read_input_tokens": 0}
+    # Bedrock Converse: LiteLLM translated the call to a chat completion and then to Converse. Its
+    # system prompt and markers are in neither the caller's messages (kwargs) nor an Anthropic body.
     converse = {"messages": [{"role": "user", "content": [{"text": "hi"}]}], "system": [{"text": "s"}]}
-    tools = [{"name": "bash", "input_schema": {"type": "object"}}]
-    c._record(_messages_kw(sent=converse, model="bedrock/converse/anthropic.claude-haiku-5-5", tools=tools,
+    c._record(_messages_kw(sent=converse, model="converse/anthropic.claude-haiku-5-5", system=None,
+                           tools=[{"type": "function", "function": {"name": "bash"}}],
                            litellm_params={"custom_llm_provider": "bedrock", "metadata": {}}),
-              _response({"prompt_tokens": 10, "completion_tokens": 1}), None, None)
-    provider, body, _, _ = spy.calls[0]
-    assert provider == "anthropic"
-    assert body == {"model": "converse/anthropic.claude-haiku-5-5", "messages": [{"role": "user", "content": "hi"}],
-                    "system": [{"type": "text", "text": "s", "cache_control": {"type": "ephemeral"}}], "tools": tools}
+              _response(usage), None, None)
+    assert spy.calls == []
+    # Bedrock invoke under an inference-profile ARN: no "claude" in the name, but Anthropic's body.
+    invoke = {"anthropic_version": "bedrock-2023-05-31", "system": [{"type": "text", "text": "s"}],
+              "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}]}
+    arn = "arn:aws:bedrock:us-east-1:111122223333:application-inference-profile/abc"
+    c._record(_messages_kw(sent=invoke, model=arn, litellm_params={"custom_llm_provider": "bedrock", "metadata": {}}),
+              _response(usage), None, None)
+    assert [(p, b) for p, b, _, _ in spy.calls] == [("anthropic", {**invoke, "model": arn})]
 
 
 def test_another_model_through_the_messages_api_is_recorded_only_as_a_chat_completion():
@@ -729,15 +735,19 @@ def test_another_model_through_the_messages_api_is_recorded_only_as_a_chat_compl
     vllm = {"custom_llm_provider": "hosted_vllm", "metadata": {}, "litellm_session_id": "v1"}
     c._record(_messages_kw(sent=chat, model="qwen3", litellm_params=vllm), _response(usage, "qwen3"), None, None)
     assert [(p, b) for p, b, _, _ in spy.calls] == [("openai", chat)]
-    # The provider's own Messages API (DeepSeek's, Kimi's): Anthropic's format, not Anthropic's cache rules.
-    native = {"model": "deepseek-chat", "system": "s", "messages": [{"role": "user", "content": "hi"}]}
+    # The provider's own Messages API (DeepSeek's): Anthropic's format, not Anthropic's cache rules,
+    # with or without a system prompt (LiteLLM says which route it took).
     deepseek = {"custom_llm_provider": "deepseek", "metadata": {}, "litellm_session_id": "d1"}
-    c._record(_messages_kw(sent=native, model="deepseek-chat", litellm_params=deepseek),
-              _response(usage, "deepseek-chat"), None, None)
+    for native in ({"model": "deepseek-chat", "system": "s", "messages": [{"role": "user", "content": "hi"}]},
+                   {"model": "deepseek-chat", "max_tokens": 20, "messages": [{"role": "user", "content": "hi"}]}):
+        c._record(_messages_kw(sent=native, model="deepseek-chat", litellm_params=deepseek),
+                  _response(usage, "deepseek-chat"), None, None)
     # OpenAI's Responses API (LiteLLM's route for OpenAI models): no messages to compare.
     c._record(_messages_kw(sent={"model": "gpt-5.6", "input": [{"role": "user", "content": "hi"}]}, model="gpt-5.6",
                            litellm_params={"custom_llm_provider": "openai", "metadata": {}}),
               _response(usage, "gpt-5.6"), None, None)
+    # No body at all (its kept copy let go): nothing to classify faithfully.
+    c._record(_messages_kw(), _response(usage), None, None)
     assert len(spy.calls) == 1
 
 
@@ -745,10 +755,15 @@ def test_anthropics_metadata_user_id_is_the_session_when_nothing_else_names_one(
     spy = _Spy()
     c = PrefixwiseCallback(recorder=spy)
     user = "user_ab12_account_cd34_session_0f9e"  # Claude Code's: it names the session
-    c._record(_messages_kw(litellm_params={"custom_llm_provider": "anthropic", "metadata": {"user_id": user}}),
+    c._record(_messages_kw(sent={"model": "claude-haiku-5-5", "messages": [{"role": "user", "content": "hi"}]},
+                           litellm_params={"custom_llm_provider": "anthropic", "metadata": {"user_id": user}}),
               _response({"prompt_tokens": 10, "completion_tokens": 1}), None, None)
     _, _, _, kw = spy.calls[0]
     assert kw["session_id"] == user and kw["session_is_user"]
+    # A chat completion's metadata is LiteLLM's own: a user_id there is not taken as a session.
+    c._record(_kwargs(model="gpt-5.6", litellm_params={"custom_llm_provider": "openai", "metadata": {"user_id": "alice"}}),
+              _response({"prompt_tokens": 10, "completion_tokens": 1}, "gpt-5.6"), None, None)
+    assert spy.calls[1][3]["session_id"] is None
 
 
 def test_usage_in_anthropics_own_shape_is_read():
@@ -769,13 +784,15 @@ def test_a_failed_messages_api_call_lets_its_body_go():
     assert not c._stream_bodies and not c._key
 
 
-async def _messages(base, session, turns, stream=False):
+async def _messages(base, session, turns, stream=False, model="anthropic/claude-haiku-5-5"):
     system = [{"type": "text", "text": SYSTEM + "messages api", "cache_control": {"type": "ephemeral"}}]
     msgs = [{"role": "user", "content": "hi"}]
+    api_base = base if model.startswith("anthropic/") else base + "/v1"
     for i in range(turns):
-        r = await litellm.anthropic.messages.acreate(model="anthropic/claude-haiku-5-5", max_tokens=20, system=system,
-                                                     messages=msgs, api_base=base, api_key="sk-test", stream=stream,
-                                                     litellm_session_id=session)
+        r = await litellm.anthropic.messages.acreate(model=model, max_tokens=20, system=system, messages=msgs,
+                                                     api_base=api_base, api_key="sk-test", stream=stream,
+                                                     litellm_session_id=session,
+                                                     cache_control_injection_points=[{"location": "message", "index": -1}])
         if stream:
             async for _ in r:
                 pass
@@ -784,17 +801,45 @@ async def _messages(base, session, turns, stream=False):
     await asyncio.sleep(1)  # LiteLLM logs in a background task
 
 
-def test_litellms_messages_api_is_recorded(base, cb):
+@pytest.fixture
+def bodies(cb, monkeypatch):
+    """The bodies the callback hands the recorder."""
+    seen, record = [], cb.recorder.record
+
+    def keep(provider, body, response, **kw):
+        seen.append(body)
+        return record(provider, body, response, **kw)
+
+    monkeypatch.setattr(cb.recorder, "record", keep)
+    return seen
+
+
+def _marked_last(body):
+    content = body["messages"][-1]["content"]
+    return isinstance(content, list) and "cache_control" in content[-1]
+
+
+def test_litellms_messages_api_is_recorded(base, cb, bodies):
     asyncio.run(_messages(base, "msgs", 2))
     out = rows(cb, 2)
     assert [(r[0], r[1], r[4]) for r in out] == [("anthropic", "msgs", "first_write"), ("anthropic", "msgs", "none")]
+    assert all(_marked_last(b) for b in bodies)  # the body LiteLLM sent: with the breakpoint it injected
     assert _released(cb)
 
 
-def test_a_streamed_messages_api_call_is_recorded(base, cb):
+def test_another_model_through_litellms_messages_api_is_recorded_as_sent(base, cb, bodies):
+    asyncio.run(_messages(base, "msgs-chat", 2, model="hosted_vllm/qwen3"))
+    out = rows(cb, 2)
+    assert [(r[0], r[1], r[4]) for r in out] == [("openai", "msgs-chat", "first_write"), ("openai", "msgs-chat", "none")]
+    assert bodies[0]["messages"][0]["role"] == "system"  # the chat completion LiteLLM translated it to
+    assert _released(cb)
+
+
+def test_a_streamed_messages_api_call_is_recorded(base, cb, bodies):
     pytest.importorskip("backoff")  # LiteLLM's Messages API streams through its proxy package
     asyncio.run(_messages(base, "msgs-stream", 2, stream=True))
     out = rows(cb, 2)
     assert [(r[0], r[1], r[4]) for r in out] == [("anthropic", "msgs-stream", "first_write"),
                                                  ("anthropic", "msgs-stream", "none")]
+    assert all(_marked_last(b) for b in bodies)
     assert _released(cb)
