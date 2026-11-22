@@ -1,0 +1,10 @@
+# LiteLLM proxy server for the live tests (live_messages.py --route proxy, and Claude Code itself):
+# any model name is passed to its provider, with the provider keys from the environment.
+#   PREFIXWISE_LEDGER_PATH=$PWD/live-proxy.db litellm --config live_proxy.yaml --port 4000
+model_list:
+  - model_name: "claude-*"
+    litellm_params: {model: "anthropic/claude-*"}
+  - model_name: "gpt-*"
+    litellm_params: {model: "openai/gpt-*"}
+litellm_settings:
+  callbacks: prefixwise.litellm_callback.prefixwise_callback
