@@ -659,3 +659,16 @@ def test_a_session_the_caller_named_wins_over_the_evaluation_run():
     kw["litellm_params"]["litellm_session_id"] = "mine"
     c._record(kw, _resp(1800, 0), None, None)
     assert spy.calls[0][3]["session_id"] == "mine"
+
+
+def test_the_eval_judge_is_recorded_apart_from_the_agent():
+    """Review: agent_eval's judge (checks.py, agent_eval_stage "judge") carries the run's labels; its
+    call is not the target agent's turn and must not join the agent's conversation."""
+    spy = _Spy()
+    c = PrefixwiseCallback(recorder=spy)
+    kw = _eval_kw("metadata", "run-a")
+    kw["litellm_params"]["metadata"]["agent_eval_stage"] = "judge"
+    c._record(kw, _resp(1800, 0), None, None)
+    _, _, _, rec = spy.calls[0]
+    assert rec["session_id"] == "run-a:judge" and rec["agent_id"] == "agent_eval_judge"
+    assert rec["task_id"] == "task0"

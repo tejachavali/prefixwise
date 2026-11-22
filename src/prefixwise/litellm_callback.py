@@ -11,8 +11,10 @@ LiteLLM proxy server (config.yaml):
 
 Sessions: LiteLLM's own `litellm_session_id`, else `metadata={"session_id": ..., "task_id": ...,
 "agent_id": ...}`, else the run of a LiteLLM agent_eval (one attempt at one task by one target: the
-run is the session, the task the task, the target the agent; from the call's metadata, or through
-the LiteLLM proxy server from `spend_logs_metadata`), else the `user` field. Completed chat completions are recorded, streamed or not
+run is the session, the task the task, the target the agent; the eval's judge is recorded apart, as
+agent `agent_eval_judge` in session `<run>:judge`; read from the call's metadata, or through the
+LiteLLM proxy server from `spend_logs_metadata`: agent_eval's own tool loop labels its calls only
+through the gateway, its judge both ways), else the `user` field. Completed chat completions are recorded, streamed or not
 (other call types pass through unrecorded); nothing is sent anywhere and LiteLLM's behaviour is
 unchanged. Answers from LiteLLM's own response cache reached no provider and are not recorded.
 
@@ -106,11 +108,26 @@ def _eval_labels(kwargs) -> dict:
     return {}
 
 
+def _eval_session(labels: dict) -> str | None:
+    """The run is the session; its judge's calls (agent_eval_stage "judge", grading the attempt) are a
+    conversation of their own, never part of the agent's."""
+    run = labels.get("agent_eval_run")
+    if not run:
+        return None
+    return f"{run}:judge" if labels.get("agent_eval_stage") == "judge" else run
+
+
+def _eval_agent(labels: dict) -> str | None:
+    if labels.get("agent_eval_stage") == "judge":
+        return "agent_eval_judge"  # the grader, not the target: its tokens are not the agent's
+    return labels.get("agent_eval_target")
+
+
 def _session_of(kwargs) -> str | None:
     params = kwargs.get("litellm_params") or {}
     meta = params.get("metadata") or {}
     return (params.get("litellm_session_id") or meta.get("session_id")
-            or _eval_labels(kwargs).get("agent_eval_run") or kwargs.get("user"))
+            or _eval_session(_eval_labels(kwargs)) or kwargs.get("user"))
 
 
 def _conversation(model, messages, kwargs) -> tuple | None:
@@ -356,10 +373,10 @@ class PrefixwiseCallback(_Base):
                 pass
             labels = _eval_labels(kwargs)  # an agent_eval run: one attempt at one task, by one target
             session = (params.get("litellm_session_id") or meta.get("session_id")
-                       or labels.get("agent_eval_run"))  # (_session_of adds user)
+                       or _eval_session(labels))  # (_session_of adds user)
             common = dict(session_id=session or kwargs.get("user"), session_is_user=not session,
                           task_id=meta.get("task_id") or labels.get("agent_eval_task"),
-                          agent_id=meta.get("agent_id") or labels.get("agent_eval_target"), latency_ms=latency,
+                          agent_id=meta.get("agent_id") or _eval_agent(labels), latency_ms=latency,
                           ended_at=ended, genai_provider=provider_name(provider) if provider else None)
             returned = str(response.get("model") or model)
             prompt, completion = _int(usage.get("prompt_tokens")), _int(usage.get("completion_tokens"))
