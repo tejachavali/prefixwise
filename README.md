@@ -82,6 +82,7 @@ Every number is from a live run against real models, and each links to its recor
 | Tells an engine eviction from everything else | **5 of 5**, confirmed from KV events ([vLLM](experiments/e_evict/runs/2026-11-07-colab-l4.md), [SGLang](experiments/e_evict/runs/2026-11-07-colab-l4-sglang-events.md)); a prefix LMCache or HiCache restored counted as a hit **5 of 5**, through the proxy and inside vLLM ([record](experiments/e_evict/runs/2026-11-08-colab-l4-host-restored.md), [inside vLLM](experiments/e_evict/runs/2026-11-10-colab-l4-middleware-lmcache.md)) |
 | The tool-order fix saves what was predicted | **99.9%** on Claude, **97.5%** on vLLM, task success flat (one of 60 turns changed on Qwen3-4B) ([record](experiments/e4/runs/2026-11-06-live.md)) |
 | The cache-marker fix pays for itself | **106.8%** of predicted savings, prompt cost down **85.6%** with the write surcharge included, task success flat ([record](experiments/e4/runs/2026-11-09-auto-breakpoints-live.md)) |
+| Works through LiteLLM, Claude Code's `/v1/messages` route included | **20 of 20** live conversations right on the Anthropic API (16 with an injected change, each named; 4 with none, no false cause), through LiteLLM's SDK and its proxy server; **0** false alarms in 23,450 calls of real agent conversations replayed through LiteLLM ([live](experiments/litellm/runs/2026-11-22-live.md), [all LiteLLM tests](experiments/litellm/README.md)) |
 | Works with real agents | Claude Code, Codex, opencode, the Anthropic and OpenAI SDKs ([record](experiments/compat/2026-11-07.md), [opencode](experiments/compat/2026-11-09-opencode-run.md)) |
 | Costs almost nothing | **2 to 4 ms** per request at 2k tokens, 12 to 23 ms at 120k (streamed to unstreamed), about 100 requests/s per process on 4 CPUs; 33,358 requests in a soak, 0 errors ([record](benchmarks/runs/2026-11-14-vm.md)) |
 
@@ -97,7 +98,7 @@ Each takes about thirty seconds. All write the same ledger and print the same re
 | vLLM with LMCache | the same `--middleware` flag, or `prefixwise serve --upstream <url>` in front, which detects the engine ([docs/LMCACHE.md](docs/LMCACHE.md)) |
 | SGLang, with or without HiCache | `prefixwise serve --upstream <url>` in front; it detects the engine ([docs/SGLANG.md](docs/SGLANG.md)) |
 | Your own Python code | `client = prefixwise.wrap(Anthropic())` (or OpenAI) |
-| LiteLLM | `litellm.callbacks = [PrefixwiseCallback()]` |
+| LiteLLM (also Claude Code through a LiteLLM proxy) | `litellm.callbacks = [PrefixwiseCallback()]`, or `callbacks: prefixwise.litellm_callback.prefixwise_callback` in the proxy server's config |
 | Claude Code or Codex on a subscription | `prefixwise import claude-code` / `prefixwise import codex` |
 | A gateway's request log (JSON Lines) | `prefixwise import gateway --path requests.jsonl`: yesterday's traffic, the live proxy's verdicts, nothing changed in production |
 
