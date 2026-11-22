@@ -216,7 +216,15 @@ def _extract_responses_blocks(body: dict) -> list[tuple[str, object]]:
     items = body.get("input")
     if isinstance(items, str):
         items = [{"role": "user", "content": items}]
-    for item in items or []:
+    items = list(items or [])
+    # As on chat: the system and developer messages that open the conversation are the system prompt
+    # (LiteLLM sends a system prompt so, with no instructions). Not on a turn continuing a stored
+    # response, whose input starts mid-conversation.
+    if not body.get("previous_response_id"):
+        while items and isinstance(items[0], dict) and items[0].get("role") in _SYSTEM_ROLES \
+                and items[0].get("type", "message") == "message":
+            blocks.append(("system", items.pop(0).get("content")))
+    for item in items:
         role = "tool_results" if isinstance(item, dict) and _is_tool_result(item, "openai") else "messages"
         blocks.append((role, item))
     return blocks

@@ -19,11 +19,11 @@ Anthropic's `metadata.user_id` (Claude Code's names its session). Completed chat
 Messages API calls (`litellm.anthropic.messages`, the proxy server's /v1/messages, Claude Code's
 route; the proxy server turns its `x-claude-code-session-id` header into `litellm_session_id`) are
 recorded, streamed or not; other call types pass through unrecorded. Through the Messages API,
-Claude is classified by Anthropic's rules when LiteLLM sent it Anthropic's format (not when LiteLLM
-sends it as a chat completion, as to OpenRouter, or on to Bedrock Converse), and another model when
-LiteLLM sent it a chat completion (vLLM); not a provider's own Anthropic-compatible API (DeepSeek's or
-MiniMax's: their cache rules are not Anthropic's) nor OpenAI's Responses API, LiteLLM's route for
-OpenAI models. Nothing is sent anywhere
+each call is classified from the body LiteLLM sent: Claude by Anthropic's rules, in Anthropic's
+format, on Bedrock Converse (its cachePoints as breakpoints) or as a chat completion with its
+cache_control markers (OpenRouter); OpenAI's models as the Responses API calls LiteLLM makes of them;
+another model when LiteLLM sent it a chat completion (vLLM). Not a provider's own Anthropic-compatible
+API (DeepSeek's or MiniMax's): their cache rules are not Anthropic's. Nothing is sent anywhere
 and LiteLLM's behaviour is unchanged. Answers from LiteLLM's own response cache reached no provider
 and are not recorded.
 
@@ -54,6 +54,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import re
 import sys
 import threading
 import time
@@ -233,6 +234,132 @@ def _is_anthropic_body(body) -> bool:
         if isinstance(content, list) and any(not isinstance(b, dict) or "type" not in b for b in content):
             return False
     return True
+
+
+def _marked(block: dict, point: dict) -> dict:
+    """A Converse cachePoint as Anthropic's cache_control on the block before it."""
+    marker = {"type": "ephemeral"}
+    if isinstance(point, dict) and point.get("ttl"):
+        marker["ttl"] = point["ttl"]
+    return {**block, "cache_control": marker}
+
+
+def _converse_blocks(blocks, before: list | None = None) -> list:
+    """Bedrock Converse content blocks as Anthropic's; a cachePoint marks the block before it (in
+    `before`, the blocks already converted, when it opens the list)."""
+    out: list = []
+    for b in blocks if isinstance(blocks, list) else []:
+        if not isinstance(b, dict):
+            continue
+        if "cachePoint" in b:
+            if out:
+                out[-1] = _marked(out[-1], b["cachePoint"])
+            elif before:
+                before[-1] = _marked(before[-1], b["cachePoint"])
+        elif "reasoningContent" in b:
+            r = b["reasoningContent"] or {}
+            if "redactedContent" in r:
+                out.append({"type": "redacted_thinking", "data": r["redactedContent"]})
+            else:
+                t = r.get("reasoningText") or {}
+                block = {"type": "thinking", "thinking": t.get("text")}
+                if t.get("signature") is not None:
+                    block["signature"] = t["signature"]
+                out.append(block)
+        elif "text" in b and len(b) == 1:
+            out.append({"type": "text", "text": b["text"]})
+        elif "toolUse" in b:
+            u = b["toolUse"] or {}
+            out.append({"type": "tool_use", "id": u.get("toolUseId"), "name": u.get("name"), "input": u.get("input")})
+        elif "toolResult" in b:
+            r = b["toolResult"] or {}
+            block = {"type": "tool_result", "tool_use_id": r.get("toolUseId"),
+                     "content": [{"type": "text", "text": c["text"]} if isinstance(c, dict) and "text" in c and len(c) == 1
+                                 else c for c in r.get("content") or []]}
+            if r.get("status"):
+                block["is_error"] = r["status"] == "error"
+            out.append(block)
+        else:  # images, documents, guard content: kept as sent, each its own block
+            out.append({"type": next(iter(b)), **b})
+    return out
+
+
+def _anthropic_from_converse(sent: dict, model: str) -> dict:
+    """The body LiteLLM sent to Bedrock Converse, in Anthropic's format: the same blocks in the same
+    order, with each cachePoint as cache_control on the block before it, as Bedrock caches them."""
+    body: dict = {"model": model, "messages": []}
+    for m in sent.get("messages") or []:
+        if isinstance(m, dict):
+            previous = body["messages"][-1]["content"] if body["messages"] else None
+            body["messages"].append({"role": m.get("role"), "content": _converse_blocks(m.get("content"), previous)})
+    system = _converse_blocks(sent.get("system"))
+    if system:
+        body["system"] = system
+    tools: list = []
+    for t in (sent.get("toolConfig") or {}).get("tools") or []:
+        if not isinstance(t, dict):
+            continue
+        if "cachePoint" in t:
+            if tools:
+                tools[-1] = _marked(tools[-1], t["cachePoint"])
+        elif "toolSpec" in t:
+            spec = t["toolSpec"] or {}
+            tools.append({"name": spec.get("name"), "description": spec.get("description"),
+                          "input_schema": (spec.get("inputSchema") or {}).get("json")})
+        else:  # a system tool: kept as sent
+            tools.append({"type": next(iter(t)), **t})
+    if tools:
+        body["tools"] = tools
+    choice = (sent.get("toolConfig") or {}).get("toolChoice")
+    if choice:
+        body["tool_choice"] = choice
+    extra = sent.get("additionalModelRequestFields")  # Anthropic's own fields: thinking, betas
+    if isinstance(extra, dict):
+        for key, value in extra.items():
+            body.setdefault(key, value)
+    return body
+
+
+def _chat_shaped(body: dict) -> bool:
+    """A chat completion body: system, developer or tool messages, tool calls, or function tools.
+    Anthropic's format has none of them (its system prompt is a top-level field)."""
+    if "system" in body or "anthropic_version" in body:
+        return False
+    for m in body.get("messages") or []:
+        if isinstance(m, dict) and (m.get("role") in ("system", "developer", "tool") or "tool_calls" in m):
+            return True
+    return any(isinstance(t, dict) and (t.get("type") == "function" or "function" in t)
+               for t in body.get("tools") or [])
+
+
+def _converse_shaped(body: dict) -> bool:
+    return not _is_anthropic_body(body) or "toolConfig" in body or "inferenceConfig" in body
+
+
+def _claude_name(model: str) -> str:
+    """OpenRouter's model ids (anthropic/claude-sonnet-4.5) as Anthropic names them, so prices,
+    minimums and per-model rules apply."""
+    name = model.rsplit("/", 1)[-1]
+    return re.sub(r"(?<=\d)\.(?=\d)", "-", name) if "claude" in name.lower() else model
+
+
+def _marker_ttls(body) -> set:
+    """The lifetimes the body's cache_control markers ask for (5m when none is given)."""
+    found: set = set()
+    def walk(x, depth=0):
+        if depth > 32:
+            return
+        if isinstance(x, dict):
+            marker = x.get("cache_control")
+            if isinstance(marker, dict):
+                found.add(marker.get("ttl") or "5m")
+            for v in x.values():
+                walk(v, depth + 1)
+        elif isinstance(x, list):
+            for v in x:
+                walk(v, depth + 1)
+    walk(body)
+    return found
 
 
 def _sent_natively(model: str, provider: str, sent) -> bool:
@@ -441,22 +568,41 @@ class PrefixwiseCallback(_Base):
             prompt, completion = _int(usage.get("prompt_tokens")), _int(usage.get("completion_tokens"))
             details = usage.get("prompt_tokens_details") or {}
             details = details if isinstance(details, dict) else _dump(details)
+            responses = False
             if messages_api:
                 # Classified only from the body LiteLLM sent: the caller's request has no cache
                 # breakpoints LiteLLM injected, and on the chat-completion route its system prompt and
                 # markers are gone. Claude (by name, or by Anthropic's body on Bedrock or Vertex AI) is
-                # recorded when that body is Anthropic's format; not when LiteLLM sent it a chat
-                # completion (OpenRouter) or on to Bedrock Converse.
-                # Another model is recorded when LiteLLM sent it a chat completion; not a provider's own
-                # Messages API (DeepSeek's, MiniMax's), whose cache rules are not Anthropic's, nor OpenAI's
-                # Responses API, which has no messages to compare.
-                if not isinstance(sent, dict) or not isinstance(sent.get("messages"), list):
+                # judged by Anthropic's rules in whatever format LiteLLM sent it: Anthropic's, Bedrock
+                # Converse (translated back block for block, cachePoints as breakpoints), or a chat
+                # completion with its cache_control markers (OpenRouter). Another model is recorded when
+                # LiteLLM sent it a chat completion, or OpenAI's Responses API (OpenAI's models); not a
+                # provider's own Messages API (DeepSeek's, MiniMax's), whose cache rules are not Anthropic's.
+                if not isinstance(sent, dict):
                     return
                 claude = provider == "anthropic" or "claude" in model.lower() or "anthropic_version" in sent
-                native = _sent_natively(model, provider, sent)
-                if claude and not ("anthropic_version" in sent or (native and _is_anthropic_body(sent))):
-                    return
-                if not claude and native:
+                listed = isinstance(sent.get("messages"), list)
+                if claude:
+                    if not listed:
+                        return
+                    if _converse_shaped(sent):
+                        sent = _anthropic_from_converse(sent, model)
+                    elif _chat_shaped(sent):  # a chat completion with its cache_control markers (OpenRouter)
+                        chat = sent
+                        model, returned = _claude_name(model), _claude_name(returned)
+                        sent = _anthropic_from_openai(chat["messages"], chat.get("tools"), model)
+                        for key in ("tool_choice", "thinking", "reasoning", "response_format"):
+                            if chat.get(key) is not None:
+                                sent[key] = chat[key]
+                    # else Anthropic's own format, as sent
+                elif listed:
+                    # Recorded only as a chat completion: a Converse body (Nova, Llama: not Anthropic's
+                    # cache) or an Anthropic one (a provider's own Messages API) is not.
+                    if _converse_shaped(sent) or _anthropic_shaped(sent) or _sent_natively(model, provider, sent):
+                        return
+                elif isinstance(sent.get("input"), list):
+                    responses = True
+                else:
                     return
             else:
                 claude = provider == "anthropic" or "claude" in model.lower() or "cache_creation_input_tokens" in usage
@@ -465,7 +611,7 @@ class PrefixwiseCallback(_Base):
                 self._no_stream_usage()
                 return
             if claude:
-                if _is_anthropic_body(sent):
+                if messages_api or _is_anthropic_body(sent):
                     body = sent
                 else:
                     if self._redacted(messages):
@@ -479,11 +625,22 @@ class PrefixwiseCallback(_Base):
                           "cache_creation_input_tokens": write, "output_tokens": completion}
                 split = details.get("cache_creation_token_details")
                 split = split if isinstance(split, dict) else _dump(split)
+                if not split and write and _marker_ttls(body) == {"1h"}:  # no split given (OpenRouter)
+                    split = {"ephemeral_5m_input_tokens": 0, "ephemeral_1h_input_tokens": write}
                 if split:
                     shaped["cache_creation"] = {k: _int(split.get(k)) for k in
                                                 ("ephemeral_5m_input_tokens", "ephemeral_1h_input_tokens")}
                 self.recorder.record("anthropic", body, {"id": response.get("id"), "model": returned, "usage": shaped},
                                      **common)
+            elif responses:  # OpenAI's Responses API, as LiteLLM sent it
+                body = dict(sent)
+                body.setdefault("model", model)
+                shaped = {"input_tokens": prompt, "output_tokens": completion}
+                if details or usage.get("cached_tokens") is not None:
+                    shaped["input_tokens_details"] = {"cached_tokens": _int(details.get("cached_tokens")
+                                                                            or usage.get("cached_tokens"))}
+                self.recorder.record("openai", body, {"id": response.get("id"), "model": returned, "usage": shaped},
+                                     api="responses", **common)
             else:
                 if sent and isinstance(sent.get("messages"), list):
                     body = sent
