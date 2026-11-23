@@ -420,7 +420,8 @@ def _openai_from_anthropic(body: dict, model: str) -> dict:
             return [{"type": "text", "text": json.dumps(content, ensure_ascii=False)}]
         out = []
         for b in content:
-            if isinstance(b, dict) and b.get("type") == "text" and set(b) <= {"type", "text", "cache_control"}:
+            if (isinstance(b, dict) and b.get("type") == "text"
+                    and not {k: v for k, v in b.items() if k not in ("type", "text", "cache_control") and v is not None}):
                 out.append({"type": "text", "text": b.get("text", "")})
             elif (isinstance(b, dict) and b.get("type") == "image" and isinstance(b.get("source"), dict)
                   and b["source"].get("type") in ("base64", "url")):
@@ -455,11 +456,15 @@ def _openai_from_anthropic(body: dict, model: str) -> dict:
         rest = []
         for b in content:
             if isinstance(b, dict) and b.get("type") == "tool_result":
+                # Its content in the same one form as a message's (a string or text blocks alike); an error
+                # flag or any other field as a part of its own; the block's marker dropped, since it moves.
                 result = b.get("content")
-                text = result if isinstance(result, str) and not b.get("is_error") else \
-                    json.dumps(_plain_blocks({k: v for k, v in b.items() if k not in ("type", "tool_use_id")}),
-                               ensure_ascii=False)
-                out.append({"role": "tool", "tool_call_id": b.get("tool_use_id"), "content": text})
+                extra = {k: v for k, v in b.items()
+                         if k not in ("type", "tool_use_id", "content", "cache_control") and v not in (None, False)}
+                shown = parts(result if result is not None else "")
+                if extra:
+                    shown = [{"type": "text", "text": json.dumps(_plain_blocks(extra), ensure_ascii=False)}] + shown
+                out.append({"role": "tool", "tool_call_id": b.get("tool_use_id"), "content": shown})
             else:
                 rest.append(b)
         if rest or not content:

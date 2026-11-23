@@ -40,8 +40,8 @@ response also reported `output_tokens` 16 (all of them thinking tokens) and `ser
   tokens of request size.
 
 So DeepSeek's Messages API is an automatic prefix cache, judged from what it read. That it caches exactly as
-DeepSeek's chat completions do was then measured: see the longer probe below. Prefixwise now records these calls under those rules. It compares the body LiteLLM sent block for block as
-a chat completion, takes `cache_read_input_tokens` as the cached tokens, and claims no minimum. MiniMax's own API
+DeepSeek's chat completions do was then measured: see the longer probe below. Prefixwise now records these calls under those rules. It compares the body LiteLLM sent, converted to a chat
+completion, takes `cache_read_input_tokens` as the cached tokens, and claims no minimum. MiniMax's own API
 is still not recorded.
 
 ## Checked through LiteLLM
@@ -108,7 +108,7 @@ the last 100 to 200 tokens of the request being served, but two short conversati
 - One model (`deepseek-flash`); two conversations, of 3 and 10 turns.
 - Reads are the previous prompt rounded down to 128 tokens, which fits the 128 tokens Prefixwise allows for
   rounding, when a turn appends a few hundred tokens, as agent turns usually do. When a turn appends very little,
-  the read can stop a block or two shorter (the first probe). An unchanged turn is then still a hit by the
+  the read stopped one block shorter in the first probe. An unchanged turn is then still a hit by the
   half-read rule, but a change in that unread tail is named as the cause although it cost little.
 - The read unit, the minimum cacheable length and how long DeepSeek keeps a prefix are not measured, so a miss on
   an unchanged prefix is judged as on DeepSeek's chat completions: no minimum is claimed, and a short prompt that

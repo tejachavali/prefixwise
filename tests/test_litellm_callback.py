@@ -867,7 +867,8 @@ def test_deepseeks_own_messages_api_is_judged_as_the_automatic_cache_it_is():
                                         "function": {"name": "read", "arguments": '{"path": "calc.py"}'}}]
     assert json.loads(assistant["content"][0]["text"])["thinking"] == "look first"  # thinking kept, as its JSON
     assert assistant["content"][1] == {"type": "text", "text": "Reading it."}
-    assert body["messages"][3] == {"role": "tool", "tool_call_id": "t1", "content": "def add(a, b): return a - b"}
+    assert body["messages"][3] == {"role": "tool", "tool_call_id": "t1",
+                                   "content": [{"type": "text", "text": "def add(a, b): return a - b"}]}
     assert body["messages"][4] == {"role": "user", "content": [{"type": "text", "text": "Go on."}]}
     assert body["tools"][0]["function"]["parameters"] == _DS_TURN["tools"][0]["input_schema"]
     assert "cache_control" not in json.dumps(body)
@@ -935,6 +936,26 @@ def test_deepseek_text_as_a_string_or_as_blocks_is_one_prompt():
     with rec.ledger.reader() as cur:
         causes = [r[0] for r in cur.execute("SELECT cause FROM entries ORDER BY id")]
     assert causes == ["first_write", "none"]
+
+
+def test_deepseek_a_moving_marker_on_a_tool_result_is_not_a_change():
+    # Claude Code-style clients put the marker on the last block, often a tool result, and move it each
+    # turn; with list content (or an error) the block must not carry the marker into what is compared.
+    from prefixwise.litellm_callback import _openai_from_anthropic
+    def result(marked, form):
+        content = "r" if form == "str" else [{"type": "text", "text": "r"}]
+        b = {"type": "tool_result", "tool_use_id": "t1", "content": content}
+        if marked:
+            b["cache_control"] = {"type": "ephemeral"}
+        return {"model": "m", "messages": [
+            {"role": "user", "content": "go"},
+            {"role": "assistant", "content": [{"type": "tool_use", "id": "t1", "name": "read", "input": {}}]},
+            {"role": "user", "content": [b]}]}
+    forms = [_openai_from_anthropic(result(m, f), "m") for m in (True, False) for f in ("str", "list")]
+    assert all(x == forms[0] for x in forms)  # marked or not, string or text blocks: one prompt
+    cited = {"model": "m", "messages": [{"role": "user", "content": [{"type": "text", "text": "hi", "citations": None}]}]}
+    assert _openai_from_anthropic(cited, "m") == _openai_from_anthropic(
+        {"model": "m", "messages": [{"role": "user", "content": "hi"}]}, "m")
 
 
 def test_deepseek_conversion_keeps_what_would_change_the_prompt():
