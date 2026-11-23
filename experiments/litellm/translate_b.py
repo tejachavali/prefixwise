@@ -27,6 +27,7 @@ TARGETS = {  # name: (model, message-list key in the body)
 }
 
 captured = []
+last_error = [None]  # why LiteLLM built no body for the last translate(), when it did not
 class Cap(CustomLogger):
     def log_pre_api_call(self, model, messages, kwargs):
         captured.append((kwargs.get("additional_args") or {}).get("complete_input_dict"))
@@ -98,10 +99,11 @@ def translate(target, messages, tools):
     if target in ("openai", "anthropic", "gemini"):
         kw["api_key"] = "k"
     captured.clear()
+    last_error[0] = None
     try:
         litellm.completion(**kw)
-    except Exception:
-        pass
+    except Exception as exc:
+        last_error[0] = f"{type(exc).__name__}: {str(exc)[:300]}"
     body = captured[-1] if captured else None
     if isinstance(body, str):
         body = json.loads(body)
@@ -117,6 +119,10 @@ def check(name, msgs, tools, results):
             body = translate(target, msgs[:i], tools)
             if body is None:
                 r["untranslated"] += 1
+                errors = r.setdefault("errors", {})
+                key = (last_error[0] or "no body captured")[:200]
+                if key in errors or len(errors) < 5:
+                    errors[key] = errors.get(key, 0) + 1
                 prev = None
                 continue
             if prev is not None:
