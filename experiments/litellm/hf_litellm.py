@@ -105,7 +105,7 @@ def to_openai(conv, rng, e5):
         out, k = cid, 1
         while out in used:
             k += 1
-            out = f"{cid}~{k}"
+            out = f"{cid}-{k}"  # [A-Za-z0-9_-], the ids Anthropic accepts
         used.add(out)
         return out
 
@@ -431,26 +431,34 @@ def selftest():
     }
     failed = 0
     for name, conv in cases.items():
-        msgs, tools = to_openai(e5_scale.Conv(conv), random.Random(1), e5_scale)
-        bad = pairing_problems(msgs)
-        for i in steps_of(msgs, 99):
-            _, out, _ = anthropic_request(msgs[:i], tools)
-            for j, m in enumerate(out):
-                ids = {b["id"] for b in m["content"] if isinstance(b, dict) and b.get("type") == "tool_use"} \
-                    if m["role"] == "assistant" and isinstance(m["content"], list) else set()
-                nxt = out[j + 1]["content"] if j + 1 < len(out) and isinstance(out[j + 1]["content"], list) else []
-                if ids - {b.get("tool_use_id") for b in nxt if isinstance(b, dict)}:
-                    bad.append(f"step {i}: Anthropic messages[{j}] tool_use not answered next")
-            all_ids = [b["id"] for m in out if isinstance(m["content"], list) for b in m["content"]
-                       if isinstance(b, dict) and b.get("type") == "tool_use"]
-            if len(all_ids) != len(set(all_ids)):
-                bad.append(f"step {i}: Anthropic tool_use ids repeated")
-            if not out or out[0]["role"] != "user":
-                bad.append(f"step {i}: Anthropic messages do not start with a user message")
+        try:
+            bad = _selftest_case(conv, e5_scale)
+        except Exception as exc:  # noqa: BLE001 - a crash is a failed case, and the next cases still run
+            bad = [f"{type(exc).__name__}: {exc}"]
         failed += bool(bad)
         print(f"{'ok' if not bad else 'FAIL':4s} {name}" + (f": {bad}" if bad else ""))
     print(f"self-test: {'PASSED' if not failed else 'FAILED'} ({len(cases)} cases)")
     sys.exit(1 if failed else 0)
+
+
+def _selftest_case(conv, e5_scale):
+    msgs, tools = to_openai(e5_scale.Conv(conv), random.Random(1), e5_scale)
+    bad = pairing_problems(msgs)
+    for i in steps_of(msgs, 99):
+        _, out, _ = anthropic_request(msgs[:i], tools)
+        for j, m in enumerate(out):
+            ids = {b["id"] for b in m["content"] if isinstance(b, dict) and b.get("type") == "tool_use"} \
+                if m["role"] == "assistant" and isinstance(m["content"], list) else set()
+            nxt = out[j + 1]["content"] if j + 1 < len(out) and isinstance(out[j + 1]["content"], list) else []
+            if ids - {b.get("tool_use_id") for b in nxt if isinstance(b, dict)}:
+                bad.append(f"step {i}: Anthropic messages[{j}] tool_use not answered next")
+        all_ids = [b["id"] for m in out if isinstance(m["content"], list) for b in m["content"]
+                   if isinstance(b, dict) and b.get("type") == "tool_use"]
+        if len(all_ids) != len(set(all_ids)):
+            bad.append(f"step {i}: Anthropic tool_use ids repeated")
+        if not out or out[0]["role"] != "user":
+            bad.append(f"step {i}: Anthropic messages do not start with a user message")
+    return bad
 
 
 def main():

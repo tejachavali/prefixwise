@@ -103,8 +103,9 @@ python hf_litellm.py replay r.json --dataset nvidia/Open-SWE-Traces --split clau
 python hf_litellm.py selftest                  # the converter gives conversations a live API accepts
 ```
 
-H and I ran with the converter as it was before the live-API fixes (at `ff825e0a`); run now, they merge split
-assistant entries and rename repeated ids, so their counts differ.
+H ran at `6dc10037`, before the null-key drop and the live-API fixes; I ran at `ff825e0a`, before the live-API
+fixes. Run now, they merge split assistant entries and rename repeated ids (and H's OpenHands conversations
+translate for Gemini), so their counts differ.
 
 Records:
 - A, every case: `runs/2026-11-22-matrix-1.112.0.dev2.txt` and `runs/2026-11-22-matrix-1.108.3.txt`.
