@@ -1,0 +1,19 @@
+{
+ "test": "replay",
+ "live": false,
+ "models": [
+  "anthropic/claude-haiku-4-5",
+  "openai/gpt-4.1-mini"
+ ],
+ "calls_sent": 0,
+ "dataset": "nebius/SWE-agent-trajectories",
+ "split": null,
+ "config": null,
+ "litellm": "1.110.2",
+ "prefixwise": "0.12.4",
+ "seed": 11,
+ "conversations": 0,
+ "seconds": 5,
+ "summary": {},
+ "problems": []
+}

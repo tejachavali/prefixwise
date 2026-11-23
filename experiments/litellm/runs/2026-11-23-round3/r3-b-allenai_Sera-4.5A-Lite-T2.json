@@ -1,0 +1,42 @@
+{
+ "test": "translate",
+ "dataset": "allenai/Sera-4.5A-Lite-T2",
+ "split": null,
+ "config": null,
+ "litellm": "1.110.2",
+ "conversations": 30,
+ "seconds": 54,
+ "tools_with_nulls_dropped": 0,
+ "results": {
+  "openai": {
+   "pairs": 450,
+   "ok": 450,
+   "untranslated": 0,
+   "examples": []
+  },
+  "anthropic": {
+   "pairs": 450,
+   "ok": 450,
+   "untranslated": 0,
+   "examples": []
+  },
+  "bedrock-converse": {
+   "pairs": 450,
+   "ok": 450,
+   "untranslated": 0,
+   "examples": []
+  },
+  "bedrock-invoke": {
+   "pairs": 450,
+   "ok": 450,
+   "untranslated": 0,
+   "examples": []
+  },
+  "gemini": {
+   "pairs": 450,
+   "ok": 450,
+   "untranslated": 0,
+   "examples": []
+  }
+ }
+}

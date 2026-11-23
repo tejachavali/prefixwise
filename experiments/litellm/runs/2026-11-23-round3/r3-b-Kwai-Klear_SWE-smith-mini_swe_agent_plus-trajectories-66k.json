@@ -1,0 +1,42 @@
+{
+ "test": "translate",
+ "dataset": "Kwai-Klear/SWE-smith-mini_swe_agent_plus-trajectories-66k",
+ "split": null,
+ "config": null,
+ "litellm": "1.110.2",
+ "conversations": 30,
+ "seconds": 52,
+ "tools_with_nulls_dropped": 0,
+ "results": {
+  "openai": {
+   "pairs": 437,
+   "ok": 437,
+   "untranslated": 0,
+   "examples": []
+  },
+  "anthropic": {
+   "pairs": 437,
+   "ok": 437,
+   "untranslated": 0,
+   "examples": []
+  },
+  "bedrock-converse": {
+   "pairs": 437,
+   "ok": 437,
+   "untranslated": 0,
+   "examples": []
+  },
+  "bedrock-invoke": {
+   "pairs": 437,
+   "ok": 437,
+   "untranslated": 0,
+   "examples": []
+  },
+  "gemini": {
+   "pairs": 437,
+   "ok": 437,
+   "untranslated": 0,
+   "examples": []
+  }
+ }
+}

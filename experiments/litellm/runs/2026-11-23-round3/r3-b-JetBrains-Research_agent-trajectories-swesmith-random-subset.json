@@ -1,0 +1,42 @@
+{
+ "test": "translate",
+ "dataset": "JetBrains-Research/agent-trajectories-swesmith-random-subset",
+ "split": null,
+ "config": null,
+ "litellm": "1.110.2",
+ "conversations": 30,
+ "seconds": 34,
+ "tools_with_nulls_dropped": 0,
+ "results": {
+  "openai": {
+   "pairs": 257,
+   "ok": 257,
+   "untranslated": 0,
+   "examples": []
+  },
+  "anthropic": {
+   "pairs": 257,
+   "ok": 257,
+   "untranslated": 0,
+   "examples": []
+  },
+  "bedrock-converse": {
+   "pairs": 257,
+   "ok": 257,
+   "untranslated": 0,
+   "examples": []
+  },
+  "bedrock-invoke": {
+   "pairs": 257,
+   "ok": 257,
+   "untranslated": 0,
+   "examples": []
+  },
+  "gemini": {
+   "pairs": 257,
+   "ok": 257,
+   "untranslated": 0,
+   "examples": []
+  }
+ }
+}
