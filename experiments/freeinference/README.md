@@ -234,3 +234,12 @@ schemas, the reader, the shared blocks), under pyarrow 26.0.1, pandas 3.0.5, num
    the gap use it. Gateway queueing is not visible.
 10. **Synthetic only.** The Hub returns 403 from this machine, so every number above comes from synthetic rows that
     follow the schema. None of it comes from the trace itself.
+
+## Results
+
+Two weeks (2026-07-19 and 2026-08-30; 269,348 requests): [`runs/2026-11-23-two-weeks.md`](runs/2026-11-23-two-weeks.md).
+Against the authors' text-based labels, all 252,549 appends were read as unchanged, 9,840 of 9,844 mutations as
+changed (and 1 as truncated; the other 3 changed only in the unhashed last 15 tokens), all 3,981 switches matched, and
+the divergence region fit the authors' cause, or sat on a block spanning two regions, for all but 54 of the 9,841
+detected mutations.
+
