@@ -1,0 +1,1754 @@
+{
+  "weeks": [
+    "2026-07-19_2026-07-25"
+  ],
+  "rules": "Rules, first match wins (Prefixwise order, ALGORITHM.md 2.1-2.4):\n 1 first_write    step 0 of a session (each subagent session is its own conversation)\n 2 unknown        step - 1 is missing from the table (no previous turn to compare)\n 3 switch         model or provider letter differs from step - 1\n 4 unknown        sent > 1 s before step - 1 ended, and read < half of R (ALGORITHM 2.4: could not read its write)\n 5 unknown        prompt_tokens missing\n 6 hit            read >= R - min(128, R/8)   (served all, ALGORITHM 1; R = min(prompt_prev, prompt_curr))\n 7 hit            prefix intact and read >= R/2   (the half-read rule, ALGORITHM 1 / 2.3)\n 8 below_min      R < 1024 and nothing read (or no count)\n 9 prompt_changed the block ids diverge before the end of the previous input (or the input is a strict prefix of it)\n10 unknown        cache_read_tokens is null: the provider reports no cache count (ALGORITHM 2.3)\n11 not_read       prefix intact, read < R/2; bucketed by the idle gap: <5m, 5-60m, >60m\n",
+  "diagnostics": {
+    "requests": 78804,
+    "sessions": 927,
+    "subagent_sessions": 141,
+    "requests_missing_previous_step": 0,
+    "requests_with_null_cache_read": 6042,
+    "requests_with_zero_cache_read": 357,
+    "requests_with_null_prompt": 0,
+    "requests_read_over_prompt": 0,
+    "blocks_not_floor_of_role_tokens_over_16": 0,
+    "token_ratio_provider_over_o200k_quartiles": [
+      0.9377,
+      1.0133,
+      1.083
+    ],
+    "first_write_reading_at_least_half": 353,
+    "prompt_changed_with_R_under_1024_region_loss": 138,
+    "prompt_changed_nothing_read_gap_over_5m": 35
+  },
+  "overall": {
+    "total_requests": 78804,
+    "total_prompt_tokens": 12657033645,
+    "verdicts": {
+      "first_write": {
+        "requests": 927,
+        "share_of_requests": 0.011763362265874829,
+        "prompt_tokens": 57436697,
+        "read_tokens": 26128517,
+        "lost_tokens": 0,
+        "invalidated_tokens": 0,
+        "lost_share_of_prompt_tokens": 0.0,
+        "lost_plus_invalidated_share_of_prompt_tokens": 0.0,
+        "requests_with_unmeasured_loss": 0
+      },
+      "switch": {
+        "requests": 275,
+        "share_of_requests": 0.0034896705750977106,
+        "prompt_tokens": 38322085,
+        "read_tokens": 18938502,
+        "lost_tokens": 0,
+        "invalidated_tokens": 0,
+        "lost_share_of_prompt_tokens": 0.0,
+        "lost_plus_invalidated_share_of_prompt_tokens": 0.0,
+        "requests_with_unmeasured_loss": 0
+      },
+      "hit": {
+        "requests": 68759,
+        "share_of_requests": 0.8725318511750673,
+        "prompt_tokens": 11391451412,
+        "read_tokens": 11305327692,
+        "lost_tokens": 11721064,
+        "invalidated_tokens": 7657,
+        "lost_share_of_prompt_tokens": 0.0009260514215848874,
+        "lost_plus_invalidated_share_of_prompt_tokens": 0.0009266563816580579,
+        "requests_with_unmeasured_loss": 0
+      },
+      "below_min": {
+        "requests": 10,
+        "share_of_requests": 0.00012689711182173492,
+        "prompt_tokens": 159910,
+        "read_tokens": 0,
+        "lost_tokens": 0,
+        "invalidated_tokens": 0,
+        "lost_share_of_prompt_tokens": 0.0,
+        "lost_plus_invalidated_share_of_prompt_tokens": 0.0,
+        "requests_with_unmeasured_loss": 10
+      },
+      "prompt_changed": {
+        "requests": 2991,
+        "share_of_requests": 0.03795492614588092,
+        "prompt_tokens": 295124437,
+        "read_tokens": 128606416,
+        "lost_tokens": 10670852,
+        "invalidated_tokens": 127130153,
+        "lost_share_of_prompt_tokens": 0.0008430768455937054,
+        "lost_plus_invalidated_share_of_prompt_tokens": 0.010887306525762181,
+        "requests_with_unmeasured_loss": 514
+      },
+      "not_read": {
+        "requests": 651,
+        "share_of_requests": 0.008261001979594944,
+        "prompt_tokens": 120578417,
+        "read_tokens": 2387520,
+        "lost_tokens": 117430614,
+        "invalidated_tokens": 0,
+        "lost_share_of_prompt_tokens": 0.009277893801474524,
+        "lost_plus_invalidated_share_of_prompt_tokens": 0.009277893801474524,
+        "requests_with_unmeasured_loss": 0
+      },
+      "unknown": {
+        "requests": 5191,
+        "share_of_requests": 0.0658722907466626,
+        "prompt_tokens": 753960687,
+        "read_tokens": 0,
+        "lost_tokens": 0,
+        "invalidated_tokens": 0,
+        "lost_share_of_prompt_tokens": 0.0,
+        "lost_plus_invalidated_share_of_prompt_tokens": 0.0,
+        "requests_with_unmeasured_loss": 5191
+      }
+    }
+  },
+  "details": {
+    "hit": {
+      "served_all": {
+        "requests": 60356,
+        "lost_tokens": 1695426,
+        "invalidated_tokens": 7657
+      },
+      "half_read": {
+        "requests": 8403,
+        "lost_tokens": 10025638,
+        "invalidated_tokens": 0
+      }
+    },
+    "prompt_changed": {
+      "conversation": {
+        "requests": 1896,
+        "lost_tokens": 6389965,
+        "invalidated_tokens": 18586478
+      },
+      "system~conversation": {
+        "requests": 601,
+        "lost_tokens": 2998538,
+        "invalidated_tokens": 52572055
+      },
+      "system": {
+        "requests": 247,
+        "lost_tokens": 912662,
+        "invalidated_tokens": 21479996
+      },
+      "tool_definitions": {
+        "requests": 212,
+        "lost_tokens": 336266,
+        "invalidated_tokens": 30801798
+      },
+      "tool_definitions~system": {
+        "requests": 35,
+        "lost_tokens": 33421,
+        "invalidated_tokens": 3689826
+      }
+    },
+    "not_read": {
+      "partial_read <5m": {
+        "requests": 274,
+        "lost_tokens": 57494332,
+        "invalidated_tokens": 0
+      },
+      "partial_read 5-60m": {
+        "requests": 176,
+        "lost_tokens": 30719381,
+        "invalidated_tokens": 0
+      },
+      "nothing_read <5m": {
+        "requests": 76,
+        "lost_tokens": 7739124,
+        "invalidated_tokens": 0
+      },
+      "partial_read >60m": {
+        "requests": 63,
+        "lost_tokens": 14699029,
+        "invalidated_tokens": 0
+      },
+      "nothing_read 5-60m": {
+        "requests": 51,
+        "lost_tokens": 5516846,
+        "invalidated_tokens": 0
+      },
+      "nothing_read >60m": {
+        "requests": 11,
+        "lost_tokens": 1261902,
+        "invalidated_tokens": 0
+      }
+    },
+    "unknown": {
+      "no_cache_count": {
+        "requests": 5191,
+        "lost_tokens": 0,
+        "invalidated_tokens": 0
+      }
+    }
+  },
+  "prefixwise_cause": {
+    "none": 68759,
+    "unknown": 5191,
+    "history_edit|tool_result_mutation": 1874,
+    "first_write": 927,
+    "boundary (region ambiguous)": 636,
+    "model_switch": 275,
+    "unknown (partial read within 5m)": 274,
+    "volatile_system|system_edit": 247,
+    "ttl_expired (5-min TTL) | routing_miss": 227,
+    "tool_reserialize|tool_catalog_change": 212,
+    "routing_miss (inferred)": 76,
+    "ttl_expired": 74,
+    "compaction_rewrite": 22,
+    "below_min_prefix": 10
+  },
+  "prompt_changed_region_by_gap_nothing_read": {
+    "conversation": {
+      "5-60m": 8,
+      "<5m": 6,
+      ">60m": 9
+    },
+    "system": {
+      ">60m": 6
+    },
+    "system~conversation": {
+      "5-60m": 1,
+      "<5m": 1,
+      ">60m": 1
+    },
+    "tool_definitions": {
+      "5-60m": 5,
+      "<5m": 62,
+      ">60m": 5
+    }
+  },
+  "lost_by_legitimacy": {
+    "avoidable": 24656544,
+    "legitimate": 16280830,
+    "n/a": 11728721,
+    "undetermined": 214294245
+  },
+  "top_loss_causes": [
+    {
+      "verdict": "not_read",
+      "detail": "partial_read <5m",
+      "prefixwise_cause": "unknown (partial read within 5m)",
+      "legitimacy": "undetermined",
+      "authors_label": "append/-",
+      "requests": 274,
+      "lost_tokens": 57494332,
+      "share_of_lost": 0.21536656718372474,
+      "share_of_prompt_tokens": 0.00454248077492568
+    },
+    {
+      "verdict": "prompt_changed",
+      "detail": "system~conversation",
+      "prefixwise_cause": "boundary (region ambiguous)",
+      "legitimacy": "undetermined",
+      "authors_label": "mutation/system_prompt",
+      "requests": 482,
+      "lost_tokens": 50000609,
+      "share_of_lost": 0.1872960193263164,
+      "share_of_prompt_tokens": 0.00395042080177705
+    },
+    {
+      "verdict": "prompt_changed",
+      "detail": "tool_definitions",
+      "prefixwise_cause": "tool_reserialize|tool_catalog_change",
+      "legitimacy": "undetermined",
+      "authors_label": "mutation/tool_definitions",
+      "requests": 212,
+      "lost_tokens": 31138064,
+      "share_of_lost": 0.11663928806803288,
+      "share_of_prompt_tokens": 0.002460139150558448
+    },
+    {
+      "verdict": "not_read",
+      "detail": "partial_read 5-60m",
+      "prefixwise_cause": "ttl_expired (5-min TTL) | routing_miss",
+      "legitimacy": "undetermined",
+      "authors_label": "append/-",
+      "requests": 176,
+      "lost_tokens": 30719381,
+      "share_of_lost": 0.11507095398515,
+      "share_of_prompt_tokens": 0.002427060072810607
+    },
+    {
+      "verdict": "prompt_changed",
+      "detail": "system",
+      "prefixwise_cause": "volatile_system|system_edit",
+      "legitimacy": "undetermined",
+      "authors_label": "mutation/system_prompt",
+      "requests": 225,
+      "lost_tokens": 20491882,
+      "share_of_lost": 0.0767600236050044,
+      "share_of_prompt_tokens": 0.0016190114188481325
+    },
+    {
+      "verdict": "not_read",
+      "detail": "partial_read >60m",
+      "prefixwise_cause": "ttl_expired",
+      "legitimacy": "legitimate",
+      "authors_label": "append/-",
+      "requests": 63,
+      "lost_tokens": 14699029,
+      "share_of_lost": 0.055060721753650746,
+      "share_of_prompt_tokens": 0.0011613328535163264
+    },
+    {
+      "verdict": "prompt_changed",
+      "detail": "conversation",
+      "prefixwise_cause": "history_edit|tool_result_mutation",
+      "legitimacy": "avoidable",
+      "authors_label": "mutation/other",
+      "requests": 1487,
+      "lost_tokens": 11181090,
+      "share_of_lost": 0.04188296284009827,
+      "share_of_prompt_tokens": 0.0008833894507673169
+    },
+    {
+      "verdict": "hit",
+      "detail": "half_read",
+      "prefixwise_cause": "none",
+      "legitimacy": "n/a",
+      "authors_label": "append/-",
+      "requests": 8403,
+      "lost_tokens": 10025638,
+      "share_of_lost": 0.0375547843548596,
+      "share_of_prompt_tokens": 0.0007921001303461417
+    },
+    {
+      "verdict": "not_read",
+      "detail": "nothing_read <5m",
+      "prefixwise_cause": "routing_miss (inferred)",
+      "legitimacy": "undetermined",
+      "authors_label": "append/-",
+      "requests": 76,
+      "lost_tokens": 7739124,
+      "share_of_lost": 0.02898978926982188,
+      "share_of_prompt_tokens": 0.000611448481300138
+    },
+    {
+      "verdict": "prompt_changed",
+      "detail": "conversation",
+      "prefixwise_cause": "history_edit|tool_result_mutation",
+      "legitimacy": "avoidable",
+      "authors_label": "mutation/injection",
+      "requests": 249,
+      "lost_tokens": 6524281,
+      "share_of_lost": 0.024439139536606824,
+      "share_of_prompt_tokens": 0.000515466829194796
+    },
+    {
+      "verdict": "not_read",
+      "detail": "nothing_read 5-60m",
+      "prefixwise_cause": "ttl_expired (5-min TTL) | routing_miss",
+      "legitimacy": "undetermined",
+      "authors_label": "append/-",
+      "requests": 51,
+      "lost_tokens": 5516846,
+      "share_of_lost": 0.02066541419598132,
+      "share_of_prompt_tokens": 0.0004358719550515977
+    },
+    {
+      "verdict": "prompt_changed",
+      "detail": "system~conversation",
+      "prefixwise_cause": "boundary (region ambiguous)",
+      "legitimacy": "undetermined",
+      "authors_label": "mutation/injection",
+      "requests": 48,
+      "lost_tokens": 4083631,
+      "share_of_lost": 0.01529677029928865,
+      "share_of_prompt_tokens": 0.0003226372872614735
+    },
+    {
+      "verdict": "prompt_changed",
+      "detail": "tool_definitions~system",
+      "prefixwise_cause": "boundary (region ambiguous)",
+      "legitimacy": "undetermined",
+      "authors_label": "mutation/tool_definitions",
+      "requests": 35,
+      "lost_tokens": 3723247,
+      "share_of_lost": 0.013946816969142307,
+      "share_of_prompt_tokens": 0.00029416426505833154
+    },
+    {
+      "verdict": "prompt_changed",
+      "detail": "conversation",
+      "prefixwise_cause": "history_edit|tool_result_mutation",
+      "legitimacy": "avoidable",
+      "authors_label": "mutation/dropped_turns",
+      "requests": 53,
+      "lost_tokens": 3694649,
+      "share_of_lost": 0.01383969244270516,
+      "share_of_prompt_tokens": 0.000291904809896711
+    },
+    {
+      "verdict": "prompt_changed",
+      "detail": "conversation",
+      "prefixwise_cause": "history_edit|tool_result_mutation",
+      "legitimacy": "avoidable",
+      "authors_label": "mutation/tool_result",
+      "requests": 81,
+      "lost_tokens": 1922684,
+      "share_of_lost": 0.007202133470462317,
+      "share_of_prompt_tokens": 0.00015190636715732615
+    }
+  ],
+  "validation": {
+    "note": "prefix: intact = every full block of step - 1 starts this input; truncated = this input is a strict prefix of step - 1's; diverged = otherwise.",
+    "transition_by_prefix": {
+      "append": {
+        "intact": 74465
+      },
+      "mutation": {
+        "diverged": 3136,
+        "intact": 1
+      },
+      "switch": {
+        "diverged": 96,
+        "intact": 179
+      }
+    },
+    "transition_by_verdict": {
+      "append": {
+        "below_min": 10,
+        "hit": 68613,
+        "not_read": 651,
+        "unknown": 5191
+      },
+      "mutation": {
+        "hit": 146,
+        "prompt_changed": 2991
+      },
+      "switch": {
+        "switch": 275
+      }
+    },
+    "cause_by_prefix": {
+      "compaction": {
+        "diverged": 37
+      },
+      "dropped_turns": {
+        "diverged": 93,
+        "intact": 1
+      },
+      "injection": {
+        "diverged": 339
+      },
+      "other": {
+        "diverged": 1592
+      },
+      "system_prompt": {
+        "diverged": 720
+      },
+      "tool_definitions": {
+        "diverged": 273
+      },
+      "tool_result": {
+        "diverged": 82
+      }
+    },
+    "cause_by_region": {
+      "compaction": {
+        "conversation": 22,
+        "system": 6,
+        "system~conversation": 9
+      },
+      "dropped_turns": {
+        "conversation": 53,
+        "system~conversation": 40
+      },
+      "injection": {
+        "conversation": 288,
+        "system~conversation": 51
+      },
+      "other": {
+        "conversation": 1569,
+        "system~conversation": 23
+      },
+      "system_prompt": {
+        "conversation": 4,
+        "system": 233,
+        "system~conversation": 483
+      },
+      "tool_definitions": {
+        "system": 22,
+        "tool_definitions": 216,
+        "tool_definitions~system": 35
+      },
+      "tool_result": {
+        "conversation": 82
+      }
+    },
+    "cause_by_region_curr_layout": {
+      "compaction": {
+        "conversation": 22,
+        "system": 6,
+        "system~conversation": 9
+      },
+      "dropped_turns": {
+        "conversation": 53,
+        "system~conversation": 40
+      },
+      "injection": {
+        "conversation": 288,
+        "system~conversation": 51
+      },
+      "other": {
+        "conversation": 1569,
+        "system~conversation": 23
+      },
+      "system_prompt": {
+        "conversation": 6,
+        "system": 624,
+        "system~conversation": 90
+      },
+      "tool_definitions": {
+        "system": 85,
+        "tool_definitions": 185,
+        "tool_definitions~system": 3
+      },
+      "tool_result": {
+        "conversation": 82
+      }
+    },
+    "cause_region_fit": {
+      "compaction": {
+        "agrees": 22,
+        "ambiguous": 9,
+        "disagrees": 6
+      },
+      "dropped_turns": {
+        "agrees": 53,
+        "ambiguous": 40
+      },
+      "injection": {
+        "agrees": 288,
+        "ambiguous": 51
+      },
+      "other": {
+        "agrees": 1569,
+        "ambiguous": 23
+      },
+      "system_prompt": {
+        "agrees": 233,
+        "ambiguous": 483,
+        "disagrees": 4
+      },
+      "tool_definitions": {
+        "agrees": 273
+      },
+      "tool_result": {
+        "agrees": 82
+      }
+    },
+    "divergence_share_quartiles_by_cause": {
+      "compaction": [
+        0.1186,
+        0.4679,
+        0.5886
+      ],
+      "dropped_turns": [
+        0.1235,
+        0.2949,
+        0.4974
+      ],
+      "injection": [
+        0.5482,
+        0.9231,
+        0.9921
+      ],
+      "other": [
+        0.9595,
+        0.9883,
+        0.9957
+      ],
+      "system_prompt": [
+        0.1517,
+        0.2657,
+        0.4554
+      ],
+      "tool_definitions": [
+        0.0,
+        0.0,
+        0.0603
+      ],
+      "tool_result": [
+        0.8777,
+        0.9606,
+        0.9856
+      ]
+    },
+    "disagreements": {
+      "append_with_diverged_prefix": {
+        "requests": 0,
+        "examples": []
+      },
+      "mutation_with_intact_prefix": {
+        "requests": 1,
+        "by_cause": {
+          "dropped_turns": 1
+        },
+        "with_partial_last_block_in_previous": 1,
+        "note": "a change inside step - 1's last partial block (< 16 o200k tokens, never hashed) is invisible to the block ids",
+        "examples": [
+          [
+            "318134476062d6a8582ea0b3618d1b3b",
+            1
+          ]
+        ]
+      },
+      "mutation_region_disagrees": {
+        "requests": 10,
+        "examples": [
+          [
+            "08da92d70b1d7d666d694558fc5edd21",
+            69
+          ],
+          [
+            "123036bccb054883863abb5c7a576c4c",
+            59
+          ],
+          [
+            "13ef670296d1965fc28b3e0490993d48",
+            56
+          ],
+          [
+            "1abf11aef23b4c22cf74a15a824a80b9",
+            44
+          ],
+          [
+            "25471342827e2124c9ac1537ad19ccdd",
+            6
+          ],
+          [
+            "6956109a8a8ec7d5b629239990f9dbe2",
+            47
+          ],
+          [
+            "6956109a8a8ec7d5b629239990f9dbe2",
+            87
+          ],
+          [
+            "b6b1b72dba9b0bff9ebbe0f72bafe525",
+            33
+          ],
+          [
+            "ff2e1997d5452b0cbb858e59fd38a0b8",
+            194
+          ],
+          [
+            "ff2e1997d5452b0cbb858e59fd38a0b8",
+            212
+          ]
+        ]
+      },
+      "switch_label_vs_model_provider": {
+        "authors_switch_requests": 275,
+        "verdict_switch_requests": 275,
+        "authors_switch_not_verdict_switch": 0,
+        "verdict_switch_not_authors_switch": 0
+      },
+      "null_transition_after_step_0": 0,
+      "mutation_without_cause": 0
+    },
+    "read_beyond_reusable_by_cause": {
+      "tool_definitions": 98,
+      "other": 93,
+      "system_prompt": 80,
+      "dropped_turns": 34,
+      "injection": 28,
+      "compaction": 16,
+      "tool_result": 6
+    }
+  },
+  "by_provider": {
+    "B": {
+      "requests": 35950,
+      "prompt_tokens": 4554836891,
+      "read_tokens": 4381451136,
+      "requests_with_null_read": 6,
+      "requests_read_over_prompt": 0,
+      "verdicts": {
+        "first_write": {
+          "requests": 467,
+          "lost_tokens": 0,
+          "lost_share_of_prompt_tokens": 0.0
+        },
+        "hit": {
+          "requests": 33072,
+          "lost_tokens": 6958995,
+          "lost_share_of_prompt_tokens": 0.001527825291340383
+        },
+        "not_read": {
+          "requests": 452,
+          "lost_tokens": 65341632,
+          "lost_share_of_prompt_tokens": 0.014345548164218555
+        },
+        "prompt_changed": {
+          "requests": 1846,
+          "lost_tokens": 41265243,
+          "lost_share_of_prompt_tokens": 0.009059653284519777
+        },
+        "switch": {
+          "requests": 110,
+          "lost_tokens": 0,
+          "lost_share_of_prompt_tokens": 0.0
+        },
+        "unknown": {
+          "requests": 3,
+          "lost_tokens": 0,
+          "lost_share_of_prompt_tokens": 0.0
+        }
+      }
+    },
+    "A": {
+      "requests": 26546,
+      "prompt_tokens": 5798628009,
+      "read_tokens": 5150387616,
+      "requests_with_null_read": 2714,
+      "requests_read_over_prompt": 0,
+      "verdicts": {
+        "first_write": {
+          "requests": 280,
+          "lost_tokens": 0,
+          "lost_share_of_prompt_tokens": 0.0
+        },
+        "hit": {
+          "requests": 23313,
+          "lost_tokens": 3163338,
+          "lost_share_of_prompt_tokens": 0.0005455321491722198
+        },
+        "not_read": {
+          "requests": 82,
+          "lost_tokens": 19885949,
+          "lost_share_of_prompt_tokens": 0.0034294231271837393
+        },
+        "prompt_changed": {
+          "requests": 825,
+          "lost_tokens": 81118764,
+          "lost_share_of_prompt_tokens": 0.0139893029651318
+        },
+        "switch": {
+          "requests": 26,
+          "lost_tokens": 0,
+          "lost_share_of_prompt_tokens": 0.0
+        },
+        "unknown": {
+          "requests": 2020,
+          "lost_tokens": 0,
+          "lost_share_of_prompt_tokens": 0.0
+        }
+      }
+    },
+    "E": {
+      "requests": 7149,
+      "prompt_tokens": 942158128,
+      "read_tokens": 925321664,
+      "requests_with_null_read": 19,
+      "requests_read_over_prompt": 0,
+      "verdicts": {
+        "first_write": {
+          "requests": 28,
+          "lost_tokens": 0,
+          "lost_share_of_prompt_tokens": 0.0
+        },
+        "hit": {
+          "requests": 6981,
+          "lost_tokens": 66857,
+          "lost_share_of_prompt_tokens": 7.096154882399953e-05
+        },
+        "not_read": {
+          "requests": 5,
+          "lost_tokens": 629975,
+          "lost_share_of_prompt_tokens": 0.0006686510271235489
+        },
+        "prompt_changed": {
+          "requests": 117,
+          "lost_tokens": 5527736,
+          "lost_share_of_prompt_tokens": 0.005867100050109635
+        },
+        "switch": {
+          "requests": 13,
+          "lost_tokens": 0,
+          "lost_share_of_prompt_tokens": 0.0
+        },
+        "unknown": {
+          "requests": 5,
+          "lost_tokens": 0,
+          "lost_share_of_prompt_tokens": 0.0
+        }
+      }
+    },
+    "D": {
+      "requests": 5175,
+      "prompt_tokens": 569004352,
+      "read_tokens": 289762547,
+      "requests_with_null_read": 3261,
+      "requests_read_over_prompt": 0,
+      "verdicts": {
+        "below_min": {
+          "requests": 10,
+          "lost_tokens": 0,
+          "lost_share_of_prompt_tokens": 0.0
+        },
+        "first_write": {
+          "requests": 51,
+          "lost_tokens": 0,
+          "lost_share_of_prompt_tokens": 0.0
+        },
+        "hit": {
+          "requests": 1764,
+          "lost_tokens": 619736,
+          "lost_share_of_prompt_tokens": 0.0010891586291417329
+        },
+        "not_read": {
+          "requests": 8,
+          "lost_tokens": 1111580,
+          "lost_share_of_prompt_tokens": 0.0019535527208059036
+        },
+        "prompt_changed": {
+          "requests": 108,
+          "lost_tokens": 3079769,
+          "lost_share_of_prompt_tokens": 0.005412557899029918
+        },
+        "switch": {
+          "requests": 103,
+          "lost_tokens": 0,
+          "lost_share_of_prompt_tokens": 0.0
+        },
+        "unknown": {
+          "requests": 3131,
+          "lost_tokens": 0,
+          "lost_share_of_prompt_tokens": 0.0
+        }
+      }
+    },
+    "C": {
+      "requests": 3957,
+      "prompt_tokens": 790632018,
+      "read_tokens": 734465684,
+      "requests_with_null_read": 15,
+      "requests_read_over_prompt": 0,
+      "verdicts": {
+        "first_write": {
+          "requests": 99,
+          "lost_tokens": 0,
+          "lost_share_of_prompt_tokens": 0.0
+        },
+        "hit": {
+          "requests": 3629,
+          "lost_tokens": 919795,
+          "lost_share_of_prompt_tokens": 0.001163366748448581
+        },
+        "not_read": {
+          "requests": 104,
+          "lost_tokens": 30461478,
+          "lost_share_of_prompt_tokens": 0.03852800962583835
+        },
+        "prompt_changed": {
+          "requests": 94,
+          "lost_tokens": 6809414,
+          "lost_share_of_prompt_tokens": 0.008612621099288696
+        },
+        "switch": {
+          "requests": 16,
+          "lost_tokens": 0,
+          "lost_share_of_prompt_tokens": 0.0
+        },
+        "unknown": {
+          "requests": 15,
+          "lost_tokens": 0,
+          "lost_share_of_prompt_tokens": 0.0
+        }
+      }
+    },
+    "I": {
+      "requests": 27,
+      "prompt_tokens": 1774247,
+      "read_tokens": 0,
+      "requests_with_null_read": 27,
+      "requests_read_over_prompt": 0,
+      "verdicts": {
+        "first_write": {
+          "requests": 2,
+          "lost_tokens": 0,
+          "lost_share_of_prompt_tokens": 0.0
+        },
+        "prompt_changed": {
+          "requests": 1,
+          "lost_tokens": 79,
+          "lost_share_of_prompt_tokens": 4.4525931282397544e-05
+        },
+        "switch": {
+          "requests": 7,
+          "lost_tokens": 0,
+          "lost_share_of_prompt_tokens": 0.0
+        },
+        "unknown": {
+          "requests": 17,
+          "lost_tokens": 0,
+          "lost_share_of_prompt_tokens": 0.0
+        }
+      }
+    }
+  },
+  "by_model": {
+    "deepseek-v4-flash": {
+      "requests": 26125,
+      "prompt_tokens": 5786779487,
+      "read_tokens": 5166820864,
+      "requests_with_null_read": 2271,
+      "requests_read_over_prompt": 0,
+      "verdicts": {
+        "first_write": {
+          "requests": 268,
+          "lost_tokens": 0,
+          "lost_share_of_prompt_tokens": 0.0
+        },
+        "hit": {
+          "requests": 23336,
+          "lost_tokens": 3016549,
+          "lost_share_of_prompt_tokens": 0.0005212828667096573
+        },
+        "not_read": {
+          "requests": 82,
+          "lost_tokens": 19885949,
+          "lost_share_of_prompt_tokens": 0.003436444924966259
+        },
+        "prompt_changed": {
+          "requests": 790,
+          "lost_tokens": 80809320,
+          "lost_share_of_prompt_tokens": 0.013964471979887627
+        },
+        "switch": {
+          "requests": 26,
+          "lost_tokens": 0,
+          "lost_share_of_prompt_tokens": 0.0
+        },
+        "unknown": {
+          "requests": 1623,
+          "lost_tokens": 0,
+          "lost_share_of_prompt_tokens": 0.0
+        }
+      }
+    },
+    "glm-5.1": {
+      "requests": 21062,
+      "prompt_tokens": 2210654247,
+      "read_tokens": 2036648064,
+      "requests_with_null_read": 1429,
+      "requests_read_over_prompt": 0,
+      "verdicts": {
+        "below_min": {
+          "requests": 10,
+          "lost_tokens": 0,
+          "lost_share_of_prompt_tokens": 0.0
+        },
+        "first_write": {
+          "requests": 311,
+          "lost_tokens": 0,
+          "lost_share_of_prompt_tokens": 0.0
+        },
+        "hit": {
+          "requests": 18602,
+          "lost_tokens": 4705720,
+          "lost_share_of_prompt_tokens": 0.002128654902224518
+        },
+        "not_read": {
+          "requests": 250,
+          "lost_tokens": 25048398,
+          "lost_share_of_prompt_tokens": 0.011330762390361264
+        },
+        "prompt_changed": {
+          "requests": 423,
+          "lost_tokens": 16154085,
+          "lost_share_of_prompt_tokens": 0.007307377452589943
+        },
+        "switch": {
+          "requests": 95,
+          "lost_tokens": 0,
+          "lost_share_of_prompt_tokens": 0.0
+        },
+        "unknown": {
+          "requests": 1371,
+          "lost_tokens": 0,
+          "lost_share_of_prompt_tokens": 0.0
+        }
+      }
+    },
+    "glm-5.2": {
+      "requests": 16303,
+      "prompt_tokens": 2536400122,
+      "read_tokens": 2404064704,
+      "requests_with_null_read": 583,
+      "requests_read_over_prompt": 0,
+      "verdicts": {
+        "first_write": {
+          "requests": 174,
+          "lost_tokens": 0,
+          "lost_share_of_prompt_tokens": 0.0
+        },
+        "hit": {
+          "requests": 13830,
+          "lost_tokens": 2506116,
+          "lost_share_of_prompt_tokens": 0.0009880601953385333
+        },
+        "not_read": {
+          "requests": 187,
+          "lost_tokens": 39278063,
+          "lost_share_of_prompt_tokens": 0.015485751896679651
+        },
+        "prompt_changed": {
+          "requests": 1489,
+          "lost_tokens": 25839535,
+          "lost_share_of_prompt_tokens": 0.010187483739602186
+        },
+        "switch": {
+          "requests": 84,
+          "lost_tokens": 0,
+          "lost_share_of_prompt_tokens": 0.0
+        },
+        "unknown": {
+          "requests": 539,
+          "lost_tokens": 0,
+          "lost_share_of_prompt_tokens": 0.0
+        }
+      }
+    },
+    "kimi-k2.7-code": {
+      "requests": 7983,
+      "prompt_tokens": 1019801186,
+      "read_tokens": 952928066,
+      "requests_with_null_read": 669,
+      "requests_read_over_prompt": 0,
+      "verdicts": {
+        "first_write": {
+          "requests": 29,
+          "lost_tokens": 0,
+          "lost_share_of_prompt_tokens": 0.0
+        },
+        "hit": {
+          "requests": 7159,
+          "lost_tokens": 69940,
+          "lost_share_of_prompt_tokens": 6.858199515763262e-05
+        },
+        "not_read": {
+          "requests": 5,
+          "lost_tokens": 629975,
+          "lost_share_of_prompt_tokens": 0.0006177429568119761
+        },
+        "prompt_changed": {
+          "requests": 122,
+          "lost_tokens": 5898086,
+          "lost_share_of_prompt_tokens": 0.005783564562357746
+        },
+        "switch": {
+          "requests": 19,
+          "lost_tokens": 0,
+          "lost_share_of_prompt_tokens": 0.0
+        },
+        "unknown": {
+          "requests": 649,
+          "lost_tokens": 0,
+          "lost_share_of_prompt_tokens": 0.0
+        }
+      }
+    },
+    "minimax-m3": {
+      "requests": 3986,
+      "prompt_tokens": 825261985,
+      "read_tokens": 684131558,
+      "requests_with_null_read": 595,
+      "requests_read_over_prompt": 0,
+      "verdicts": {
+        "first_write": {
+          "requests": 98,
+          "lost_tokens": 0,
+          "lost_share_of_prompt_tokens": 0.0
+        },
+        "hit": {
+          "requests": 3084,
+          "lost_tokens": 662439,
+          "lost_share_of_prompt_tokens": 0.0008027014597067621
+        },
+        "not_read": {
+          "requests": 103,
+          "lost_tokens": 30436184,
+          "lost_share_of_prompt_tokens": 0.036880632518169365
+        },
+        "prompt_changed": {
+          "requests": 101,
+          "lost_tokens": 7316028,
+          "lost_share_of_prompt_tokens": 0.008865097548386408
+        },
+        "switch": {
+          "requests": 15,
+          "lost_tokens": 0,
+          "lost_share_of_prompt_tokens": 0.0
+        },
+        "unknown": {
+          "requests": 585,
+          "lost_tokens": 0,
+          "lost_share_of_prompt_tokens": 0.0
+        }
+      }
+    },
+    "glm-5-turbo": {
+      "requests": 1963,
+      "prompt_tokens": 162072886,
+      "read_tokens": 155148544,
+      "requests_with_null_read": 5,
+      "requests_read_over_prompt": 0,
+      "verdicts": {
+        "first_write": {
+          "requests": 26,
+          "lost_tokens": 0,
+          "lost_share_of_prompt_tokens": 0.0
+        },
+        "hit": {
+          "requests": 1870,
+          "lost_tokens": 338891,
+          "lost_share_of_prompt_tokens": 0.0020909789932413493
+        },
+        "not_read": {
+          "requests": 23,
+          "lost_tokens": 2126751,
+          "lost_share_of_prompt_tokens": 0.01312218874167515
+        },
+        "prompt_changed": {
+          "requests": 25,
+          "lost_tokens": 1176387,
+          "lost_share_of_prompt_tokens": 0.007258382503289292
+        },
+        "switch": {
+          "requests": 18,
+          "lost_tokens": 0,
+          "lost_share_of_prompt_tokens": 0.0
+        },
+        "unknown": {
+          "requests": 1,
+          "lost_tokens": 0,
+          "lost_share_of_prompt_tokens": 0.0
+        }
+      }
+    },
+    "qwen3.6-35b": {
+      "requests": 612,
+      "prompt_tokens": 44065459,
+      "read_tokens": 14993312,
+      "requests_with_null_read": 441,
+      "requests_read_over_prompt": 0,
+      "verdicts": {
+        "first_write": {
+          "requests": 14,
+          "lost_tokens": 0,
+          "lost_share_of_prompt_tokens": 0.0
+        },
+        "hit": {
+          "requests": 169,
+          "lost_tokens": 158924,
+          "lost_share_of_prompt_tokens": 0.0036065436195728724
+        },
+        "prompt_changed": {
+          "requests": 39,
+          "lost_tokens": 591006,
+          "lost_share_of_prompt_tokens": 0.013412001449933836
+        },
+        "switch": {
+          "requests": 4,
+          "lost_tokens": 0,
+          "lost_share_of_prompt_tokens": 0.0
+        },
+        "unknown": {
+          "requests": 386,
+          "lost_tokens": 0,
+          "lost_share_of_prompt_tokens": 0.0
+        }
+      }
+    },
+    "minimax-m2.5": {
+      "requests": 562,
+      "prompt_tokens": 52232373,
+      "read_tokens": 50394975,
+      "requests_with_null_read": 4,
+      "requests_read_over_prompt": 0,
+      "verdicts": {
+        "first_write": {
+          "requests": 3,
+          "lost_tokens": 0,
+          "lost_share_of_prompt_tokens": 0.0
+        },
+        "hit": {
+          "requests": 547,
+          "lost_tokens": 257420,
+          "lost_share_of_prompt_tokens": 0.00492836119086529
+        },
+        "not_read": {
+          "requests": 1,
+          "lost_tokens": 25294,
+          "lost_share_of_prompt_tokens": 0.0004842590628612642
+        },
+        "prompt_changed": {
+          "requests": 1,
+          "lost_tokens": 16479,
+          "lost_share_of_prompt_tokens": 0.0003154939945003073
+        },
+        "switch": {
+          "requests": 7,
+          "lost_tokens": 0,
+          "lost_share_of_prompt_tokens": 0.0
+        },
+        "unknown": {
+          "requests": 3,
+          "lost_tokens": 0,
+          "lost_share_of_prompt_tokens": 0.0
+        }
+      }
+    },
+    "claude-opus-4-8": {
+      "requests": 181,
+      "prompt_tokens": 17991653,
+      "read_tokens": 16258560,
+      "requests_with_null_read": 18,
+      "requests_read_over_prompt": 0,
+      "verdicts": {
+        "first_write": {
+          "requests": 2,
+          "lost_tokens": 0,
+          "lost_share_of_prompt_tokens": 0.0
+        },
+        "hit": {
+          "requests": 162,
+          "lost_tokens": 12722,
+          "lost_share_of_prompt_tokens": 0.0007071056783943087
+        },
+        "unknown": {
+          "requests": 17,
+          "lost_tokens": 0,
+          "lost_share_of_prompt_tokens": 0.0
+        }
+      }
+    },
+    "diffusiongemma": {
+      "requests": 27,
+      "prompt_tokens": 1774247,
+      "read_tokens": 0,
+      "requests_with_null_read": 27,
+      "requests_read_over_prompt": 0,
+      "verdicts": {
+        "first_write": {
+          "requests": 2,
+          "lost_tokens": 0,
+          "lost_share_of_prompt_tokens": 0.0
+        },
+        "prompt_changed": {
+          "requests": 1,
+          "lost_tokens": 79,
+          "lost_share_of_prompt_tokens": 4.4525931282397544e-05
+        },
+        "switch": {
+          "requests": 7,
+          "lost_tokens": 0,
+          "lost_share_of_prompt_tokens": 0.0
+        },
+        "unknown": {
+          "requests": 17,
+          "lost_tokens": 0,
+          "lost_share_of_prompt_tokens": 0.0
+        }
+      }
+    }
+  },
+  "by_harness": {
+    "pi": {
+      "requests": 18485,
+      "prompt_tokens": 2391064485,
+      "read_tokens": 2209315422,
+      "requests_with_null_read": 1141,
+      "requests_read_over_prompt": 0,
+      "verdicts": {
+        "first_write": {
+          "requests": 52,
+          "lost_tokens": 0,
+          "lost_share_of_prompt_tokens": 0.0
+        },
+        "hit": {
+          "requests": 16981,
+          "lost_tokens": 1831917,
+          "lost_share_of_prompt_tokens": 0.0007661512315925683
+        },
+        "not_read": {
+          "requests": 131,
+          "lost_tokens": 16076914,
+          "lost_share_of_prompt_tokens": 0.006723747561329364
+        },
+        "prompt_changed": {
+          "requests": 181,
+          "lost_tokens": 9147110,
+          "lost_share_of_prompt_tokens": 0.0038255388164489426
+        },
+        "switch": {
+          "requests": 49,
+          "lost_tokens": 0,
+          "lost_share_of_prompt_tokens": 0.0
+        },
+        "unknown": {
+          "requests": 1091,
+          "lost_tokens": 0,
+          "lost_share_of_prompt_tokens": 0.0
+        }
+      }
+    },
+    "hermes": {
+      "requests": 14285,
+      "prompt_tokens": 2580812308,
+      "read_tokens": 2261453042,
+      "requests_with_null_read": 1293,
+      "requests_read_over_prompt": 0,
+      "verdicts": {
+        "first_write": {
+          "requests": 292,
+          "lost_tokens": 0,
+          "lost_share_of_prompt_tokens": 0.0
+        },
+        "hit": {
+          "requests": 12319,
+          "lost_tokens": 2070100,
+          "lost_share_of_prompt_tokens": 0.000802111797740233
+        },
+        "not_read": {
+          "requests": 132,
+          "lost_tokens": 25460118,
+          "lost_share_of_prompt_tokens": 0.009865156765208669
+        },
+        "prompt_changed": {
+          "requests": 322,
+          "lost_tokens": 20071309,
+          "lost_share_of_prompt_tokens": 0.007777128517941026
+        },
+        "switch": {
+          "requests": 88,
+          "lost_tokens": 0,
+          "lost_share_of_prompt_tokens": 0.0
+        },
+        "unknown": {
+          "requests": 1132,
+          "lost_tokens": 0,
+          "lost_share_of_prompt_tokens": 0.0
+        }
+      }
+    },
+    "claude-code": {
+      "requests": 12237,
+      "prompt_tokens": 2375653390,
+      "read_tokens": 2194581376,
+      "requests_with_null_read": 908,
+      "requests_read_over_prompt": 0,
+      "verdicts": {
+        "first_write": {
+          "requests": 129,
+          "lost_tokens": 0,
+          "lost_share_of_prompt_tokens": 0.0
+        },
+        "hit": {
+          "requests": 11021,
+          "lost_tokens": 947962,
+          "lost_share_of_prompt_tokens": 0.00039903211638125377
+        },
+        "not_read": {
+          "requests": 38,
+          "lost_tokens": 6708074,
+          "lost_share_of_prompt_tokens": 0.002823675384732787
+        },
+        "prompt_changed": {
+          "requests": 501,
+          "lost_tokens": 57418011,
+          "lost_share_of_prompt_tokens": 0.02416935536206315
+        },
+        "switch": {
+          "requests": 4,
+          "lost_tokens": 0,
+          "lost_share_of_prompt_tokens": 0.0
+        },
+        "unknown": {
+          "requests": 544,
+          "lost_tokens": 0,
+          "lost_share_of_prompt_tokens": 0.0
+        }
+      }
+    },
+    "opencode": {
+      "requests": 10410,
+      "prompt_tokens": 1121827946,
+      "read_tokens": 1057216153,
+      "requests_with_null_read": 376,
+      "requests_read_over_prompt": 0,
+      "verdicts": {
+        "below_min": {
+          "requests": 10,
+          "lost_tokens": 0,
+          "lost_share_of_prompt_tokens": 0.0
+        },
+        "first_write": {
+          "requests": 172,
+          "lost_tokens": 0,
+          "lost_share_of_prompt_tokens": 0.0
+        },
+        "hit": {
+          "requests": 9640,
+          "lost_tokens": 4586686,
+          "lost_share_of_prompt_tokens": 0.00408858240370489
+        },
+        "not_read": {
+          "requests": 131,
+          "lost_tokens": 12838161,
+          "lost_share_of_prompt_tokens": 0.011443966114211956
+        },
+        "prompt_changed": {
+          "requests": 107,
+          "lost_tokens": 4428365,
+          "lost_share_of_prompt_tokens": 0.0039474547017569125
+        },
+        "switch": {
+          "requests": 30,
+          "lost_tokens": 0,
+          "lost_share_of_prompt_tokens": 0.0
+        },
+        "unknown": {
+          "requests": 320,
+          "lost_tokens": 0,
+          "lost_share_of_prompt_tokens": 0.0
+        }
+      }
+    },
+    "codex": {
+      "requests": 7995,
+      "prompt_tokens": 625794041,
+      "read_tokens": 570875613,
+      "requests_with_null_read": 321,
+      "requests_read_over_prompt": 0,
+      "verdicts": {
+        "first_write": {
+          "requests": 75,
+          "lost_tokens": 0,
+          "lost_share_of_prompt_tokens": 0.0
+        },
+        "hit": {
+          "requests": 6091,
+          "lost_tokens": 1023195,
+          "lost_share_of_prompt_tokens": 0.0016350347446021781
+        },
+        "not_read": {
+          "requests": 87,
+          "lost_tokens": 7096982,
+          "lost_share_of_prompt_tokens": 0.011340763150539493
+        },
+        "prompt_changed": {
+          "requests": 1416,
+          "lost_tokens": 14486579,
+          "lost_share_of_prompt_tokens": 0.023149116244141416
+        },
+        "switch": {
+          "requests": 32,
+          "lost_tokens": 0,
+          "lost_share_of_prompt_tokens": 0.0
+        },
+        "unknown": {
+          "requests": 294,
+          "lost_tokens": 0,
+          "lost_share_of_prompt_tokens": 0.0
+        }
+      }
+    },
+    "oh-my-pi": {
+      "requests": 5923,
+      "prompt_tokens": 1753949582,
+      "read_tokens": 1537184904,
+      "requests_with_null_read": 901,
+      "requests_read_over_prompt": 0,
+      "verdicts": {
+        "first_write": {
+          "requests": 50,
+          "lost_tokens": 0,
+          "lost_share_of_prompt_tokens": 0.0
+        },
+        "hit": {
+          "requests": 4887,
+          "lost_tokens": 407727,
+          "lost_share_of_prompt_tokens": 0.00023246221224618987
+        },
+        "not_read": {
+          "requests": 45,
+          "lost_tokens": 23010230,
+          "lost_share_of_prompt_tokens": 0.013119094320694104
+        },
+        "prompt_changed": {
+          "requests": 111,
+          "lost_tokens": 8612477,
+          "lost_share_of_prompt_tokens": 0.004910333277755529
+        },
+        "switch": {
+          "requests": 13,
+          "lost_tokens": 0,
+          "lost_share_of_prompt_tokens": 0.0
+        },
+        "unknown": {
+          "requests": 817,
+          "lost_tokens": 0,
+          "lost_share_of_prompt_tokens": 0.0
+        }
+      }
+    },
+    "kilo": {
+      "requests": 3685,
+      "prompt_tokens": 389003755,
+      "read_tokens": 350911417,
+      "requests_with_null_read": 265,
+      "requests_read_over_prompt": 0,
+      "verdicts": {
+        "first_write": {
+          "requests": 124,
+          "lost_tokens": 0,
+          "lost_share_of_prompt_tokens": 0.0
+        },
+        "hit": {
+          "requests": 3062,
+          "lost_tokens": 146382,
+          "lost_share_of_prompt_tokens": 0.0003762997094976628
+        },
+        "not_read": {
+          "requests": 22,
+          "lost_tokens": 1377402,
+          "lost_share_of_prompt_tokens": 0.00354084499775587
+        },
+        "prompt_changed": {
+          "requests": 230,
+          "lost_tokens": 9354092,
+          "lost_share_of_prompt_tokens": 0.02404627687976945
+        },
+        "switch": {
+          "requests": 32,
+          "lost_tokens": 0,
+          "lost_share_of_prompt_tokens": 0.0
+        },
+        "unknown": {
+          "requests": 215,
+          "lost_tokens": 0,
+          "lost_share_of_prompt_tokens": 0.0
+        }
+      }
+    },
+    "copilot": {
+      "requests": 2823,
+      "prompt_tokens": 424486291,
+      "read_tokens": 350585184,
+      "requests_with_null_read": 716,
+      "requests_read_over_prompt": 0,
+      "verdicts": {
+        "first_write": {
+          "requests": 19,
+          "lost_tokens": 0,
+          "lost_share_of_prompt_tokens": 0.0
+        },
+        "hit": {
+          "requests": 2021,
+          "lost_tokens": 233915,
+          "lost_share_of_prompt_tokens": 0.0005510543095489507
+        },
+        "not_read": {
+          "requests": 13,
+          "lost_tokens": 1066796,
+          "lost_share_of_prompt_tokens": 0.00251314594279795
+        },
+        "prompt_changed": {
+          "requests": 68,
+          "lost_tokens": 7174645,
+          "lost_share_of_prompt_tokens": 0.01690194748833479
+        },
+        "switch": {
+          "requests": 10,
+          "lost_tokens": 0,
+          "lost_share_of_prompt_tokens": 0.0
+        },
+        "unknown": {
+          "requests": 692,
+          "lost_tokens": 0,
+          "lost_share_of_prompt_tokens": 0.0
+        }
+      }
+    },
+    "zcode": {
+      "requests": 2687,
+      "prompt_tokens": 981146473,
+      "read_tokens": 942391936,
+      "requests_with_null_read": 46,
+      "requests_read_over_prompt": 0,
+      "verdicts": {
+        "first_write": {
+          "requests": 12,
+          "lost_tokens": 0,
+          "lost_share_of_prompt_tokens": 0.0
+        },
+        "hit": {
+          "requests": 2553,
+          "lost_tokens": 470636,
+          "lost_share_of_prompt_tokens": 0.00047967965329474306
+        },
+        "not_read": {
+          "requests": 52,
+          "lost_tokens": 23795937,
+          "lost_share_of_prompt_tokens": 0.024253195271894942
+        },
+        "prompt_changed": {
+          "requests": 16,
+          "lost_tokens": 4972345,
+          "lost_share_of_prompt_tokens": 0.005067892650927361
+        },
+        "switch": {
+          "requests": 17,
+          "lost_tokens": 0,
+          "lost_share_of_prompt_tokens": 0.0
+        },
+        "unknown": {
+          "requests": 37,
+          "lost_tokens": 0,
+          "lost_share_of_prompt_tokens": 0.0
+        }
+      }
+    },
+    "cline": {
+      "requests": 215,
+      "prompt_tokens": 9902325,
+      "read_tokens": 6873600,
+      "requests_with_null_read": 16,
+      "requests_read_over_prompt": 0,
+      "verdicts": {
+        "first_write": {
+          "requests": 1,
+          "lost_tokens": 0,
+          "lost_share_of_prompt_tokens": 0.0
+        },
+        "hit": {
+          "requests": 184,
+          "lost_tokens": 10201,
+          "lost_share_of_prompt_tokens": 0.0010301621083937359
+        },
+        "prompt_changed": {
+          "requests": 30,
+          "lost_tokens": 2040714,
+          "lost_share_of_prompt_tokens": 0.20608432868038568
+        }
+      }
+    },
+    "openclaw": {
+      "requests": 59,
+      "prompt_tokens": 3393049,
+      "read_tokens": 0,
+      "requests_with_null_read": 59,
+      "requests_read_over_prompt": 0,
+      "verdicts": {
+        "first_write": {
+          "requests": 1,
+          "lost_tokens": 0,
+          "lost_share_of_prompt_tokens": 0.0
+        },
+        "prompt_changed": {
+          "requests": 9,
+          "lost_tokens": 95358,
+          "lost_share_of_prompt_tokens": 0.028103926586382926
+        },
+        "unknown": {
+          "requests": 49,
+          "lost_tokens": 0,
+          "lost_share_of_prompt_tokens": 0.0
+        }
+      }
+    }
+  },
+  "by_subagent": {
+    "False": {
+      "requests": 76513,
+      "prompt_tokens": 12529522545,
+      "read_tokens": 11366713864,
+      "requests_with_null_read": 5888,
+      "requests_read_over_prompt": 0,
+      "verdicts": {
+        "first_write": {
+          "requests": 786,
+          "lost_tokens": 0,
+          "lost_share_of_prompt_tokens": 0.0
+        },
+        "hit": {
+          "requests": 66753,
+          "lost_tokens": 11616023,
+          "lost_share_of_prompt_tokens": 0.0009270922302331034
+        },
+        "not_read": {
+          "requests": 639,
+          "lost_tokens": 116902098,
+          "lost_share_of_prompt_tokens": 0.009330131900888008
+        },
+        "prompt_changed": {
+          "requests": 2976,
+          "lost_tokens": 137352925,
+          "lost_share_of_prompt_tokens": 0.01096234309860528
+        },
+        "switch": {
+          "requests": 274,
+          "lost_tokens": 0,
+          "lost_share_of_prompt_tokens": 0.0
+        },
+        "unknown": {
+          "requests": 5085,
+          "lost_tokens": 0,
+          "lost_share_of_prompt_tokens": 0.0
+        }
+      }
+    },
+    "True": {
+      "requests": 2291,
+      "prompt_tokens": 127511100,
+      "read_tokens": 114674783,
+      "requests_with_null_read": 154,
+      "requests_read_over_prompt": 0,
+      "verdicts": {
+        "below_min": {
+          "requests": 10,
+          "lost_tokens": 0,
+          "lost_share_of_prompt_tokens": 0.0
+        },
+        "first_write": {
+          "requests": 141,
+          "lost_tokens": 0,
+          "lost_share_of_prompt_tokens": 0.0
+        },
+        "hit": {
+          "requests": 2006,
+          "lost_tokens": 112698,
+          "lost_share_of_prompt_tokens": 0.0008838289372454633
+        },
+        "not_read": {
+          "requests": 12,
+          "lost_tokens": 528516,
+          "lost_share_of_prompt_tokens": 0.004144862682542932
+        },
+        "prompt_changed": {
+          "requests": 15,
+          "lost_tokens": 448080,
+          "lost_share_of_prompt_tokens": 0.003514047012377746
+        },
+        "switch": {
+          "requests": 1,
+          "lost_tokens": 0,
+          "lost_share_of_prompt_tokens": 0.0
+        },
+        "unknown": {
+          "requests": 106,
+          "lost_tokens": 0,
+          "lost_share_of_prompt_tokens": 0.0
+        }
+      }
+    }
+  }
+}
