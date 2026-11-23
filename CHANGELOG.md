@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **LiteLLM: DeepSeek's own Anthropic-compatible API is recorded.** LiteLLM sends a `/v1/messages` call for a DeepSeek model to DeepSeek's Messages API in Anthropic's format, which the callback skipped, since its cache rules were not known. A probe on DeepSeek's API (deepseek-flash, 2026-11-23) showed them: caching is automatic, the same with and without `cache_control` markers, directly and through LiteLLM, and no cache write is reported (`cache_creation_input_tokens` is 0). These calls are now judged by the rules of an automatic prefix cache, as on DeepSeek's chat completions: the body LiteLLM sent compared block for block in the order sent (system prompt, tool calls and results, thinking and every other block; markers dropped), and `cache_read_input_tokens` taken as the cached tokens, with no minimum cacheable length claimed. MiniMax's own Anthropic-compatible API is still not recorded: its rules are not known. Checked through LiteLLM 1.110.2's DeepSeek route against a simulated provider that caches as DeepSeek does: tools reordered, a system prompt edited and a timestamp changed are each named, streamed or not, and turns that only append read as hits.
+
 ## 0.12.4: 2026-11-22
 
 For anyone running Claude Code or another agent through LiteLLM's `/v1/messages` to anything but Claude in Anthropic's format: Claude on Bedrock Converse, Claude through OpenRouter and OpenAI's models are now recorded too, each classified from the body LiteLLM sent. And on OpenAI's Responses API, a system prompt sent as the developer message that opens the input is the system prompt, through LiteLLM and through Prefixwise's own proxy.

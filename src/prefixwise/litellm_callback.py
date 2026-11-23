@@ -22,8 +22,10 @@ recorded, streamed or not; other call types pass through unrecorded. Through the
 each call is classified from the body LiteLLM sent: Claude by Anthropic's rules, in Anthropic's
 format, on Bedrock Converse (its cachePoints as breakpoints) or as a chat completion with its
 cache_control markers (OpenRouter); OpenAI's models as the Responses API calls LiteLLM makes of them;
-another model when LiteLLM sent it a chat completion (vLLM). Not a provider's own Anthropic-compatible
-API (DeepSeek's or MiniMax's): their cache rules are not Anthropic's. Nothing is sent anywhere
+another model when LiteLLM sent it a chat completion (vLLM); DeepSeek's own Anthropic-compatible API by
+the rules of an automatic prefix cache, as DeepSeek caches there (markers are ignored, no writes are
+reported). Not another provider's own Anthropic-compatible API (MiniMax's): its cache rules are not
+known to be Anthropic's or automatic. Nothing is sent anywhere
 and LiteLLM's behaviour is unchanged. Answers from LiteLLM's own response cache reached no provider
 and are not recorded.
 
@@ -390,6 +392,83 @@ def _anthropic_shaped(body) -> bool:
     return False
 
 
+def _plain_blocks(value):
+    """A block or list of blocks without its cache_control markers (DeepSeek ignores them)."""
+    if isinstance(value, dict):
+        return {k: _plain_blocks(v) for k, v in value.items() if k != "cache_control"}
+    if isinstance(value, list):
+        return [_plain_blocks(v) for v in value]
+    return value
+
+
+def _openai_from_anthropic(body: dict, model: str) -> dict:
+    """An Anthropic Messages body as a chat completion, block for block in the order sent, for a provider
+    whose Messages API caches the way an OpenAI-compatible API does (DeepSeek's). The system prompt becomes
+    the system message; tool_use blocks an assistant message's tool calls; tool_result blocks tool
+    messages, ahead of the rest of their user message as Anthropic places them; any other block a content
+    part (text and images as such, anything else, thinking included, as its JSON), so a change to any of
+    them still shows. Markers are dropped."""
+    def part(b):
+        if not isinstance(b, dict):
+            return {"type": "text", "text": json.dumps(b, ensure_ascii=False)}
+        if b.get("type") == "text":
+            return {"type": "text", "text": b.get("text", "")}
+        if b.get("type") == "image" and isinstance(b.get("source"), dict):
+            src = b["source"]
+            url = src.get("url") or f"data:{src.get('media_type', '')};base64,{src.get('data', '')}"
+            return {"type": "image_url", "image_url": {"url": url}}
+        return {"type": "text", "text": json.dumps(_plain_blocks(b), ensure_ascii=False)}
+
+    out = []
+    system = body.get("system")
+    if isinstance(system, str) and system:
+        out.append({"role": "system", "content": system})
+    elif isinstance(system, list) and system:
+        out.append({"role": "system", "content": [part(b) for b in system]})
+    for m in body.get("messages") or []:
+        if not isinstance(m, dict):
+            continue
+        role, content = m.get("role"), m.get("content")
+        if not isinstance(content, list):
+            out.append({"role": role, "content": content})
+            continue
+        if role == "assistant":
+            parts = [part(b) for b in content if not (isinstance(b, dict) and b.get("type") == "tool_use")]
+            calls = [{"id": b.get("id"), "type": "function",
+                      "function": {"name": b.get("name"),
+                                   "arguments": json.dumps(b.get("input") or {}, ensure_ascii=False)}}
+                     for b in content if isinstance(b, dict) and b.get("type") == "tool_use"]
+            msg = {"role": "assistant", "content": parts or None}
+            if calls:
+                msg["tool_calls"] = calls
+            out.append(msg)
+            continue
+        rest = []
+        for b in content:
+            if isinstance(b, dict) and b.get("type") == "tool_result":
+                result = b.get("content")
+                text = result if isinstance(result, str) else json.dumps(_plain_blocks(result), ensure_ascii=False)
+                if b.get("is_error"):
+                    text = "[error] " + text
+                out.append({"role": "tool", "tool_call_id": b.get("tool_use_id"), "content": text})
+            else:
+                rest.append(part(b))
+        if rest:
+            out.append({"role": role, "content": rest})
+    chat = {"model": model, "messages": out}
+    tools = [t for t in body.get("tools") or [] if isinstance(t, dict)]
+    if tools:
+        chat["tools"] = [{"type": "function", "function": {
+            "name": t.get("name"), "description": t.get("description", ""),
+            "parameters": _plain_blocks(t.get("input_schema") or {"type": "object"})}}
+            if "input_schema" in t or "type" not in t or t.get("type") == "custom"
+            else _plain_blocks(t) for t in tools]
+    for key in ("tool_choice", "thinking", "response_format"):
+        if body.get(key) is not None:
+            chat[key] = body[key]
+    return chat
+
+
 def _anthropic_from_openai(messages: list, tools, model: str) -> dict:
     """No sent body in hand: rebuild Anthropic's format from LiteLLM's OpenAI-format messages."""
     system = []
@@ -597,8 +676,16 @@ class PrefixwiseCallback(_Base):
                     # else Anthropic's own format, as sent
                 elif listed:
                     # Recorded only as a chat completion: a Converse body (Nova, Llama: not Anthropic's
-                    # cache) or an Anthropic one (a provider's own Messages API) is not.
-                    if _converse_shaped(sent) or _anthropic_shaped(sent) or _sent_natively(model, provider, sent):
+                    # cache) or an Anthropic one (a provider's own Messages API) is not, except DeepSeek's,
+                    # which caches automatically, whatever the markers say, and reports no writes (probe,
+                    # experiments/litellm/runs/2026-11-23-deepseek-probe.md): judged as the
+                    # OpenAI-compatible API it caches like, from its reads.
+                    if provider == "deepseek" and not _converse_shaped(sent) and (
+                            _anthropic_shaped(sent) or _sent_natively(model, provider, sent)):
+                        sent = _openai_from_anthropic(sent, model)
+                        if not details and usage.get("cache_read_input_tokens") is not None:
+                            details = {"cached_tokens": _int(usage.get("cache_read_input_tokens"))}
+                    elif _converse_shaped(sent) or _anthropic_shaped(sent) or _sent_natively(model, provider, sent):
                         return
                 elif isinstance(sent.get("input"), list):
                     responses = True
