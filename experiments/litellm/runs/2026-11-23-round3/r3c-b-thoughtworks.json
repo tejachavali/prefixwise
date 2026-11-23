@@ -1,0 +1,43 @@
+{
+ "test": "translate",
+ "dataset": "thoughtworks/agentic-coding-trajectories",
+ "split": null,
+ "config": null,
+ "litellm": "1.110.2",
+ "conversations": 29,
+ "seconds": 61,
+ "tools_with_nulls_dropped": 0,
+ "skipped_invalid": 0,
+ "results": {
+  "openai": {
+   "pairs": 274,
+   "ok": 274,
+   "untranslated": 0,
+   "examples": []
+  },
+  "anthropic": {
+   "pairs": 274,
+   "ok": 274,
+   "untranslated": 0,
+   "examples": []
+  },
+  "bedrock-converse": {
+   "pairs": 274,
+   "ok": 274,
+   "untranslated": 0,
+   "examples": []
+  },
+  "bedrock-invoke": {
+   "pairs": 274,
+   "ok": 274,
+   "untranslated": 0,
+   "examples": []
+  },
+  "gemini": {
+   "pairs": 274,
+   "ok": 274,
+   "untranslated": 0,
+   "examples": []
+  }
+ }
+}
