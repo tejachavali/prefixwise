@@ -1,0 +1,117 @@
+{
+ "test": "replay",
+ "live": true,
+ "models": [
+  "anthropic/claude-haiku-4-5",
+  "openai/gpt-4.1-mini"
+ ],
+ "calls_sent": 300,
+ "dataset": "nvidia/Open-SWE-Traces",
+ "split": "claudecode",
+ "config": null,
+ "litellm": "1.110.2",
+ "prefixwise": "0.12.4",
+ "seed": 11,
+ "conversations": 4,
+ "seconds": 718,
+ "summary": {
+  "messages-openai/unchanged": {
+   "replays": 4,
+   "calls": 40,
+   "recorded": 40,
+   "false_alarms": 0,
+   "injected_named": 0,
+   "injected_seen_cost_nothing": 0,
+   "injected_below_minimum": 0,
+   "injected_missed": 0,
+   "provider_misses": 27,
+   "errors": 0
+  },
+  "messages-openai/tool_reserialize": {
+   "replays": 4,
+   "calls": 40,
+   "recorded": 40,
+   "false_alarms": 0,
+   "injected_named": 4,
+   "injected_seen_cost_nothing": 0,
+   "injected_below_minimum": 0,
+   "injected_missed": 0,
+   "provider_misses": 21,
+   "errors": 0
+  },
+  "messages-openai/system_edit": {
+   "replays": 4,
+   "calls": 40,
+   "recorded": 40,
+   "false_alarms": 0,
+   "injected_named": 4,
+   "injected_seen_cost_nothing": 0,
+   "injected_below_minimum": 0,
+   "injected_missed": 0,
+   "provider_misses": 23,
+   "errors": 0
+  },
+  "messages-openai/history_edit": {
+   "replays": 4,
+   "calls": 40,
+   "recorded": 40,
+   "false_alarms": 0,
+   "injected_named": 3,
+   "injected_seen_cost_nothing": 0,
+   "injected_below_minimum": 1,
+   "injected_missed": 0,
+   "provider_misses": 22,
+   "errors": 0
+  },
+  "chat-openai/unchanged": {
+   "replays": 4,
+   "calls": 40,
+   "recorded": 40,
+   "false_alarms": 0,
+   "injected_named": 0,
+   "injected_seen_cost_nothing": 0,
+   "injected_below_minimum": 0,
+   "injected_missed": 0,
+   "provider_misses": 2,
+   "errors": 0
+  },
+  "chat-openai/tool_reserialize": {
+   "replays": 4,
+   "calls": 40,
+   "recorded": 40,
+   "false_alarms": 0,
+   "injected_named": 4,
+   "injected_seen_cost_nothing": 0,
+   "injected_below_minimum": 0,
+   "injected_missed": 0,
+   "provider_misses": 0,
+   "errors": 0
+  },
+  "chat-openai/system_edit": {
+   "replays": 3,
+   "calls": 30,
+   "recorded": 30,
+   "false_alarms": 0,
+   "injected_named": 3,
+   "injected_seen_cost_nothing": 0,
+   "injected_below_minimum": 0,
+   "injected_missed": 0,
+   "provider_misses": 1,
+   "errors": 0
+  },
+  "chat-openai/history_edit": {
+   "replays": 3,
+   "calls": 30,
+   "recorded": 30,
+   "false_alarms": 0,
+   "injected_named": 2,
+   "injected_seen_cost_nothing": 0,
+   "injected_below_minimum": 1,
+   "injected_missed": 0,
+   "provider_misses": 2,
+   "errors": 0
+  }
+ },
+ "skipped_invalid": 0,
+ "problems": []
+}
