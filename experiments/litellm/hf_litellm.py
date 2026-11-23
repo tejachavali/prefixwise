@@ -117,6 +117,7 @@ def steps_of(msgs, max_steps):
 # -- translate ------------------------------------------------------------------------------------
 
 def run_translate(args):
+    import e5_scale
     import translate_b as tb  # registers its body-capturing callback
     results, t0, convs = {}, time.time(), conversations(args)
     for name, msgs, tools in convs:
@@ -125,8 +126,10 @@ def run_translate(args):
     import importlib.metadata as md
     json.dump({"test": "translate", "dataset": args.dataset, "split": args.split, "config": args.config,
                "litellm": md.version("litellm"), "conversations": len(convs), "seconds": round(time.time() - t0),
+               "tools_with_nulls_dropped": e5_scale.TOOL_NULLS[0],
                "results": results}, open(args.out, "w"), indent=1)
-    print(f"{args.dataset} ({args.split}): {len(convs)} conversations")
+    print(f"{args.dataset} ({args.split}): {len(convs)} conversations; tools read with null keys dropped: "
+          f"{e5_scale.TOOL_NULLS[0]}")
     for t, r in results.items():
         print(f"  {t:18s} pairs={r['pairs']:5d} append-only={r['ok']:5d} broken={r['pairs'] - r['ok']:4d} "
               f"untranslated={r['untranslated']}")

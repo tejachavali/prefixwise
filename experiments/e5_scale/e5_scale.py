@@ -157,6 +157,18 @@ def _tool_calls(calls, max_chars: int) -> list[dict] | None:
     return out or None
 
 
+def _drop_nulls(value):
+    """A tool schema without null-valued keys. A dataset stored as Parquet gives every tool the same
+    struct, so a key one tool lacks (a parameter another tool has, an enum) comes back as null on it;
+    a null where a schema belongs is not what the agent sent (and some providers' translations fail on
+    it: LiteLLM's Gemini one raises "'NoneType' object has no attribute 'get'")."""
+    if isinstance(value, dict):
+        return {k: _drop_nulls(v) for k, v in value.items() if v is not None}
+    if isinstance(value, list):
+        return [_drop_nulls(v) for v in value]
+    return value
+
+
 def _trace_tools(row: dict) -> list[dict] | None:
     tools = row.get("tools")
     if isinstance(tools, str):
@@ -166,7 +178,12 @@ def _trace_tools(row: dict) -> list[dict] | None:
             return None
     ok = [t for t in tools if isinstance(t, dict) and isinstance(t.get("function"), dict)
           and t["function"].get("name")] if isinstance(tools, list) else []
-    return [{"type": "function", "function": t["function"]} for t in ok] or None
+    out = [{"type": "function", "function": _drop_nulls(t["function"])} for t in ok] or None
+    TOOL_NULLS[0] += sum(1 for t, o in zip(ok, out or []) if o["function"] != t["function"])
+    return out
+
+
+TOOL_NULLS = [0]  # tools read with null-valued keys dropped (see _drop_nulls), for reports
 
 
 def normalize(row: dict, max_chars: int) -> list[dict] | None:
