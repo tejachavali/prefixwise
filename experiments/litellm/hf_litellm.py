@@ -72,41 +72,78 @@ def conversations(args):
     out = []
     for n, conv in enumerate(convs):
         msgs, tools = to_openai(conv, rng, e5_scale)
+        bad = pairing_problems(msgs)
+        if bad:  # a live API would reject it: a converter bug, not a property of the dataset
+            raise SystemExit(f"to_openai built an invalid conversation from row {n}: {bad[:3]}")
         if sum(1 for m in msgs if m["role"] == "assistant") >= 4:
             out.append((f"{args.dataset or 'generated'}#{n}", msgs, tools))
     return out
 
 
 def to_openai(conv, rng, e5):
-    """e5's {role, text, tool_calls, tool_call_id} list as OpenAI chat messages; a tool result with no
-    call in the trace gets one, so every result follows its call (as providers require)."""
+    """e5's {role, text, tool_calls, tool_call_id} list as OpenAI chat messages that a live API accepts:
+    every tool call is answered before the next message that is not a tool result, and every tool result
+    answers a call. Agent logs break this in ways the API never saw: Claude Code logs each content block of
+    one reply as its own assistant entry (merged back into one turn here), and a trace can miss a result
+    (answered "(no output)", as the agent's runtime would) or hold a result with no call (given one)."""
     tools = copy.deepcopy(getattr(conv, "tools", None)) or e5._tools(rng)
     system = next((m["text"] for m in conv if m["role"] == "system"), "You are a coding agent.")
     msgs = [{"role": "system", "content": system}]
-    open_calls, n = set(), 0
+    open_calls, n = [], 0
+
+    def close_open():
+        for cid in open_calls:
+            msgs.append({"role": "tool", "tool_call_id": cid, "content": "(no output)"})
+        open_calls.clear()
+
     for m in conv:
         role = m["role"]
         if role == "system":
             continue
-        if role == "assistant" and m.get("tool_calls"):
-            msgs.append({"role": "assistant", "content": m["text"] or None, "tool_calls": copy.deepcopy(m["tool_calls"])})
-            open_calls = {c["id"] for c in m["tool_calls"]}
-        elif role == "tool" and m.get("tool_call_id") in open_calls:
-            msgs.append({"role": "tool", "tool_call_id": m["tool_call_id"], "content": m["text"]})
-            open_calls.discard(m["tool_call_id"])
-        elif role == "tool":
+        if role == "tool":
+            if m.get("tool_call_id") in open_calls:
+                msgs.append({"role": "tool", "tool_call_id": m["tool_call_id"], "content": m["text"]})
+                open_calls.remove(m["tool_call_id"])
+                continue
+            close_open()
             n += 1
             cid = f"call_h{n}"
             msgs.append({"role": "assistant", "content": None, "tool_calls": [
                 {"id": cid, "type": "function", "function": {"name": tools[0]["function"]["name"], "arguments": "{}"}}]})
             msgs.append({"role": "tool", "tool_call_id": cid, "content": m["text"]})
+            continue
+        calls = copy.deepcopy(m.get("tool_calls") or [])
+        prev = msgs[-1]
+        if role == "assistant" and prev["role"] == "assistant":  # one reply logged as several entries
+            if m["text"]:
+                prev["content"] = f"{prev['content']}\n{m['text']}" if prev["content"] else m["text"]
+            if calls:
+                prev.setdefault("tool_calls", []).extend(calls)
+                open_calls.extend(c["id"] for c in calls)
+            continue
+        close_open()
+        if role == "assistant" and calls:
+            msgs.append({"role": "assistant", "content": m["text"] or None, "tool_calls": calls})
+            open_calls.extend(c["id"] for c in calls)
         else:
-            if open_calls:  # calls left unanswered in the trace: answer them, as the agent's runtime would
-                for cid in sorted(open_calls):
-                    msgs.append({"role": "tool", "tool_call_id": cid, "content": "(no output)"})
-                open_calls = set()
             msgs.append({"role": role, "content": m["text"]})
     return msgs, tools
+
+
+def pairing_problems(msgs):
+    """Where a live API would reject msgs: a tool call not answered before the next message that is not a
+    tool result, or a tool result that answers no open call. Empty when msgs is valid."""
+    bad, open_calls = [], set()
+    for i, m in enumerate(msgs):
+        if m["role"] == "tool":
+            if m.get("tool_call_id") not in open_calls:
+                bad.append(f"messages[{i}]: tool result with no open call")
+            open_calls.discard(m.get("tool_call_id"))
+            continue
+        if open_calls:
+            bad.append(f"messages[{i}]: tool calls {sorted(open_calls)} not answered")
+        open_calls = {c["id"] for c in m.get("tool_calls") or []}
+    return bad
 
 
 def steps_of(msgs, max_steps):
@@ -325,10 +362,50 @@ def run_replay(args):
         print("   ", json.dumps(p)[:400])
 
 
+def selftest():
+    """Agent-log shapes that break tool-call pairing, each converted and checked as a live API would: in
+    OpenAI form (pairing_problems) and in the Anthropic body (each tool_use answered in the next message)."""
+    import e5_scale
+
+    def call(cid):
+        return [{"id": cid, "type": "function", "function": {"name": "bash", "arguments": "{}"}}]
+
+    def res(cid):
+        return {"role": "tool", "text": "out " + cid, "tool_call_id": cid}
+    u, done = {"role": "user", "text": "go"}, {"role": "assistant", "text": "done"}
+    cases = {
+        "one reply logged as two entries": [u, {"role": "assistant", "text": "", "tool_calls": call("a")},
+                                            {"role": "assistant", "text": "", "tool_calls": call("b")},
+                                            res("a"), res("b"), done],
+        "text logged after the call": [u, {"role": "assistant", "text": "", "tool_calls": call("a")},
+                                       {"role": "assistant", "text": "looking"}, res("a"), done],
+        "a call with no result": [u, {"role": "assistant", "text": "", "tool_calls": call("a") + call("b")},
+                                  res("a"), {"role": "assistant", "text": "more", "tool_calls": call("c")},
+                                  res("c"), done],
+        "a result with no call": [u, {"role": "assistant", "text": "hm"}, res("z"), done],
+    }
+    failed = 0
+    for name, conv in cases.items():
+        msgs, tools = to_openai(e5_scale.Conv(conv), random.Random(1), e5_scale)
+        bad = pairing_problems(msgs)
+        for i in steps_of(msgs, 99):
+            _, out, _ = anthropic_request(msgs[:i], tools)
+            for j, m in enumerate(out):
+                ids = {b["id"] for b in m["content"] if isinstance(b, dict) and b.get("type") == "tool_use"} \
+                    if m["role"] == "assistant" and isinstance(m["content"], list) else set()
+                nxt = out[j + 1]["content"] if j + 1 < len(out) and isinstance(out[j + 1]["content"], list) else []
+                if ids - {b.get("tool_use_id") for b in nxt if isinstance(b, dict)}:
+                    bad.append(f"step {i}: Anthropic messages[{j}] tool_use not answered next")
+        failed += bool(bad)
+        print(f"{'ok' if not bad else 'FAIL':4s} {name}" + (f": {bad}" if bad else ""))
+    print(f"self-test: {'PASSED' if not failed else 'FAILED'} ({len(cases)} cases)")
+    sys.exit(1 if failed else 0)
+
+
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("test", choices=("translate", "replay"))
-    p.add_argument("out")
+    p.add_argument("test", choices=("translate", "replay", "selftest"))
+    p.add_argument("out", nargs="?")
     p.add_argument("--source", choices=("hf", "generated"), default="hf")
     p.add_argument("--dataset")
     p.add_argument("--config")
@@ -344,6 +421,10 @@ def main():
     p.add_argument("--kinds", default=",".join(CHANGES))
     p.add_argument("--max-calls", type=int, default=400)
     args = p.parse_args()
+    if args.test == "selftest":
+        selftest()
+    if not args.out:
+        sys.exit("OUT is needed")
     if args.source == "hf" and not args.dataset:
         sys.exit("--dataset is needed with --source hf")
     (run_translate if args.test == "translate" else run_replay)(args)

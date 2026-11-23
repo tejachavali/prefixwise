@@ -68,8 +68,8 @@ ROLE_MAP = {"human": "user", "user": "user", "gpt": "assistant", "assistant": "a
             "ipython": "tool"}
 
 
-MESSAGE_KEYS = ("messages", "conversations", "conversation", "trajectory", "turns", "dialog", "history",
-                "events", "steps", "transcript", "trace")
+MESSAGE_KEYS = ("messages", "messages_json", "conversations", "conversation", "trajectory", "turns", "dialog",
+                "history", "events", "steps", "transcript", "trace")
 
 
 def _message(m) -> dict | None:
