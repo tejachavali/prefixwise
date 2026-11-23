@@ -26,6 +26,11 @@ Usage:
   python hf_litellm.py replay OUT.json --source generated --limit 5      # no network: checks the script
 Options: --config NAME  --max-chars N (per message, default 4000)  --max-steps N (per conversation,
 default 16)  --routes chat-openai,chat-anthropic,messages-anthropic,messages-openai  --seed N
+
+Live (real providers, keys from the environment; costs money): add --live, and set the models
+(--anthropic-model, default anthropic/claude-haiku-4-5; --openai-model, default openai/gpt-4.1-mini), the
+changes to inject (--kinds, default all), and a hard cap on model calls (--max-calls, default 400). On a turn
+where nothing changed, a change cause is a false alarm; any other miss is counted as a provider miss.
 """
 import argparse
 import asyncio
@@ -47,6 +52,13 @@ sys.path.insert(0, os.path.join(HERE, "..", "e5_scale"))
 STAMP = " Current time: 2026-11-22T10:00:01Z."
 CHANGES = ("tool_reserialize", "volatile_system", "system_edit", "history_edit", "tool_result_mutation")
 LEGIT = {"first_write", "none", "below_min_prefix"}
+# A cause that says the request changed. On a turn where nothing changed, naming one is a false alarm. Any
+# other verdict on such a turn (routing_miss, ttl_expired, unknown, ...) says the provider did not read what
+# it held: no claim about the request, counted apart as a provider miss (live providers do this; the mock
+# does not).
+CHANGE_CAUSES = {"tool_reserialize", "tool_catalog_change", "volatile_system", "system_edit", "history_edit",
+                 "tool_result_mutation", "compaction_rewrite", "breakpoint_misplaced", "param_rendered",
+                 "retry_replay", "cache_key_changed", "thinking_stripped", "model_changed"}
 ROUTES = ("chat-openai", "chat-anthropic", "messages-anthropic", "messages-openai")
 
 
@@ -118,6 +130,8 @@ def run_translate(args):
     for t, r in results.items():
         print(f"  {t:18s} pairs={r['pairs']:5d} append-only={r['ok']:5d} broken={r['pairs'] - r['ok']:4d} "
               f"untranslated={r['untranslated']}")
+        for err, n in (r.get("errors") or {}).items():
+            print(f"      not translated x{n}: {err}")
 
 
 # -- replay ---------------------------------------------------------------------------------------
@@ -164,6 +178,9 @@ def anthropic_request(msgs, tools):
     return system, out, atools
 
 
+CALLS = [0]
+
+
 async def replay(base, route, name, msgs, tools, kind, rng, args):
     import litellm
     session = f"{route}|{kind}|{name}|{rng.random():.6f}"
@@ -186,25 +203,34 @@ async def replay(base, route, name, msgs, tools, kind, rng, args):
         j = next(i for i, m in enumerate(msgs) if m["role"] == "user")
         later = [n for n, s in enumerate(steps) if s > j]
         k = max(k, later[0])
+    if args.live and CALLS[0] + len(steps) > args.max_calls:
+        return None  # the cap would be passed: this replay is not run
+    endpoint = {} if args.live else {"api_key": "k"}
     for n, i in enumerate(steps):
         m, t = changed if k is not None and n >= k else (msgs, tools)
+        CALLS[0] += 1
         if route.startswith("chat-"):
-            kw = dict(messages=m[:i], tools=t, api_key="k", litellm_session_id=session, num_retries=0)
+            kw = dict(messages=m[:i], tools=t, litellm_session_id=session, num_retries=0, max_tokens=32, **endpoint)
             if route == "chat-openai":
-                kw.update(model="openai/gpt-4o", api_base=base + "/v1")
+                kw.update(model=args.openai_model)
+                if not args.live:
+                    kw["api_base"] = base + "/v1"
             else:
-                kw.update(model="anthropic/claude-haiku-4-5", api_base=base,
+                kw.update(model=args.anthropic_model,
                           cache_control_injection_points=[{"location": "message", "role": "system"},
                                                           {"location": "message", "index": -1}])
+                if not args.live:
+                    kw["api_base"] = base
             await litellm.acompletion(**kw)
         else:
             system, amsgs, atools = anthropic_request(m[:i], t)
-            model, api_base = (("anthropic/claude-haiku-4-5", base) if route == "messages-anthropic"
-                               else ("openai/gpt-4o", base + "/v1"))
-            await litellm.anthropic.messages.acreate(model=model, max_tokens=32, system=system, messages=amsgs,
-                                                     tools=atools, api_base=api_base, api_key="k",
-                                                     litellm_session_id=session)
-        await asyncio.sleep(0.005)
+            model = args.anthropic_model if route == "messages-anthropic" else args.openai_model
+            kw = dict(model=model, max_tokens=32, system=system, messages=amsgs, tools=atools,
+                      litellm_session_id=session, **endpoint)
+            if not args.live:
+                kw["api_base"] = base if route == "messages-anthropic" else base + "/v1"
+            await litellm.anthropic.messages.acreate(**kw)
+        await asyncio.sleep(1.0 if args.live else 0.005)
     return session, len(steps), k
 
 
@@ -227,7 +253,7 @@ def run_replay(args):
     async def main():
         for name, msgs, tools in convs:
             for route in routes:
-                for kind in ("unchanged",) + CHANGES:
+                for kind in ("unchanged",) + tuple(c for c in CHANGES if c in args.kinds.split(",")):
                     try:
                         r = await replay(base, route, name, msgs, tools, kind, rng, args)
                     except Exception as exc:  # noqa: BLE001 - a conversation LiteLLM rejects is reported
@@ -243,7 +269,8 @@ def run_replay(args):
     for route, kind, session, n_steps, k, error in cases:
         s = summary.setdefault(f"{route}/{kind}", {"replays": 0, "calls": 0, "recorded": 0, "false_alarms": 0,
                                                    "injected_named": 0, "injected_seen_cost_nothing": 0,
-                                                   "injected_below_minimum": 0, "injected_missed": 0, "errors": 0})
+                                                   "injected_below_minimum": 0, "injected_missed": 0,
+                                                   "provider_misses": 0, "errors": 0})
         if error:
             s["errors"] += 1
             if len(problems) < 30:
@@ -268,14 +295,18 @@ def run_replay(args):
                 s["injected_missed"] += 1
             elif cause in LEGIT:
                 continue
-            else:
+            elif cause in CHANGE_CAUSES or (k is not None and n > k and cause == kind):
                 s["false_alarms"] += 1
+            else:
+                s["provider_misses"] += 1
+                continue
             if len(problems) < 30:
                 problems.append({"session": session, "step": n, "injected_at": k, "expected": kind if n == k else None,
                                  "got": cause, "secondary": secondary, "prompt": prompt, "cached": cached,
                                  "evidence": (evidence or "")[:240]})
     import importlib.metadata as md
-    json.dump({"test": "replay", "dataset": args.dataset, "split": args.split, "config": args.config,
+    json.dump({"test": "replay", "live": args.live, "models": [args.anthropic_model, args.openai_model],
+               "calls_sent": CALLS[0], "dataset": args.dataset, "split": args.split, "config": args.config,
                "litellm": md.version("litellm"), "prefixwise": md.version("prefixwise"), "seed": args.seed,
                "conversations": len(convs), "seconds": round(time.time() - t0), "summary": summary,
                "problems": problems}, open(args.out, "w"), indent=1)
@@ -304,6 +335,11 @@ def main():
     p.add_argument("--max-steps", type=int, default=16)
     p.add_argument("--routes", default=",".join(ROUTES))
     p.add_argument("--seed", type=int, default=11)
+    p.add_argument("--live", action="store_true")
+    p.add_argument("--anthropic-model", default="anthropic/claude-haiku-4-5")
+    p.add_argument("--openai-model", default="openai/gpt-4.1-mini")
+    p.add_argument("--kinds", default=",".join(CHANGES))
+    p.add_argument("--max-calls", type=int, default=400)
     args = p.parse_args()
     if args.source == "hf" and not args.dataset:
         sys.exit("--dataset is needed with --source hf")
