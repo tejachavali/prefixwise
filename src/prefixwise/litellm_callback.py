@@ -393,77 +393,90 @@ def _anthropic_shaped(body) -> bool:
 
 
 def _plain_blocks(value):
-    """A block or list of blocks without its cache_control markers (DeepSeek ignores them)."""
+    """Blocks without their cache_control markers (DeepSeek ignores them). A marker is a key of a block
+    (a dict with a "type"); the same name inside a tool's input or schema is kept."""
     if isinstance(value, dict):
-        return {k: _plain_blocks(v) for k, v in value.items() if k != "cache_control"}
+        block = "type" in value
+        return {k: v if k in ("input", "input_schema") else _plain_blocks(v) for k, v in value.items()
+                if not (block and k == "cache_control")}
     if isinstance(value, list):
         return [_plain_blocks(v) for v in value]
     return value
 
 
 def _openai_from_anthropic(body: dict, model: str) -> dict:
-    """An Anthropic Messages body as a chat completion, block for block in the order sent, for a provider
-    whose Messages API caches the way an OpenAI-compatible API does (DeepSeek's). The system prompt becomes
-    the system message; tool_use blocks an assistant message's tool calls; tool_result blocks tool
-    messages, ahead of the rest of their user message as Anthropic places them; any other block a content
-    part (text and images as such, anything else, thinking included, as its JSON), so a change to any of
-    them still shows. Markers are dropped."""
-    def part(b):
-        if not isinstance(b, dict):
-            return {"type": "text", "text": json.dumps(b, ensure_ascii=False)}
-        if b.get("type") == "text":
-            return {"type": "text", "text": b.get("text", "")}
-        if b.get("type") == "image" and isinstance(b.get("source"), dict):
-            src = b["source"]
-            url = src.get("url") or f"data:{src.get('media_type', '')};base64,{src.get('data', '')}"
-            return {"type": "image_url", "image_url": {"url": url}}
-        return {"type": "text", "text": json.dumps(_plain_blocks(b), ensure_ascii=False)}
+    """An Anthropic Messages body as a chat completion, for a provider whose Messages API caches the way an
+    OpenAI-compatible API does (DeepSeek's). The system prompt becomes the system message, tool_use blocks
+    an assistant message's tool calls and tool_result blocks tool messages (ahead of the rest of their user
+    message, where Anthropic requires them). Text is one form whether it was sent as a string or as text
+    blocks, as Anthropic reads them ("x" and [{"type": "text", "text": "x"}] are the same prompt); a text
+    block with anything more (citations), an image and any other block (thinking included) keep their
+    whole JSON, so a change to any of them shows. Markers are dropped. Not seen: the order of text against
+    tool_use blocks within one assistant message."""
+    def parts(content):
+        if isinstance(content, str):
+            return [{"type": "text", "text": content}]
+        if not isinstance(content, list):
+            return [{"type": "text", "text": json.dumps(content, ensure_ascii=False)}]
+        out = []
+        for b in content:
+            if isinstance(b, dict) and b.get("type") == "text" and set(b) <= {"type", "text", "cache_control"}:
+                out.append({"type": "text", "text": b.get("text", "")})
+            elif (isinstance(b, dict) and b.get("type") == "image" and isinstance(b.get("source"), dict)
+                  and b["source"].get("type") in ("base64", "url")):
+                src = b["source"]
+                url = src.get("url") if src["type"] == "url" else \
+                    f"data:{src.get('media_type', '')};base64,{src.get('data', '')}"
+                out.append({"type": "image_url", "image_url": {"url": url}})
+            else:
+                out.append({"type": "text", "text": json.dumps(_plain_blocks(b), ensure_ascii=False)})
+        return out
 
     out = []
-    system = body.get("system")
-    if isinstance(system, str) and system:
-        out.append({"role": "system", "content": system})
-    elif isinstance(system, list) and system:
-        out.append({"role": "system", "content": [part(b) for b in system]})
+    if body.get("system"):
+        out.append({"role": "system", "content": parts(body["system"])})
     for m in body.get("messages") or []:
         if not isinstance(m, dict):
             continue
         role, content = m.get("role"), m.get("content")
-        if not isinstance(content, list):
-            out.append({"role": role, "content": content})
-            continue
-        if role == "assistant":
-            parts = [part(b) for b in content if not (isinstance(b, dict) and b.get("type") == "tool_use")]
+        if role == "assistant" and isinstance(content, list):
             calls = [{"id": b.get("id"), "type": "function",
-                      "function": {"name": b.get("name"),
-                                   "arguments": json.dumps(b.get("input") or {}, ensure_ascii=False)}}
+                      "function": {"name": b.get("name"), "arguments": json.dumps(b.get("input"), ensure_ascii=False)}}
                      for b in content if isinstance(b, dict) and b.get("type") == "tool_use"]
-            msg = {"role": "assistant", "content": parts or None}
+            msg = {"role": "assistant",
+                   "content": parts([b for b in content if not (isinstance(b, dict) and b.get("type") == "tool_use")])}
             if calls:
                 msg["tool_calls"] = calls
             out.append(msg)
+            continue
+        if not isinstance(content, list):
+            out.append({"role": role, "content": parts(content)})
             continue
         rest = []
         for b in content:
             if isinstance(b, dict) and b.get("type") == "tool_result":
                 result = b.get("content")
-                text = result if isinstance(result, str) else json.dumps(_plain_blocks(result), ensure_ascii=False)
-                if b.get("is_error"):
-                    text = "[error] " + text
+                text = result if isinstance(result, str) and not b.get("is_error") else \
+                    json.dumps(_plain_blocks({k: v for k, v in b.items() if k not in ("type", "tool_use_id")}),
+                               ensure_ascii=False)
                 out.append({"role": "tool", "tool_call_id": b.get("tool_use_id"), "content": text})
             else:
-                rest.append(part(b))
-        if rest:
-            out.append({"role": role, "content": rest})
+                rest.append(b)
+        if rest or not content:
+            out.append({"role": role, "content": parts(rest)})
     chat = {"model": model, "messages": out}
     tools = [t for t in body.get("tools") or [] if isinstance(t, dict)]
     if tools:
-        chat["tools"] = [{"type": "function", "function": {
-            "name": t.get("name"), "description": t.get("description", ""),
-            "parameters": _plain_blocks(t.get("input_schema") or {"type": "object"})}}
-            if "input_schema" in t or "type" not in t or t.get("type") == "custom"
-            else _plain_blocks(t) for t in tools]
-    for key in ("tool_choice", "thinking", "response_format"):
+        def tool(t):
+            if "input_schema" not in t and t.get("type") not in (None, "custom"):
+                return _plain_blocks(t)  # a server tool (web search): kept whole
+            extra = {k: v for k, v in t.items() if k not in ("type", "name", "description", "input_schema",
+                                                                 "cache_control")}
+            return {"type": "function", "function": {"name": t.get("name"), "description": t.get("description", ""),
+                                                     "parameters": t.get("input_schema") or {"type": "object"},
+                                                     **extra}}
+        chat["tools"] = [tool(t) for t in tools]
+    for key in ("tool_choice", "thinking", "output_format", "output_config"):
         if body.get(key) is not None:
             chat[key] = body[key]
     return chat

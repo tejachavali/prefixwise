@@ -32,14 +32,14 @@ response also reported `output_tokens` 16 (all of them thinking tokens) and `ser
 - **No write is reported.** `cache_creation_input_tokens` is 0 on every call, the first included.
 - **Usage is in Anthropic's fields, with Anthropic's meaning.** `input_tokens` excludes the cached tokens: turn 2
   is 220 uncached + 1,280 read = 1,500 tokens.
-- **Reads come in whole units.** 1,280 tokens were read of a prefix of about 1,500, and turn 3 read the same 1,280
-  although turn 2 had sent about 1,500. One conversation of one size cannot tell the unit (it is not 64 or 128
-  tokens) or the minimum cacheable length.
+- **Reads stop short of the prompt.** 1,280 tokens were read of a prefix of about 1,500, and turn 3 read the same
+  1,280 although turn 2 had sent about 1,500. 1,280 is a multiple of 64 and of 128, so the rows do not tell the
+  read unit, whether reads grow as a conversation grows, or the minimum cacheable length.
 - **LiteLLM passes it through unchanged.** The same fields and counts arrive through LiteLLM, give or take one or two
   tokens of request size.
 
-So DeepSeek's Messages API caches as its chat completions do: an automatic prefix cache, judged from what it
-read. Prefixwise now records these calls under those rules. It compares the body LiteLLM sent block for block as
+So DeepSeek's Messages API is an automatic prefix cache, judged from what it read; that it caches exactly as
+DeepSeek's chat completions do is an inference this probe did not test (no chat completions were sent). Prefixwise now records these calls under those rules. It compares the body LiteLLM sent block for block as
 a chat completion, takes `cache_read_input_tokens` as the cached tokens, and claims no minimum. MiniMax's own API
 is still not recorded.
 
@@ -73,7 +73,12 @@ Before this change, none of these calls was recorded.
 
 ## Limits
 
-- One model (`deepseek-flash`) and one short conversation.
+- One model (`deepseek-flash`) and one short conversation, not streamed.
+- Reads stopped about 200 tokens short of the previous prompt, more than the 128 tokens Prefixwise allows for
+  rounding on OpenAI-compatible APIs. A change in that unread tail is named as the cause although it cost little;
+  an unchanged turn is still a hit by the half-read rule. If reads lag further in long conversations, unchanged
+  turns could fall below half and read as misses: a longer probe (10 turns, growing, streamed, with DeepSeek's chat
+  completions and Prefixwise's verdicts) is to settle it.
 - The read unit, the minimum cacheable length and how long DeepSeek keeps a prefix are not measured, so a miss on
   an unchanged prefix is judged as on DeepSeek's chat completions: no minimum is claimed, and a short prompt that
   read nothing is `unknown`.
