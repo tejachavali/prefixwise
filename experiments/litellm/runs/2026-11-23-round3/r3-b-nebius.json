@@ -1,0 +1,42 @@
+{
+ "test": "translate",
+ "dataset": "nebius/SWE-rebench-openhands-trajectories",
+ "split": null,
+ "config": null,
+ "litellm": "1.110.2",
+ "conversations": 20,
+ "seconds": 46,
+ "tools_with_nulls_dropped": 100,
+ "results": {
+  "openai": {
+   "pairs": 300,
+   "ok": 300,
+   "untranslated": 0,
+   "examples": []
+  },
+  "anthropic": {
+   "pairs": 300,
+   "ok": 300,
+   "untranslated": 0,
+   "examples": []
+  },
+  "bedrock-converse": {
+   "pairs": 300,
+   "ok": 300,
+   "untranslated": 0,
+   "examples": []
+  },
+  "bedrock-invoke": {
+   "pairs": 300,
+   "ok": 300,
+   "untranslated": 0,
+   "examples": []
+  },
+  "gemini": {
+   "pairs": 300,
+   "ok": 300,
+   "untranslated": 0,
+   "examples": []
+  }
+ }
+}

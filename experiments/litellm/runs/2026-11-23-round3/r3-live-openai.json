@@ -1,0 +1,267 @@
+{
+ "test": "replay",
+ "live": true,
+ "models": [
+  "anthropic/claude-haiku-4-5",
+  "openai/gpt-4.1-mini"
+ ],
+ "calls_sent": 64,
+ "dataset": "nvidia/Open-SWE-Traces",
+ "split": "claudecode",
+ "config": null,
+ "litellm": "1.110.2",
+ "prefixwise": "0.12.4",
+ "seed": 11,
+ "conversations": 4,
+ "seconds": 76,
+ "summary": {
+  "messages-openai/unchanged": {
+   "replays": 0,
+   "calls": 0,
+   "recorded": 0,
+   "false_alarms": 0,
+   "injected_named": 0,
+   "injected_seen_cost_nothing": 0,
+   "injected_below_minimum": 0,
+   "injected_missed": 0,
+   "provider_misses": 0,
+   "errors": 4
+  },
+  "messages-openai/tool_reserialize": {
+   "replays": 0,
+   "calls": 0,
+   "recorded": 0,
+   "false_alarms": 0,
+   "injected_named": 0,
+   "injected_seen_cost_nothing": 0,
+   "injected_below_minimum": 0,
+   "injected_missed": 0,
+   "provider_misses": 0,
+   "errors": 4
+  },
+  "messages-openai/system_edit": {
+   "replays": 0,
+   "calls": 0,
+   "recorded": 0,
+   "false_alarms": 0,
+   "injected_named": 0,
+   "injected_seen_cost_nothing": 0,
+   "injected_below_minimum": 0,
+   "injected_missed": 0,
+   "provider_misses": 0,
+   "errors": 4
+  },
+  "messages-openai/history_edit": {
+   "replays": 0,
+   "calls": 0,
+   "recorded": 0,
+   "false_alarms": 0,
+   "injected_named": 0,
+   "injected_seen_cost_nothing": 0,
+   "injected_below_minimum": 0,
+   "injected_missed": 0,
+   "provider_misses": 0,
+   "errors": 4
+  },
+  "chat-openai/unchanged": {
+   "replays": 0,
+   "calls": 0,
+   "recorded": 0,
+   "false_alarms": 0,
+   "injected_named": 0,
+   "injected_seen_cost_nothing": 0,
+   "injected_below_minimum": 0,
+   "injected_missed": 0,
+   "provider_misses": 0,
+   "errors": 4
+  },
+  "chat-openai/tool_reserialize": {
+   "replays": 0,
+   "calls": 0,
+   "recorded": 0,
+   "false_alarms": 0,
+   "injected_named": 0,
+   "injected_seen_cost_nothing": 0,
+   "injected_below_minimum": 0,
+   "injected_missed": 0,
+   "provider_misses": 0,
+   "errors": 4
+  },
+  "chat-openai/system_edit": {
+   "replays": 0,
+   "calls": 0,
+   "recorded": 0,
+   "false_alarms": 0,
+   "injected_named": 0,
+   "injected_seen_cost_nothing": 0,
+   "injected_below_minimum": 0,
+   "injected_missed": 0,
+   "provider_misses": 0,
+   "errors": 4
+  },
+  "chat-openai/history_edit": {
+   "replays": 0,
+   "calls": 0,
+   "recorded": 0,
+   "false_alarms": 0,
+   "injected_named": 0,
+   "injected_seen_cost_nothing": 0,
+   "injected_below_minimum": 0,
+   "injected_missed": 0,
+   "provider_misses": 0,
+   "errors": 4
+  }
+ },
+ "problems": [
+  {
+   "route": "messages-openai",
+   "kind": "unchanged",
+   "error": "BadRequestError: litellm.BadRequestError: OpenAIException - {\n  \"error\": {\n    \"message\": \"No tool output found for function call chatcmpl-tool-bde224a727d2d79d.\",\n    \"type\": \""
+  },
+  {
+   "route": "messages-openai",
+   "kind": "tool_reserialize",
+   "error": "BadRequestError: litellm.BadRequestError: OpenAIException - {\n  \"error\": {\n    \"message\": \"No tool output found for function call chatcmpl-tool-bde224a727d2d79d.\",\n    \"type\": \""
+  },
+  {
+   "route": "messages-openai",
+   "kind": "system_edit",
+   "error": "BadRequestError: litellm.BadRequestError: OpenAIException - {\n  \"error\": {\n    \"message\": \"No tool output found for function call chatcmpl-tool-bde224a727d2d79d.\",\n    \"type\": \""
+  },
+  {
+   "route": "messages-openai",
+   "kind": "history_edit",
+   "error": "BadRequestError: litellm.BadRequestError: OpenAIException - {\n  \"error\": {\n    \"message\": \"No tool output found for function call chatcmpl-tool-bde224a727d2d79d.\",\n    \"type\": \""
+  },
+  {
+   "route": "chat-openai",
+   "kind": "unchanged",
+   "error": "BadRequestError: litellm.BadRequestError: OpenAIException - An assistant message with 'tool_calls' must be followed by tool messages responding to each 'tool_call_id'. The follo"
+  },
+  {
+   "route": "chat-openai",
+   "kind": "tool_reserialize",
+   "error": "BadRequestError: litellm.BadRequestError: OpenAIException - An assistant message with 'tool_calls' must be followed by tool messages responding to each 'tool_call_id'. The follo"
+  },
+  {
+   "route": "chat-openai",
+   "kind": "system_edit",
+   "error": "BadRequestError: litellm.BadRequestError: OpenAIException - An assistant message with 'tool_calls' must be followed by tool messages responding to each 'tool_call_id'. The follo"
+  },
+  {
+   "route": "chat-openai",
+   "kind": "history_edit",
+   "error": "BadRequestError: litellm.BadRequestError: OpenAIException - An assistant message with 'tool_calls' must be followed by tool messages responding to each 'tool_call_id'. The follo"
+  },
+  {
+   "route": "messages-openai",
+   "kind": "unchanged",
+   "error": "BadRequestError: litellm.BadRequestError: OpenAIException - {\n  \"error\": {\n    \"message\": \"No tool output found for function call chatcmpl-tool-81c7d3c2ed58b56c.\",\n    \"type\": \""
+  },
+  {
+   "route": "messages-openai",
+   "kind": "tool_reserialize",
+   "error": "BadRequestError: litellm.BadRequestError: OpenAIException - {\n  \"error\": {\n    \"message\": \"No tool output found for function call chatcmpl-tool-81c7d3c2ed58b56c.\",\n    \"type\": \""
+  },
+  {
+   "route": "messages-openai",
+   "kind": "system_edit",
+   "error": "BadRequestError: litellm.BadRequestError: OpenAIException - {\n  \"error\": {\n    \"message\": \"No tool output found for function call chatcmpl-tool-81c7d3c2ed58b56c.\",\n    \"type\": \""
+  },
+  {
+   "route": "messages-openai",
+   "kind": "history_edit",
+   "error": "BadRequestError: litellm.BadRequestError: OpenAIException - {\n  \"error\": {\n    \"message\": \"No tool output found for function call chatcmpl-tool-81c7d3c2ed58b56c.\",\n    \"type\": \""
+  },
+  {
+   "route": "chat-openai",
+   "kind": "unchanged",
+   "error": "BadRequestError: litellm.BadRequestError: OpenAIException - An assistant message with 'tool_calls' must be followed by tool messages responding to each 'tool_call_id'. The follo"
+  },
+  {
+   "route": "chat-openai",
+   "kind": "tool_reserialize",
+   "error": "BadRequestError: litellm.BadRequestError: OpenAIException - An assistant message with 'tool_calls' must be followed by tool messages responding to each 'tool_call_id'. The follo"
+  },
+  {
+   "route": "chat-openai",
+   "kind": "system_edit",
+   "error": "BadRequestError: litellm.BadRequestError: OpenAIException - An assistant message with 'tool_calls' must be followed by tool messages responding to each 'tool_call_id'. The follo"
+  },
+  {
+   "route": "chat-openai",
+   "kind": "history_edit",
+   "error": "BadRequestError: litellm.BadRequestError: OpenAIException - An assistant message with 'tool_calls' must be followed by tool messages responding to each 'tool_call_id'. The follo"
+  },
+  {
+   "route": "messages-openai",
+   "kind": "unchanged",
+   "error": "BadRequestError: litellm.BadRequestError: OpenAIException - {\n  \"error\": {\n    \"message\": \"No tool output found for function call chatcmpl-tool-b5f19334eac1df7b.\",\n    \"type\": \""
+  },
+  {
+   "route": "messages-openai",
+   "kind": "tool_reserialize",
+   "error": "BadRequestError: litellm.BadRequestError: OpenAIException - {\n  \"error\": {\n    \"message\": \"No tool output found for function call chatcmpl-tool-b5f19334eac1df7b.\",\n    \"type\": \""
+  },
+  {
+   "route": "messages-openai",
+   "kind": "system_edit",
+   "error": "BadRequestError: litellm.BadRequestError: OpenAIException - {\n  \"error\": {\n    \"message\": \"No tool output found for function call chatcmpl-tool-b5f19334eac1df7b.\",\n    \"type\": \""
+  },
+  {
+   "route": "messages-openai",
+   "kind": "history_edit",
+   "error": "BadRequestError: litellm.BadRequestError: OpenAIException - {\n  \"error\": {\n    \"message\": \"No tool output found for function call chatcmpl-tool-b5f19334eac1df7b.\",\n    \"type\": \""
+  },
+  {
+   "route": "chat-openai",
+   "kind": "unchanged",
+   "error": "BadRequestError: litellm.BadRequestError: OpenAIException - An assistant message with 'tool_calls' must be followed by tool messages responding to each 'tool_call_id'. The follo"
+  },
+  {
+   "route": "chat-openai",
+   "kind": "tool_reserialize",
+   "error": "BadRequestError: litellm.BadRequestError: OpenAIException - An assistant message with 'tool_calls' must be followed by tool messages responding to each 'tool_call_id'. The follo"
+  },
+  {
+   "route": "chat-openai",
+   "kind": "system_edit",
+   "error": "BadRequestError: litellm.BadRequestError: OpenAIException - An assistant message with 'tool_calls' must be followed by tool messages responding to each 'tool_call_id'. The follo"
+  },
+  {
+   "route": "chat-openai",
+   "kind": "history_edit",
+   "error": "BadRequestError: litellm.BadRequestError: OpenAIException - An assistant message with 'tool_calls' must be followed by tool messages responding to each 'tool_call_id'. The follo"
+  },
+  {
+   "route": "messages-openai",
+   "kind": "unchanged",
+   "error": "BadRequestError: litellm.BadRequestError: OpenAIException - {\n  \"error\": {\n    \"message\": \"No tool output found for function call chatcmpl-tool-b30314ba0ddc156c.\",\n    \"type\": \""
+  },
+  {
+   "route": "messages-openai",
+   "kind": "tool_reserialize",
+   "error": "BadRequestError: litellm.BadRequestError: OpenAIException - {\n  \"error\": {\n    \"message\": \"No tool output found for function call chatcmpl-tool-b30314ba0ddc156c.\",\n    \"type\": \""
+  },
+  {
+   "route": "messages-openai",
+   "kind": "system_edit",
+   "error": "BadRequestError: litellm.BadRequestError: OpenAIException - {\n  \"error\": {\n    \"message\": \"No tool output found for function call chatcmpl-tool-b30314ba0ddc156c.\",\n    \"type\": \""
+  },
+  {
+   "route": "messages-openai",
+   "kind": "history_edit",
+   "error": "BadRequestError: litellm.BadRequestError: OpenAIException - {\n  \"error\": {\n    \"message\": \"No tool output found for function call chatcmpl-tool-b30314ba0ddc156c.\",\n    \"type\": \""
+  },
+  {
+   "route": "chat-openai",
+   "kind": "unchanged",
+   "error": "BadRequestError: litellm.BadRequestError: OpenAIException - An assistant message with 'tool_calls' must be followed by tool messages responding to each 'tool_call_id'. The follo"
+  },
+  {
+   "route": "chat-openai",
+   "kind": "tool_reserialize",
+   "error": "BadRequestError: litellm.BadRequestError: OpenAIException - An assistant message with 'tool_calls' must be followed by tool messages responding to each 'tool_call_id'. The follo"
+  }
+ ]
+}

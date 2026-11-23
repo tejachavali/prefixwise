@@ -1,0 +1,11 @@
+{
+ "test": "translate",
+ "dataset": "nebius/SWE-agent-trajectories",
+ "split": null,
+ "config": null,
+ "litellm": "1.110.2",
+ "conversations": 0,
+ "seconds": 5,
+ "tools_with_nulls_dropped": 0,
+ "results": {}
+}

@@ -69,44 +69,116 @@ def conversations(args):
     convs = e5_scale.load(SimpleNamespace(source=args.source, dataset=args.dataset, config=args.config,
                                           split=args.split, limit=args.limit, max_chars=args.max_chars,
                                           turns=8), rng)
-    out = []
+    out, invalid = [], []
     for n, conv in enumerate(convs):
         msgs, tools = to_openai(conv, rng, e5_scale)
+        bad = pairing_problems(msgs)
+        if bad:  # a live API would reject it: skipped, and reported (a converter gap, not the dataset's)
+            invalid.append((n, bad[:3]))
+            continue
         if sum(1 for m in msgs if m["role"] == "assistant") >= 4:
             out.append((f"{args.dataset or 'generated'}#{n}", msgs, tools))
+    if invalid:
+        print(f"skipped {len(invalid)} conversations a live API would reject, "
+              f"e.g. row {invalid[0][0]}: {invalid[0][1]}")
+    INVALID[0] = len(invalid)
     return out
 
 
+INVALID = [0]  # conversations conversations() skipped as invalid for a live API
+
+
 def to_openai(conv, rng, e5):
-    """e5's {role, text, tool_calls, tool_call_id} list as OpenAI chat messages; a tool result with no
-    call in the trace gets one, so every result follows its call (as providers require)."""
+    """e5's {role, text, tool_calls, tool_call_id} list as OpenAI chat messages that a live API accepts:
+    the conversation opens with a user message, tool-call ids are unique in it, every tool call is answered
+    before the next message that is not a tool result, and every tool result answers a call. Agent logs
+    break this in ways the API never saw: Claude Code logs each content block of one reply as its own
+    assistant entry (merged back into one turn here); a dataset with no ids gets ids numbered per message
+    (call_t0 in every turn, renamed here); a trace can miss a result (answered "(no output)", as the
+    agent's runtime would) or hold a result with no open call (given a call of the first tool)."""
     tools = copy.deepcopy(getattr(conv, "tools", None)) or e5._tools(rng)
     system = next((m["text"] for m in conv if m["role"] == "system"), "You are a coding agent.")
     msgs = [{"role": "system", "content": system}]
-    open_calls, n = set(), 0
+    open_calls, used, n = [], set(), 0  # open_calls: (id in the trace, id sent), in call order
+
+    def unique(cid):
+        out, k = cid, 1
+        while out in used:
+            k += 1
+            out = f"{cid}-{k}"  # [A-Za-z0-9_-], the ids Anthropic accepts
+        used.add(out)
+        return out
+
+    def close_open():
+        for _, sent in open_calls:
+            msgs.append({"role": "tool", "tool_call_id": sent, "content": "(no output)"})
+        open_calls.clear()
+
+    started = False
     for m in conv:
         role = m["role"]
-        if role == "system":
+        if role == "system" or (not started and role != "user"):  # nothing before the first user message
             continue
-        if role == "assistant" and m.get("tool_calls"):
-            msgs.append({"role": "assistant", "content": m["text"] or None, "tool_calls": copy.deepcopy(m["tool_calls"])})
-            open_calls = {c["id"] for c in m["tool_calls"]}
-        elif role == "tool" and m.get("tool_call_id") in open_calls:
-            msgs.append({"role": "tool", "tool_call_id": m["tool_call_id"], "content": m["text"]})
-            open_calls.discard(m["tool_call_id"])
-        elif role == "tool":
+        started = True
+        if role == "tool":
+            match = next((c for c in open_calls if c[0] == m.get("tool_call_id")), None)
+            if match:
+                msgs.append({"role": "tool", "tool_call_id": match[1], "content": m["text"]})
+                open_calls.remove(match)
+                continue
+            close_open()
             n += 1
-            cid = f"call_h{n}"
+            cid = unique(f"call_h{n}")
             msgs.append({"role": "assistant", "content": None, "tool_calls": [
                 {"id": cid, "type": "function", "function": {"name": tools[0]["function"]["name"], "arguments": "{}"}}]})
             msgs.append({"role": "tool", "tool_call_id": cid, "content": m["text"]})
+            continue
+        calls = []
+        for c in copy.deepcopy(m.get("tool_calls") or []):
+            sent = unique(c["id"])
+            open_calls.append((c["id"], sent))
+            calls.append({**c, "id": sent})
+        prev = msgs[-1]
+        if role == "assistant" and prev["role"] == "assistant":  # one reply logged as several entries
+            if m["text"]:
+                prev["content"] = f"{prev['content']}\n{m['text']}" if prev["content"] else m["text"]
+            if calls:
+                prev.setdefault("tool_calls", []).extend(calls)
+            continue
+        if calls:  # the calls just opened belong to this message: close only the earlier ones
+            earlier, open_calls[:] = open_calls[:-len(calls)], open_calls[-len(calls):]
+            for _, sent in earlier:
+                msgs.append({"role": "tool", "tool_call_id": sent, "content": "(no output)"})
         else:
-            if open_calls:  # calls left unanswered in the trace: answer them, as the agent's runtime would
-                for cid in sorted(open_calls):
-                    msgs.append({"role": "tool", "tool_call_id": cid, "content": "(no output)"})
-                open_calls = set()
+            close_open()
+        if role == "assistant" and calls:
+            msgs.append({"role": "assistant", "content": m["text"] or None, "tool_calls": calls})
+        else:
             msgs.append({"role": role, "content": m["text"]})
     return msgs, tools
+
+
+def pairing_problems(msgs):
+    """Where a live API would reject msgs: no user message first, a tool-call id used twice, a tool call not
+    answered before the next message that is not a tool result, or a tool result that answers no open call.
+    Empty when msgs is valid."""
+    bad, open_calls, seen = [], set(), set()
+    if len(msgs) < 2 or msgs[1]["role"] != "user":
+        bad.append("the first message after the system prompt is not a user message")
+    for i, m in enumerate(msgs):
+        for c in m.get("tool_calls") or []:
+            if c["id"] in seen:
+                bad.append(f"messages[{i}]: tool-call id {c['id']} used twice")
+            seen.add(c["id"])
+        if m["role"] == "tool":
+            if m.get("tool_call_id") not in open_calls:
+                bad.append(f"messages[{i}]: tool result with no open call")
+            open_calls.discard(m.get("tool_call_id"))
+            continue
+        if open_calls:
+            bad.append(f"messages[{i}]: tool calls {sorted(open_calls)} not answered")
+        open_calls = {c["id"] for c in m.get("tool_calls") or []}
+    return bad
 
 
 def steps_of(msgs, max_steps):
@@ -117,6 +189,7 @@ def steps_of(msgs, max_steps):
 # -- translate ------------------------------------------------------------------------------------
 
 def run_translate(args):
+    import e5_scale
     import translate_b as tb  # registers its body-capturing callback
     results, t0, convs = {}, time.time(), conversations(args)
     for name, msgs, tools in convs:
@@ -125,8 +198,11 @@ def run_translate(args):
     import importlib.metadata as md
     json.dump({"test": "translate", "dataset": args.dataset, "split": args.split, "config": args.config,
                "litellm": md.version("litellm"), "conversations": len(convs), "seconds": round(time.time() - t0),
+               "tools_with_nulls_dropped": e5_scale.TOOL_NULLS[0],
+               "skipped_invalid": INVALID[0],
                "results": results}, open(args.out, "w"), indent=1)
-    print(f"{args.dataset} ({args.split}): {len(convs)} conversations")
+    print(f"{args.dataset} ({args.split}): {len(convs)} conversations; tools read with null keys dropped: "
+          f"{e5_scale.TOOL_NULLS[0]}")
     for t, r in results.items():
         print(f"  {t:18s} pairs={r['pairs']:5d} append-only={r['ok']:5d} broken={r['pairs'] - r['ok']:4d} "
               f"untranslated={r['untranslated']}")
@@ -309,7 +385,7 @@ def run_replay(args):
                "calls_sent": CALLS[0], "dataset": args.dataset, "split": args.split, "config": args.config,
                "litellm": md.version("litellm"), "prefixwise": md.version("prefixwise"), "seed": args.seed,
                "conversations": len(convs), "seconds": round(time.time() - t0), "summary": summary,
-               "problems": problems}, open(args.out, "w"), indent=1)
+               "skipped_invalid": INVALID[0], "problems": problems}, open(args.out, "w"), indent=1)
     print(f"{args.dataset or 'generated'} ({args.split}): {len(convs)} conversations, {round(time.time() - t0)} s")
     total = {}
     for key, s in summary.items():
@@ -322,10 +398,73 @@ def run_replay(args):
         print("   ", json.dumps(p)[:400])
 
 
+def selftest():
+    """Agent-log shapes that break tool-call pairing, each converted and checked as a live API would: in
+    OpenAI form (pairing_problems) and in the Anthropic body (each tool_use answered in the next message)."""
+    import e5_scale
+
+    def call(cid):
+        return [{"id": cid, "type": "function", "function": {"name": "bash", "arguments": "{}"}}]
+
+    def res(cid):
+        return {"role": "tool", "text": "out " + cid, "tool_call_id": cid}
+    u, done = {"role": "user", "text": "go"}, {"role": "assistant", "text": "done"}
+    cases = {
+        "one reply logged as two entries": [u, {"role": "assistant", "text": "", "tool_calls": call("a")},
+                                            {"role": "assistant", "text": "", "tool_calls": call("b")},
+                                            res("a"), res("b"), done],
+        "text logged after the call": [u, {"role": "assistant", "text": "", "tool_calls": call("a")},
+                                       {"role": "assistant", "text": "looking"}, res("a"), done],
+        "a call with no result": [u, {"role": "assistant", "text": "", "tool_calls": call("a") + call("b")},
+                                  res("a"), {"role": "assistant", "text": "more", "tool_calls": call("c")},
+                                  res("c"), done],
+        "a result with no call": [u, {"role": "assistant", "text": "hm"}, res("z"), done],
+        "the same id in every turn (a dataset with no ids)": [
+            u, {"role": "assistant", "text": "", "tool_calls": call("call_t0")}, res("call_t0"),
+            {"role": "assistant", "text": "", "tool_calls": call("call_t0")}, res("call_t0"), done],
+        "one reply as two entries, both id call_t0": [
+            u, {"role": "assistant", "text": "", "tool_calls": call("call_t0")},
+            {"role": "assistant", "text": "", "tool_calls": call("call_t0")}, res("call_t0"), res("call_t0"), done],
+        "an assistant entry before the first user message": [
+            {"role": "assistant", "text": "hello"}, res("q"), u,
+            {"role": "assistant", "text": "", "tool_calls": call("a")}, res("a"), done],
+    }
+    failed = 0
+    for name, conv in cases.items():
+        try:
+            bad = _selftest_case(conv, e5_scale)
+        except Exception as exc:  # noqa: BLE001 - a crash is a failed case, and the next cases still run
+            bad = [f"{type(exc).__name__}: {exc}"]
+        failed += bool(bad)
+        print(f"{'ok' if not bad else 'FAIL':4s} {name}" + (f": {bad}" if bad else ""))
+    print(f"self-test: {'PASSED' if not failed else 'FAILED'} ({len(cases)} cases)")
+    sys.exit(1 if failed else 0)
+
+
+def _selftest_case(conv, e5_scale):
+    msgs, tools = to_openai(e5_scale.Conv(conv), random.Random(1), e5_scale)
+    bad = pairing_problems(msgs)
+    for i in steps_of(msgs, 99):
+        _, out, _ = anthropic_request(msgs[:i], tools)
+        for j, m in enumerate(out):
+            ids = {b["id"] for b in m["content"] if isinstance(b, dict) and b.get("type") == "tool_use"} \
+                if m["role"] == "assistant" and isinstance(m["content"], list) else set()
+            nxt = out[j + 1]["content"] if j + 1 < len(out) and isinstance(out[j + 1]["content"], list) else []
+            if ids - {b.get("tool_use_id") for b in nxt if isinstance(b, dict)}:
+                bad.append(f"step {i}: Anthropic messages[{j}] tool_use not answered next")
+        all_ids = [b["id"] for m in out if isinstance(m["content"], list) for b in m["content"]
+                   if isinstance(b, dict) and b.get("type") == "tool_use"]
+        if len(all_ids) != len(set(all_ids)):
+            bad.append(f"step {i}: Anthropic tool_use ids repeated")
+        if not out or out[0]["role"] != "user":
+            bad.append(f"step {i}: Anthropic messages do not start with a user message")
+    return bad
+
+
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("test", choices=("translate", "replay"))
-    p.add_argument("out")
+    p.add_argument("test", choices=("translate", "replay", "selftest"))
+    p.add_argument("out", nargs="?")
     p.add_argument("--source", choices=("hf", "generated"), default="hf")
     p.add_argument("--dataset")
     p.add_argument("--config")
@@ -341,6 +480,10 @@ def main():
     p.add_argument("--kinds", default=",".join(CHANGES))
     p.add_argument("--max-calls", type=int, default=400)
     args = p.parse_args()
+    if args.test == "selftest":
+        selftest()
+    if not args.out:
+        sys.exit("OUT is needed")
     if args.source == "hf" and not args.dataset:
         sys.exit("--dataset is needed with --source hf")
     (run_translate if args.test == "translate" else run_replay)(args)
