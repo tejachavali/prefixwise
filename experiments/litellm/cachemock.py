@@ -15,6 +15,9 @@ updates its cache when the request arrives (no background recording, so no races
   "claude", usage with prompt_tokens_details.cache_write_tokens), and Bedrock Converse
   (/model/<id>/converse, a cachePoint marks the block before it; not streamed).
 - OpenAI Responses API (/v1/responses): automatic, as chat completions; streamed or not.
+- DeepSeek's Anthropic-compatible API (/v1/messages with a model named deepseek-*): Anthropic's format and
+  usage fields, but automatic caching as chat completions, markers ignored and no writes reported, as
+  DeepSeek's own API does (experiments/litellm/runs/2026-11-23-deepseek-probe.md).
 - Streams: OpenAI sends a final usage chunk only when stream_options.include_usage is true;
   Anthropic sends usage in message_start and message_delta, as the real APIs do.
 - Optional tool calls (--tool-turns N): answer the first N turns of a conversation that offers
@@ -154,7 +157,9 @@ class H(BaseHTTPRequestHandler):
         responses = path.endswith("/responses")
         # Claude by any route caches only at its breakpoints (cache_control, or a Converse cachePoint)
         anthropic = path.endswith("/messages") or converse or "claude" in str(body.get("model", "")).lower()
-        prompt, read, written = serve_cache(body, anthropic)
+        # DeepSeek's Messages API: Anthropic's format, but an automatic cache that reports no writes
+        automatic = path.endswith("/messages") and str(body.get("model", "")).lower().startswith("deepseek")
+        prompt, read, written = serve_cache(body, anthropic and not automatic)
         if converse:
             fresh = prompt - read - written
             return self.send(200, {"output": {"message": {"role": "assistant", "content": [{"text": "done"}]}},

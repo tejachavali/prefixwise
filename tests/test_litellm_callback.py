@@ -1,6 +1,7 @@
 """PrefixwiseCallback: real LiteLLM calls to a mock server; the ledger shows what was recorded."""
 
 import asyncio
+import json
 import threading
 import time
 
@@ -817,16 +818,171 @@ def test_another_model_through_the_messages_api_is_recorded_only_as_a_chat_compl
     vllm = {"custom_llm_provider": "hosted_vllm", "metadata": {}, "litellm_session_id": "v1"}
     c._record(_messages_kw(sent=chat, model="qwen3", litellm_params=vllm), _response(usage, "qwen3"), None, None)
     assert [(p, b) for p, b, _, _ in spy.calls] == [("openai", chat)]
-    # The provider's own Messages API (DeepSeek's): Anthropic's format, not Anthropic's cache rules,
-    # with or without a system prompt (LiteLLM says which route it took).
-    deepseek = {"custom_llm_provider": "deepseek", "metadata": {}, "litellm_session_id": "d1"}
-    for native in ({"model": "deepseek-chat", "system": "s", "messages": [{"role": "user", "content": "hi"}]},
-                   {"model": "deepseek-chat", "max_tokens": 20, "messages": [{"role": "user", "content": "hi"}]}):
-        c._record(_messages_kw(sent=native, model="deepseek-chat", litellm_params=deepseek),
-                  _response(usage, "deepseek-chat"), None, None)
+    # The provider's own Messages API (MiniMax's): Anthropic's format, cache rules not known to be
+    # Anthropic's or automatic, with or without a system prompt (LiteLLM says which route it took).
+    minimax = {"custom_llm_provider": "minimax", "metadata": {}, "litellm_session_id": "x1"}
+    for native in ({"model": "MiniMax-M2", "system": "s", "messages": [{"role": "user", "content": "hi"}]},
+                   {"model": "MiniMax-M2", "max_tokens": 20, "messages": [{"role": "user", "content": "hi"}]}):
+        c._record(_messages_kw(sent=native, model="MiniMax-M2", litellm_params=minimax),
+                  _response(usage, "MiniMax-M2"), None, None)
     # No body at all (its kept copy let go): nothing to classify faithfully.
     c._record(_messages_kw(), _response(usage), None, None)
     assert len(spy.calls) == 1
+
+
+_DS_TURN = {"model": "deepseek-flash", "max_tokens": 16,
+            "system": [{"type": "text", "text": "You are careful.", "cache_control": {"type": "ephemeral"}}],
+            "tools": [{"name": "read", "description": "read a file",
+                       "input_schema": {"type": "object", "properties": {"path": {"type": "string"}}}}],
+            "messages": [{"role": "user", "content": "Fix calc.py."},
+                         {"role": "assistant", "content": [
+                             {"type": "thinking", "thinking": "look first", "signature": "s1"},
+                             {"type": "text", "text": "Reading it."},
+                             {"type": "tool_use", "id": "t1", "name": "read", "input": {"path": "calc.py"}}]},
+                         {"role": "user", "content": [
+                             {"type": "tool_result", "tool_use_id": "t1", "content": "def add(a, b): return a - b"},
+                             {"type": "text", "text": "Go on.", "cache_control": {"type": "ephemeral"}}]}]}
+
+
+def test_deepseeks_own_messages_api_is_judged_as_the_automatic_cache_it_is():
+    # DeepSeek's Anthropic-compatible API caches automatically, ignores markers and reports no writes
+    # (probe, 2026-11-23): recorded as the OpenAI-compatible API it caches like, its reads as cached tokens.
+    spy = _Spy()
+    c = PrefixwiseCallback(recorder=spy)
+    # The usage LiteLLM 1.110.2 hands the callback for a DeepSeek anthropic_messages call: its ModelResponse.
+    usage = {"prompt_tokens": 1500, "completion_tokens": 16, "prompt_tokens_details": {"cached_tokens": 1280},
+             "cache_read_input_tokens": 1280, "cache_creation_input_tokens": 0}
+    deepseek = {"custom_llm_provider": "deepseek", "metadata": {}, "litellm_session_id": "d1"}
+    c._record(_messages_kw(sent=_DS_TURN, model="deepseek/deepseek-flash", litellm_params=deepseek),
+              _response(usage, "deepseek-flash"), None, None)
+    provider, body, response, kw = spy.calls[0]
+    assert provider == "openai" and kw.get("api", "chat") == "chat" and kw["session_id"] == "d1"
+    assert response["usage"] == {"prompt_tokens": 1500, "completion_tokens": 16,
+                                 "prompt_tokens_details": {"cached_tokens": 1280}}
+    assert body["model"] == "deepseek-flash"
+    assert body["messages"][0] == {"role": "system", "content": [{"type": "text", "text": "You are careful."}]}
+    assert body["messages"][1] == {"role": "user", "content": [{"type": "text", "text": "Fix calc.py."}]}
+    assistant = body["messages"][2]
+    assert assistant["tool_calls"] == [{"id": "t1", "type": "function",
+                                        "function": {"name": "read", "arguments": '{"path": "calc.py"}'}}]
+    assert json.loads(assistant["content"][0]["text"])["thinking"] == "look first"  # thinking kept, as its JSON
+    assert assistant["content"][1] == {"type": "text", "text": "Reading it."}
+    assert body["messages"][3] == {"role": "tool", "tool_call_id": "t1",
+                                   "content": [{"type": "text", "text": "def add(a, b): return a - b"}]}
+    assert body["messages"][4] == {"role": "user", "content": [{"type": "text", "text": "Go on."}]}
+    assert body["tools"][0]["function"]["parameters"] == _DS_TURN["tools"][0]["input_schema"]
+    assert "cache_control" not in json.dumps(body)
+    # Usage in Anthropic's own shape (another LiteLLM version): the reads are the cached tokens, and with
+    # no cache field at all the provider reported no count, which is not taken as 0.
+    c._record(_messages_kw(sent=_DS_TURN, model="deepseek/deepseek-flash", litellm_params=deepseek),
+              _response({"input_tokens": 220, "cache_read_input_tokens": 1280, "cache_creation_input_tokens": 0,
+                         "output_tokens": 16}, "deepseek-flash"), None, None)
+    assert spy.calls[1][2]["usage"]["prompt_tokens_details"] == {"cached_tokens": 1280}
+    c._record(_messages_kw(sent=_DS_TURN, model="deepseek/deepseek-flash", litellm_params=deepseek),
+              _response({"input_tokens": 1500, "output_tokens": 16}, "deepseek-flash"), None, None)
+    assert "prompt_tokens_details" not in spy.calls[2][2]["usage"]
+
+
+def test_deepseek_conversations_convert_append_only_and_name_their_changes():
+    from prefixwise.litellm_callback import _openai_from_anthropic
+    turn2 = json.loads(json.dumps(_DS_TURN))
+    turn2["messages"] += [{"role": "assistant", "content": [{"type": "text", "text": "Fixed."}]},
+                          {"role": "user", "content": "Thanks."}]
+    one, two = _openai_from_anthropic(_DS_TURN, "m"), _openai_from_anthropic(turn2, "m")
+    assert two["messages"][:len(one["messages"])] == one["messages"] and one["tools"] == two["tools"]
+    # Through the classifier, with DeepSeek's real reads (about 200 short of the previous prompt): an
+    # appended turn is a hit, a system edit is named.
+    rec = Recorder(":memory:")
+    def turn(body, prompt, cached):
+        rec.record("openai", _openai_from_anthropic(body, "deepseek-flash"), {"id": "r", "model": "deepseek-flash",
+                   "usage": {"prompt_tokens": prompt, "completion_tokens": 5,
+                             "prompt_tokens_details": {"cached_tokens": cached}}}, session_id="ds")
+    long = json.loads(json.dumps(_DS_TURN))
+    long["system"][0]["text"] = "You are careful. " * 300
+    turn(long, 1500, 0)
+    more = json.loads(json.dumps(long))
+    more["messages"].append({"role": "assistant", "content": [{"type": "text", "text": "Fixed."}]})
+    more["messages"].append({"role": "user", "content": "Thanks."})
+    turn(more, 1540, 1280)
+    edited = json.loads(json.dumps(more))
+    edited["system"][0]["text"] = "You are concise. " * 300
+    edited["messages"].append({"role": "user", "content": "And now?"})
+    turn(edited, 1560, 0)
+    with rec.ledger.reader() as cur:
+        causes = [r[0] for r in cur.execute("SELECT cause FROM entries ORDER BY id")]
+    assert causes == ["first_write", "none", "system_edit"]
+
+
+def test_deepseek_text_as_a_string_or_as_blocks_is_one_prompt():
+    # A client puts a message in list form while it carries the moving cache marker, then sends it as a
+    # string again; Anthropic reads both as one text block, and so must the comparison (review finding).
+    from prefixwise.litellm_callback import _openai_from_anthropic
+    marked = {"model": "m", "system": [{"type": "text", "text": "You are careful.", "cache_control": {"type": "ephemeral"}}],
+              "messages": [{"role": "user", "content": [{"type": "text", "text": "Thanks",
+                                                         "cache_control": {"type": "ephemeral"}}]}]}
+    plain = {"model": "m", "system": "You are careful.", "messages": [{"role": "user", "content": "Thanks"}]}
+    assert _openai_from_anthropic(marked, "m") == _openai_from_anthropic(plain, "m")
+    rec = Recorder(":memory:")
+    long_sys = "You are careful. " * 300
+    def turn(messages, system, prompt, cached):
+        rec.record("openai", _openai_from_anthropic({"system": system, "messages": messages}, "deepseek-flash"),
+                   {"id": "r", "model": "deepseek-flash", "usage": {"prompt_tokens": prompt, "completion_tokens": 5,
+                    "prompt_tokens_details": {"cached_tokens": cached}}}, session_id="sl")
+    m1 = [{"role": "user", "content": [{"type": "text", "text": "Thanks", "cache_control": {"type": "ephemeral"}}]}]
+    m2 = [{"role": "user", "content": "Thanks"}, {"role": "assistant", "content": "Sure."},
+          {"role": "user", "content": [{"type": "text", "text": "More", "cache_control": {"type": "ephemeral"}}]}]
+    turn(m1, [{"type": "text", "text": long_sys, "cache_control": {"type": "ephemeral"}}], 1485, 0)
+    turn(m2, long_sys, 1500, 1280)  # DeepSeek's real read: ~200 short of the previous prompt
+    with rec.ledger.reader() as cur:
+        causes = [r[0] for r in cur.execute("SELECT cause FROM entries ORDER BY id")]
+    assert causes == ["first_write", "none"]
+
+
+def test_deepseek_a_moving_marker_on_a_tool_result_is_not_a_change():
+    # Claude Code-style clients put the marker on the last block, often a tool result, and move it each
+    # turn; with list content (or an error) the block must not carry the marker into what is compared.
+    from prefixwise.litellm_callback import _openai_from_anthropic
+    def result(marked, form):
+        content = "r" if form == "str" else [{"type": "text", "text": "r"}]
+        b = {"type": "tool_result", "tool_use_id": "t1", "content": content}
+        if marked:
+            b["cache_control"] = {"type": "ephemeral"}
+        return {"model": "m", "messages": [
+            {"role": "user", "content": "go"},
+            {"role": "assistant", "content": [{"type": "tool_use", "id": "t1", "name": "read", "input": {}}]},
+            {"role": "user", "content": [b]}]}
+    forms = [_openai_from_anthropic(result(m, f), "m") for m in (True, False) for f in ("str", "list")]
+    assert all(x == forms[0] for x in forms)  # marked or not, string or text blocks: one prompt
+    cited = {"model": "m", "messages": [{"role": "user", "content": [{"type": "text", "text": "hi", "citations": None}]}]}
+    assert _openai_from_anthropic(cited, "m") == _openai_from_anthropic(
+        {"model": "m", "messages": [{"role": "user", "content": "hi"}]}, "m")
+
+
+def test_deepseek_conversion_keeps_what_would_change_the_prompt():
+    from prefixwise.litellm_callback import _openai_from_anthropic
+    base = {"model": "m", "messages": [{"role": "user", "content": "hi"}],
+            "tools": [{"name": "t", "description": "d", "strict": True,
+                       "input_schema": {"type": "object", "properties": {"cache_control": {"type": "string"}}}}]}
+    out = _openai_from_anthropic(base, "m")
+    fn = out["tools"][0]["function"]
+    assert fn["strict"] is True and "cache_control" in fn["parameters"]["properties"]  # a property, not a marker
+    def differs(change):
+        other = json.loads(json.dumps(base))
+        change(other)
+        return _openai_from_anthropic(other, "m") != out
+    assert differs(lambda b: b.update(output_format={"type": "json_schema"}))
+    assert differs(lambda b: b["messages"].__setitem__(0, {"role": "user", "content": [
+        {"type": "text", "text": "hi", "citations": [{"cited_text": "x"}]}]}))
+    assert differs(lambda b: b["messages"].append({"role": "assistant", "content": []}))
+    a = {"model": "m", "messages": [{"role": "user", "content": [{"type": "image", "source": {"type": "file", "file_id": "f1"}}]}]}
+    b = json.loads(json.dumps(a))
+    b["messages"][0]["content"][0]["source"]["file_id"] = "f2"
+    assert _openai_from_anthropic(a, "m") != _openai_from_anthropic(b, "m")
+    err = {"model": "m", "messages": [{"role": "user", "content": [
+        {"type": "tool_result", "tool_use_id": "t1", "content": "boom", "is_error": True}]}]}
+    lookalike = {"model": "m", "messages": [{"role": "user", "content": [
+        {"type": "tool_result", "tool_use_id": "t1", "content": "[error] boom"}]}]}
+    assert _openai_from_anthropic(err, "m") != _openai_from_anthropic(lookalike, "m")
 
 
 def test_anthropics_metadata_user_id_is_the_session_when_nothing_else_names_one():

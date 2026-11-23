@@ -22,8 +22,10 @@ recorded, streamed or not; other call types pass through unrecorded. Through the
 each call is classified from the body LiteLLM sent: Claude by Anthropic's rules, in Anthropic's
 format, on Bedrock Converse (its cachePoints as breakpoints) or as a chat completion with its
 cache_control markers (OpenRouter); OpenAI's models as the Responses API calls LiteLLM makes of them;
-another model when LiteLLM sent it a chat completion (vLLM). Not a provider's own Anthropic-compatible
-API (DeepSeek's or MiniMax's): their cache rules are not Anthropic's. Nothing is sent anywhere
+another model when LiteLLM sent it a chat completion (vLLM); DeepSeek's own Anthropic-compatible API by
+the rules of an automatic prefix cache, as DeepSeek caches there (markers are ignored, no writes are
+reported). Not another provider's own Anthropic-compatible API (MiniMax's): its cache rules are not
+known to be Anthropic's or automatic. Nothing is sent anywhere
 and LiteLLM's behaviour is unchanged. Answers from LiteLLM's own response cache reached no provider
 and are not recorded.
 
@@ -390,6 +392,101 @@ def _anthropic_shaped(body) -> bool:
     return False
 
 
+def _plain_blocks(value):
+    """Blocks without their cache_control markers (DeepSeek ignores them). A marker is a key of a block
+    (a dict with a "type"); the same name inside a tool's input or schema is kept."""
+    if isinstance(value, dict):
+        block = "type" in value
+        return {k: v if k in ("input", "input_schema") else _plain_blocks(v) for k, v in value.items()
+                if not (block and k == "cache_control")}
+    if isinstance(value, list):
+        return [_plain_blocks(v) for v in value]
+    return value
+
+
+def _openai_from_anthropic(body: dict, model: str) -> dict:
+    """An Anthropic Messages body as a chat completion, for a provider whose Messages API caches the way an
+    OpenAI-compatible API does (DeepSeek's). The system prompt becomes the system message, tool_use blocks
+    an assistant message's tool calls and tool_result blocks tool messages (ahead of the rest of their user
+    message, where Anthropic requires them). Text is one form whether it was sent as a string or as text
+    blocks, as Anthropic reads them ("x" and [{"type": "text", "text": "x"}] are the same prompt); a text
+    block with anything more (citations), an image and any other block (thinking included) keep their
+    whole JSON, so a change to any of them shows. Markers are dropped. Not seen: the order of text against
+    tool_use blocks within one assistant message."""
+    def parts(content):
+        if isinstance(content, str):
+            return [{"type": "text", "text": content}]
+        if not isinstance(content, list):
+            return [{"type": "text", "text": json.dumps(content, ensure_ascii=False)}]
+        out = []
+        for b in content:
+            if (isinstance(b, dict) and b.get("type") == "text"
+                    and not {k: v for k, v in b.items() if k not in ("type", "text", "cache_control") and v is not None}):
+                out.append({"type": "text", "text": b.get("text", "")})
+            elif (isinstance(b, dict) and b.get("type") == "image" and isinstance(b.get("source"), dict)
+                  and b["source"].get("type") in ("base64", "url")):
+                src = b["source"]
+                url = src.get("url") if src["type"] == "url" else \
+                    f"data:{src.get('media_type', '')};base64,{src.get('data', '')}"
+                out.append({"type": "image_url", "image_url": {"url": url}})
+            else:
+                out.append({"type": "text", "text": json.dumps(_plain_blocks(b), ensure_ascii=False)})
+        return out
+
+    out = []
+    if body.get("system"):
+        out.append({"role": "system", "content": parts(body["system"])})
+    for m in body.get("messages") or []:
+        if not isinstance(m, dict):
+            continue
+        role, content = m.get("role"), m.get("content")
+        if role == "assistant" and isinstance(content, list):
+            calls = [{"id": b.get("id"), "type": "function",
+                      "function": {"name": b.get("name"), "arguments": json.dumps(b.get("input"), ensure_ascii=False)}}
+                     for b in content if isinstance(b, dict) and b.get("type") == "tool_use"]
+            msg = {"role": "assistant",
+                   "content": parts([b for b in content if not (isinstance(b, dict) and b.get("type") == "tool_use")])}
+            if calls:
+                msg["tool_calls"] = calls
+            out.append(msg)
+            continue
+        if not isinstance(content, list):
+            out.append({"role": role, "content": parts(content)})
+            continue
+        rest = []
+        for b in content:
+            if isinstance(b, dict) and b.get("type") == "tool_result":
+                # Its content in the same one form as a message's (a string or text blocks alike); an error
+                # flag or any other field as a part of its own; the block's marker dropped, since it moves.
+                result = b.get("content")
+                extra = {k: v for k, v in b.items()
+                         if k not in ("type", "tool_use_id", "content", "cache_control") and v not in (None, False)}
+                shown = parts(result if result is not None else "")
+                if extra:
+                    shown = [{"type": "text", "text": json.dumps(_plain_blocks(extra), ensure_ascii=False)}] + shown
+                out.append({"role": "tool", "tool_call_id": b.get("tool_use_id"), "content": shown})
+            else:
+                rest.append(b)
+        if rest or not content:
+            out.append({"role": role, "content": parts(rest)})
+    chat = {"model": model, "messages": out}
+    tools = [t for t in body.get("tools") or [] if isinstance(t, dict)]
+    if tools:
+        def tool(t):
+            if "input_schema" not in t and t.get("type") not in (None, "custom"):
+                return _plain_blocks(t)  # a server tool (web search): kept whole
+            extra = {k: v for k, v in t.items() if k not in ("type", "name", "description", "input_schema",
+                                                                 "cache_control")}
+            return {"type": "function", "function": {"name": t.get("name"), "description": t.get("description", ""),
+                                                     "parameters": t.get("input_schema") or {"type": "object"},
+                                                     **extra}}
+        chat["tools"] = [tool(t) for t in tools]
+    for key in ("tool_choice", "thinking", "output_format", "output_config"):
+        if body.get(key) is not None:
+            chat[key] = body[key]
+    return chat
+
+
 def _anthropic_from_openai(messages: list, tools, model: str) -> dict:
     """No sent body in hand: rebuild Anthropic's format from LiteLLM's OpenAI-format messages."""
     system = []
@@ -597,8 +694,16 @@ class PrefixwiseCallback(_Base):
                     # else Anthropic's own format, as sent
                 elif listed:
                     # Recorded only as a chat completion: a Converse body (Nova, Llama: not Anthropic's
-                    # cache) or an Anthropic one (a provider's own Messages API) is not.
-                    if _converse_shaped(sent) or _anthropic_shaped(sent) or _sent_natively(model, provider, sent):
+                    # cache) or an Anthropic one (a provider's own Messages API) is not, except DeepSeek's,
+                    # which caches automatically, whatever the markers say, and reports no writes (probe,
+                    # experiments/litellm/runs/2026-11-23-deepseek-probe.md): judged as the
+                    # OpenAI-compatible API it caches like, from its reads.
+                    if provider == "deepseek" and not _converse_shaped(sent) and (
+                            _anthropic_shaped(sent) or _sent_natively(model, provider, sent)):
+                        sent = _openai_from_anthropic(sent, model)
+                        if not details and usage.get("cache_read_input_tokens") is not None:
+                            details = {"cached_tokens": _int(usage.get("cache_read_input_tokens"))}
+                    elif _converse_shaped(sent) or _anthropic_shaped(sent) or _sent_natively(model, provider, sent):
                         return
                 elif isinstance(sent.get("input"), list):
                     responses = True
