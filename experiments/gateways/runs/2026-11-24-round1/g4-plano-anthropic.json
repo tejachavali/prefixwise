@@ -1,0 +1,142 @@
+{
+ "gateway": "http://127.0.0.1:12000",
+ "stream": false,
+ "formats": [
+  "anthropic"
+ ],
+ "recorded": 0,
+ "matched": 0,
+ "sent": 25,
+ "results": [
+  {
+   "format": "anthropic",
+   "kind": "unchanged",
+   "session_via": "none",
+   "session_rows": {},
+   "recorded": 0,
+   "lost_sessions": {},
+   "causes": [],
+   "expected": [
+    "first_write",
+    "none",
+    "none",
+    "none",
+    "none"
+   ],
+   "reads": [],
+   "provider": [],
+   "errors": [
+    "turn 1: 0 URLError: <urlopen error [Errno 111] Connection refused>",
+    "turn 2: 0 URLError: <urlopen error [Errno 111] Connection refused>",
+    "turn 3: 0 URLError: <urlopen error [Errno 111] Connection refused>",
+    "turn 4: 0 URLError: <urlopen error [Errno 111] Connection refused>",
+    "turn 5: 0 URLError: <urlopen error [Errno 111] Connection refused>"
+   ],
+   "ok": false
+  },
+  {
+   "format": "anthropic",
+   "kind": "tool_reserialize",
+   "session_via": "none",
+   "session_rows": {},
+   "recorded": 0,
+   "lost_sessions": {},
+   "causes": [],
+   "expected": [
+    "first_write",
+    "none",
+    "tool_reserialize",
+    "none",
+    "none"
+   ],
+   "reads": [],
+   "provider": [],
+   "errors": [
+    "turn 1: 0 URLError: <urlopen error [Errno 111] Connection refused>",
+    "turn 2: 0 URLError: <urlopen error [Errno 111] Connection refused>",
+    "turn 3: 0 URLError: <urlopen error [Errno 111] Connection refused>",
+    "turn 4: 0 URLError: <urlopen error [Errno 111] Connection refused>",
+    "turn 5: 0 URLError: <urlopen error [Errno 111] Connection refused>"
+   ],
+   "ok": false
+  },
+  {
+   "format": "anthropic",
+   "kind": "volatile_system",
+   "session_via": "none",
+   "session_rows": {},
+   "recorded": 0,
+   "lost_sessions": {},
+   "causes": [],
+   "expected": [
+    "first_write",
+    "none",
+    "volatile_system",
+    "none",
+    "none"
+   ],
+   "reads": [],
+   "provider": [],
+   "errors": [
+    "turn 1: 0 URLError: <urlopen error [Errno 111] Connection refused>",
+    "turn 2: 0 URLError: <urlopen error [Errno 111] Connection refused>",
+    "turn 3: 0 URLError: <urlopen error [Errno 111] Connection refused>",
+    "turn 4: 0 URLError: <urlopen error [Errno 111] Connection refused>",
+    "turn 5: 0 URLError: <urlopen error [Errno 111] Connection refused>"
+   ],
+   "ok": false
+  },
+  {
+   "format": "anthropic",
+   "kind": "system_edit",
+   "session_via": "none",
+   "session_rows": {},
+   "recorded": 0,
+   "lost_sessions": {},
+   "causes": [],
+   "expected": [
+    "first_write",
+    "none",
+    "system_edit",
+    "none",
+    "none"
+   ],
+   "reads": [],
+   "provider": [],
+   "errors": [
+    "turn 1: 0 URLError: <urlopen error [Errno 111] Connection refused>",
+    "turn 2: 0 URLError: <urlopen error [Errno 111] Connection refused>",
+    "turn 3: 0 URLError: <urlopen error [Errno 111] Connection refused>",
+    "turn 4: 0 URLError: <urlopen error [Errno 111] Connection refused>",
+    "turn 5: 0 URLError: <urlopen error [Errno 111] Connection refused>"
+   ],
+   "ok": false
+  },
+  {
+   "format": "anthropic",
+   "kind": "history_edit",
+   "session_via": "none",
+   "session_rows": {},
+   "recorded": 0,
+   "lost_sessions": {},
+   "causes": [],
+   "expected": [
+    "first_write",
+    "none",
+    "history_edit",
+    "none",
+    "none"
+   ],
+   "reads": [],
+   "provider": [],
+   "errors": [
+    "turn 1: 0 URLError: <urlopen error [Errno 111] Connection refused>",
+    "turn 2: 0 URLError: <urlopen error [Errno 111] Connection refused>",
+    "turn 3: 0 URLError: <urlopen error [Errno 111] Connection refused>",
+    "turn 4: 0 URLError: <urlopen error [Errno 111] Connection refused>",
+    "turn 5: 0 URLError: <urlopen error [Errno 111] Connection refused>"
+   ],
+   "ok": false
+  }
+ ]
+}

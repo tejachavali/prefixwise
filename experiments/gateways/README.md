@@ -37,4 +37,5 @@ read-only, so a wrong `--ledger` path is an error rather than an empty new file.
 Several checks can share one backend at a time, as long as each gateway passes some conversation id:
 calls recorded under no id are counted by every check running then.
 
-Results will go under `runs/`, one record per gateway and date, with the gateway's version and config.
+Results are under `runs/`, one record per round, with the gateways' versions and config. Round 1 (2026-11-24):
+Envoy AI Gateway passed every check, streamed and not; Portkey passed without streaming.
