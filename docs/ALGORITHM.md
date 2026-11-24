@@ -132,16 +132,16 @@ is not scored against the verdict, since it answers another question.
 | No usage at all | `unknown` |
 | The server reports no cached-token count (Ollama, most llama.cpp builds), and no engine evidence | `unknown` |
 | Half read (section 1) | `none` |
-| Anthropic: this is the first turn carrying a breakpoint and nothing was read | `first_write` |
+| Anthropic: this is the first turn carrying a breakpoint and less than half was read | `first_write` |
 | Engine evidence: the block where the read stopped was removed | `evicted`, confirmed |
 | Engine evidence: another cache served this request while the previous one still held the prefix | `routing_miss`, confirmed |
 | An OpenAI-compatible API that is not OpenAI, prompt under 1,024 tokens | `unknown` (its minimum is not known) |
-| Identical bytes within 60 seconds, nothing read | `retry_replay` |
+| Identical bytes within 60 seconds, less than half read | `retry_replay` |
 | Behind an engine, events show the stop block still resident in the cache that served it | `unknown`: not an eviction (the token prefix changed, e.g. template rendering) |
 | Behind several caches without deciding events | `unknown` |
 | Behind one engine | `evicted`, inferred |
 | The gap exceeds the TTL | `ttl_expired` |
-| Less than half of the reusable prefix read (nothing, or only part), gap within the TTL (or within the shortest provider TTL when unknown): too soon to have expired | `routing_miss`, inferred |
+| Less than half of the reusable prefix read (nothing, or only part), gap within the TTL (or within the shortest provider TTL when unknown): too soon to have expired. On Anthropic a part read counts only within 5 minutes: a 1-hour breakpoint early in the prompt can still read after a later 5-minute one expired | `routing_miss`, inferred |
 | Otherwise | `unknown` |
 
 ### 2.4 Facts outside the two requests

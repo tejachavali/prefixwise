@@ -140,11 +140,10 @@ def test_routing_miss_needs_a_short_gap():
     assert _pair(gap=None).cause is MissCause.UNKNOWN
 
 
-
 def test_a_short_read_within_the_ttl_is_a_routing_miss_with_its_size():
     """An unchanged prefix that came back only in part, too soon to have expired: the same miss as a
     zero read, only smaller. It was `unknown` ("expiry or routing"), though no cache expires that fast."""
-    c = _pair(gap=10, cached=150)
+    c = _pair(gap=90, cached=150)  # past the 60 s retry window (identical bytes within it are a retry)
     assert c.cause is MissCause.ROUTING_MISS
     assert "read 150 of the 2,000-token unchanged prefix" in c.evidence
     assert _pair(gap=200, ttl=3600, cached=150).cause is MissCause.ROUTING_MISS
@@ -158,6 +157,33 @@ def test_a_short_read_past_the_ttl_or_with_no_timing_keeps_its_verdict():
     assert c.cause is MissCause.UNKNOWN and "unknown TTL" in c.evidence and "read 150 of" in c.evidence
     assert _pair(gap=None, cached=150).cause is MissCause.UNKNOWN
     assert _pair(gap=10, cached=1000).cause is MissCause.NONE  # half or more of the prefix: a hit
+
+
+def _anthropic_pair(gap, cached, ttl=300, prev_breakpoint=True):
+    prev = snap(model="claude-sonnet-5", provider="anthropic", prompt_tokens=80_000, cached_tokens=70_000,
+                cache_written=10_000, has_breakpoint=prev_breakpoint)
+    curr = snap(model="claude-sonnet-5", provider="anthropic", prompt_tokens=80_000, cached_tokens=cached,
+                gap_seconds=gap, ttl_seconds=ttl, has_breakpoint=True)
+    return classify(prev, curr)
+
+
+def test_an_anthropic_part_read_after_five_minutes_is_not_called_routing():
+    """A 1-hour breakpoint early in the prompt and a 5-minute one later: after 10 minutes only the
+    1-hour part reads. The request's TTL is the longest (1 h), so the gap is "within" it, yet the
+    5-minute part expired: not a routing miss. Found by review."""
+    c = _anthropic_pair(gap=600, cached=15_000, ttl=3600)
+    assert c.cause is not MissCause.ROUTING_MISS
+    assert _anthropic_pair(gap=120, cached=15_000, ttl=3600).cause is MissCause.ROUTING_MISS
+    assert _anthropic_pair(gap=600, cached=0, ttl=3600).cause is MissCause.ROUTING_MISS  # nothing read: as before
+
+
+def test_a_part_read_does_not_hide_a_first_write_or_a_retry():
+    # The previous turn carried no breakpoint, so it wrote nothing; this turn read a part another
+    # conversation wrote: still this conversation's first write.
+    assert _anthropic_pair(gap=20, cached=3_000, prev_breakpoint=False).cause is MissCause.FIRST_WRITE
+    prev = snap(prompt_tokens=8_000)
+    curr = snap(prompt_tokens=8_000, cached_tokens=1_024, gap_seconds=5)  # the identical request again
+    assert classify(prev, curr).cause is MissCause.RETRY_REPLAY
 
 def test_evicted_only_when_cache_read_low():
     assert _pair(gap=30, evicted_blocks=1).cause is MissCause.EVICTED

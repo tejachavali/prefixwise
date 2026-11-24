@@ -424,6 +424,8 @@ def prefixwise_names(frame: pandas.DataFrame) -> tuple[numpy.ndarray, numpy.ndar
     bucket = frame.gap_bucket.to_numpy()
     nothing = numpy.array([str(value).startswith("nothing_read") for value in detail])
     put(missed & (bucket == "<5m") & nothing, "routing_miss (inferred)", "undetermined")
+    # The classifier names these routing_miss (inferred) since #171 (a part read within the TTL is not an
+    # expiry). The run records of 2026-11-23 were made with the earlier rule, under this label.
     put(missed & (bucket == "<5m") & ~nothing, "unknown (partial read within 5m)", "undetermined")
     put(missed & (bucket == "5-60m"), "ttl_expired (5-min TTL) | routing_miss", "undetermined")
     put(missed & (bucket == ">60m"), "ttl_expired", "legitimate")

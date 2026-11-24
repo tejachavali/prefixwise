@@ -239,7 +239,7 @@ def decision(t: dict) -> str:
         (["Behind a self-hosted engine", "(--engine vllm / sglang)?"],
          ["evicted, inferred (one cache, no event evidence)", "otherwise unknown, saying why"]),
         (["Longer gap than the", "cache keeps entries?"], ["ttl_expired", "the entry expired"]),
-        (["Nothing read, and", "within that time?"], ["routing_miss"]),
+        (["Under half read, and", "within that time?"], ["routing_miss"]),
     ]
     y = 150
     prev_bottom = 128
