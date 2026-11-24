@@ -42,4 +42,6 @@ Results are under `runs/`, one record per round, with each gateway's version (wh
 was set. Round 1 (2026-11-24): Envoy AI Gateway passed every check, streamed and not; Portkey passed without
 streaming and returned errors when streamed; Bifrost and Plano did not start. Round 2: Portkey's streaming errors
 happen without Prefixwise too (its own); Bifrost needs a virtual key; Plano showed that `prefixwise serve` read
-chunked request bodies as empty (fixed; `--chunked` checks it).
+chunked request bodies as empty (fixed; `--chunked` checks it). Round 3: Plano and Bifrost pass every check on the
+fix, streamed and not; behind Bifrost the conversation id arrives through the body's `user` / `metadata.user_id`
+or `x-bf-eh-x-prefixwise-session-id`. Where the four stand: `runs/2026-11-24-round3.md`.
