@@ -13,6 +13,23 @@ python experiments/e1_open/e1_open.py --mock
 
 The runtime uses the Python standard library only. Please keep it that way; test-only dependencies go in the `dev` extra.
 
+## Working from a fork
+
+You don't need write access: fork the repository, work on a branch in your fork, and open a pull request to
+`main` here. CI runs on pull requests from forks too (a maintainer approves the first run).
+
+```bash
+git clone https://github.com/<you>/prefixwise && cd prefixwise
+git remote add upstream https://github.com/tejachavali/prefixwise
+python -m pip install -e ".[dev]" && python -m pytest tests -q
+
+git fetch upstream && git checkout -b my-change upstream/main    # a fresh branch for each change
+git push -u origin my-change                                      # then "Compare & pull request" on GitHub
+git fetch upstream && git rebase upstream/main && git push --force-with-lease   # when main moves on
+```
+
+In the pull request, write `Closes #<issue>` and paste the test output. Leave "Allow edits by maintainers" on.
+
 ## How changes are made
 
 - **One PR per change**, with tests. CI runs the suite on Python 3.10 to 3.13, plus the E1 mock and a Docker build.
