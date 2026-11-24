@@ -1,0 +1,273 @@
+{
+ "gateway": "http://127.0.0.1:18080",
+ "stream": false,
+ "formats": [
+  "openai",
+  "anthropic"
+ ],
+ "recorded": 0,
+ "matched": 0,
+ "sent": 50,
+ "results": [
+  {
+   "format": "openai",
+   "kind": "unchanged",
+   "session_via": "none",
+   "session_rows": {},
+   "recorded": 0,
+   "lost_sessions": {},
+   "causes": [],
+   "expected": [
+    "first_write",
+    "none",
+    "none",
+    "none",
+    "none"
+   ],
+   "reads": [],
+   "provider": [],
+   "errors": [
+    "turn 1: 401 {\"type\":\"virtual_key_required\",\"is_bifrost_error\":false,\"status_code\":401,\"error\":{\"message\":\"virtual key is required. Provide a virtual key via the x-bf-vk header.\"},\"extra_fields\":{\"routing_info\":{},\"provider\":\"openai\",\"original_model_requested\":\"gpt-4o-mini\",\"resolved_model_used\":\"gpt-4o-mini\",\"r",
+    "turn 2: 401 {\"type\":\"virtual_key_required\",\"is_bifrost_error\":false,\"status_code\":401,\"error\":{\"message\":\"virtual key is required. Provide a virtual key via the x-bf-vk header.\"},\"extra_fields\":{\"routing_info\":{},\"provider\":\"openai\",\"original_model_requested\":\"gpt-4o-mini\",\"resolved_model_used\":\"gpt-4o-mini\",\"r",
+    "turn 3: 401 {\"type\":\"virtual_key_required\",\"is_bifrost_error\":false,\"status_code\":401,\"error\":{\"message\":\"virtual key is required. Provide a virtual key via the x-bf-vk header.\"},\"extra_fields\":{\"routing_info\":{},\"provider\":\"openai\",\"original_model_requested\":\"gpt-4o-mini\",\"resolved_model_used\":\"gpt-4o-mini\",\"r",
+    "turn 4: 401 {\"type\":\"virtual_key_required\",\"is_bifrost_error\":false,\"status_code\":401,\"error\":{\"message\":\"virtual key is required. Provide a virtual key via the x-bf-vk header.\"},\"extra_fields\":{\"routing_info\":{},\"provider\":\"openai\",\"original_model_requested\":\"gpt-4o-mini\",\"resolved_model_used\":\"gpt-4o-mini\",\"r",
+    "turn 5: 401 {\"type\":\"virtual_key_required\",\"is_bifrost_error\":false,\"status_code\":401,\"error\":{\"message\":\"virtual key is required. Provide a virtual key via the x-bf-vk header.\"},\"extra_fields\":{\"routing_info\":{},\"provider\":\"openai\",\"original_model_requested\":\"gpt-4o-mini\",\"resolved_model_used\":\"gpt-4o-mini\",\"r"
+   ],
+   "ok": false
+  },
+  {
+   "format": "openai",
+   "kind": "tool_reserialize",
+   "session_via": "none",
+   "session_rows": {},
+   "recorded": 0,
+   "lost_sessions": {},
+   "causes": [],
+   "expected": [
+    "first_write",
+    "none",
+    "tool_reserialize",
+    "none",
+    "none"
+   ],
+   "reads": [],
+   "provider": [],
+   "errors": [
+    "turn 1: 401 {\"type\":\"virtual_key_required\",\"is_bifrost_error\":false,\"status_code\":401,\"error\":{\"message\":\"virtual key is required. Provide a virtual key via the x-bf-vk header.\"},\"extra_fields\":{\"routing_info\":{},\"provider\":\"openai\",\"original_model_requested\":\"gpt-4o-mini\",\"resolved_model_used\":\"gpt-4o-mini\",\"r",
+    "turn 2: 401 {\"type\":\"virtual_key_required\",\"is_bifrost_error\":false,\"status_code\":401,\"error\":{\"message\":\"virtual key is required. Provide a virtual key via the x-bf-vk header.\"},\"extra_fields\":{\"routing_info\":{},\"provider\":\"openai\",\"original_model_requested\":\"gpt-4o-mini\",\"resolved_model_used\":\"gpt-4o-mini\",\"r",
+    "turn 3: 401 {\"type\":\"virtual_key_required\",\"is_bifrost_error\":false,\"status_code\":401,\"error\":{\"message\":\"virtual key is required. Provide a virtual key via the x-bf-vk header.\"},\"extra_fields\":{\"routing_info\":{},\"provider\":\"openai\",\"original_model_requested\":\"gpt-4o-mini\",\"resolved_model_used\":\"gpt-4o-mini\",\"r",
+    "turn 4: 401 {\"type\":\"virtual_key_required\",\"is_bifrost_error\":false,\"status_code\":401,\"error\":{\"message\":\"virtual key is required. Provide a virtual key via the x-bf-vk header.\"},\"extra_fields\":{\"routing_info\":{},\"provider\":\"openai\",\"original_model_requested\":\"gpt-4o-mini\",\"resolved_model_used\":\"gpt-4o-mini\",\"r",
+    "turn 5: 401 {\"type\":\"virtual_key_required\",\"is_bifrost_error\":false,\"status_code\":401,\"error\":{\"message\":\"virtual key is required. Provide a virtual key via the x-bf-vk header.\"},\"extra_fields\":{\"routing_info\":{},\"provider\":\"openai\",\"original_model_requested\":\"gpt-4o-mini\",\"resolved_model_used\":\"gpt-4o-mini\",\"r"
+   ],
+   "ok": false
+  },
+  {
+   "format": "openai",
+   "kind": "volatile_system",
+   "session_via": "none",
+   "session_rows": {},
+   "recorded": 0,
+   "lost_sessions": {},
+   "causes": [],
+   "expected": [
+    "first_write",
+    "none",
+    "volatile_system",
+    "none",
+    "none"
+   ],
+   "reads": [],
+   "provider": [],
+   "errors": [
+    "turn 1: 401 {\"type\":\"virtual_key_required\",\"is_bifrost_error\":false,\"status_code\":401,\"error\":{\"message\":\"virtual key is required. Provide a virtual key via the x-bf-vk header.\"},\"extra_fields\":{\"routing_info\":{},\"provider\":\"openai\",\"original_model_requested\":\"gpt-4o-mini\",\"resolved_model_used\":\"gpt-4o-mini\",\"r",
+    "turn 2: 401 {\"type\":\"virtual_key_required\",\"is_bifrost_error\":false,\"status_code\":401,\"error\":{\"message\":\"virtual key is required. Provide a virtual key via the x-bf-vk header.\"},\"extra_fields\":{\"routing_info\":{},\"provider\":\"openai\",\"original_model_requested\":\"gpt-4o-mini\",\"resolved_model_used\":\"gpt-4o-mini\",\"r",
+    "turn 3: 401 {\"type\":\"virtual_key_required\",\"is_bifrost_error\":false,\"status_code\":401,\"error\":{\"message\":\"virtual key is required. Provide a virtual key via the x-bf-vk header.\"},\"extra_fields\":{\"routing_info\":{},\"provider\":\"openai\",\"original_model_requested\":\"gpt-4o-mini\",\"resolved_model_used\":\"gpt-4o-mini\",\"r",
+    "turn 4: 401 {\"type\":\"virtual_key_required\",\"is_bifrost_error\":false,\"status_code\":401,\"error\":{\"message\":\"virtual key is required. Provide a virtual key via the x-bf-vk header.\"},\"extra_fields\":{\"routing_info\":{},\"provider\":\"openai\",\"original_model_requested\":\"gpt-4o-mini\",\"resolved_model_used\":\"gpt-4o-mini\",\"r",
+    "turn 5: 401 {\"type\":\"virtual_key_required\",\"is_bifrost_error\":false,\"status_code\":401,\"error\":{\"message\":\"virtual key is required. Provide a virtual key via the x-bf-vk header.\"},\"extra_fields\":{\"routing_info\":{},\"provider\":\"openai\",\"original_model_requested\":\"gpt-4o-mini\",\"resolved_model_used\":\"gpt-4o-mini\",\"r"
+   ],
+   "ok": false
+  },
+  {
+   "format": "openai",
+   "kind": "system_edit",
+   "session_via": "none",
+   "session_rows": {},
+   "recorded": 0,
+   "lost_sessions": {},
+   "causes": [],
+   "expected": [
+    "first_write",
+    "none",
+    "system_edit",
+    "none",
+    "none"
+   ],
+   "reads": [],
+   "provider": [],
+   "errors": [
+    "turn 1: 401 {\"type\":\"virtual_key_required\",\"is_bifrost_error\":false,\"status_code\":401,\"error\":{\"message\":\"virtual key is required. Provide a virtual key via the x-bf-vk header.\"},\"extra_fields\":{\"routing_info\":{},\"provider\":\"openai\",\"original_model_requested\":\"gpt-4o-mini\",\"resolved_model_used\":\"gpt-4o-mini\",\"r",
+    "turn 2: 401 {\"type\":\"virtual_key_required\",\"is_bifrost_error\":false,\"status_code\":401,\"error\":{\"message\":\"virtual key is required. Provide a virtual key via the x-bf-vk header.\"},\"extra_fields\":{\"routing_info\":{},\"provider\":\"openai\",\"original_model_requested\":\"gpt-4o-mini\",\"resolved_model_used\":\"gpt-4o-mini\",\"r",
+    "turn 3: 401 {\"type\":\"virtual_key_required\",\"is_bifrost_error\":false,\"status_code\":401,\"error\":{\"message\":\"virtual key is required. Provide a virtual key via the x-bf-vk header.\"},\"extra_fields\":{\"routing_info\":{},\"provider\":\"openai\",\"original_model_requested\":\"gpt-4o-mini\",\"resolved_model_used\":\"gpt-4o-mini\",\"r",
+    "turn 4: 401 {\"type\":\"virtual_key_required\",\"is_bifrost_error\":false,\"status_code\":401,\"error\":{\"message\":\"virtual key is required. Provide a virtual key via the x-bf-vk header.\"},\"extra_fields\":{\"routing_info\":{},\"provider\":\"openai\",\"original_model_requested\":\"gpt-4o-mini\",\"resolved_model_used\":\"gpt-4o-mini\",\"r",
+    "turn 5: 401 {\"type\":\"virtual_key_required\",\"is_bifrost_error\":false,\"status_code\":401,\"error\":{\"message\":\"virtual key is required. Provide a virtual key via the x-bf-vk header.\"},\"extra_fields\":{\"routing_info\":{},\"provider\":\"openai\",\"original_model_requested\":\"gpt-4o-mini\",\"resolved_model_used\":\"gpt-4o-mini\",\"r"
+   ],
+   "ok": false
+  },
+  {
+   "format": "openai",
+   "kind": "history_edit",
+   "session_via": "none",
+   "session_rows": {},
+   "recorded": 0,
+   "lost_sessions": {},
+   "causes": [],
+   "expected": [
+    "first_write",
+    "none",
+    "history_edit",
+    "none",
+    "none"
+   ],
+   "reads": [],
+   "provider": [],
+   "errors": [
+    "turn 1: 401 {\"type\":\"virtual_key_required\",\"is_bifrost_error\":false,\"status_code\":401,\"error\":{\"message\":\"virtual key is required. Provide a virtual key via the x-bf-vk header.\"},\"extra_fields\":{\"routing_info\":{},\"provider\":\"openai\",\"original_model_requested\":\"gpt-4o-mini\",\"resolved_model_used\":\"gpt-4o-mini\",\"r",
+    "turn 2: 401 {\"type\":\"virtual_key_required\",\"is_bifrost_error\":false,\"status_code\":401,\"error\":{\"message\":\"virtual key is required. Provide a virtual key via the x-bf-vk header.\"},\"extra_fields\":{\"routing_info\":{},\"provider\":\"openai\",\"original_model_requested\":\"gpt-4o-mini\",\"resolved_model_used\":\"gpt-4o-mini\",\"r",
+    "turn 3: 401 {\"type\":\"virtual_key_required\",\"is_bifrost_error\":false,\"status_code\":401,\"error\":{\"message\":\"virtual key is required. Provide a virtual key via the x-bf-vk header.\"},\"extra_fields\":{\"routing_info\":{},\"provider\":\"openai\",\"original_model_requested\":\"gpt-4o-mini\",\"resolved_model_used\":\"gpt-4o-mini\",\"r",
+    "turn 4: 401 {\"type\":\"virtual_key_required\",\"is_bifrost_error\":false,\"status_code\":401,\"error\":{\"message\":\"virtual key is required. Provide a virtual key via the x-bf-vk header.\"},\"extra_fields\":{\"routing_info\":{},\"provider\":\"openai\",\"original_model_requested\":\"gpt-4o-mini\",\"resolved_model_used\":\"gpt-4o-mini\",\"r",
+    "turn 5: 401 {\"type\":\"virtual_key_required\",\"is_bifrost_error\":false,\"status_code\":401,\"error\":{\"message\":\"virtual key is required. Provide a virtual key via the x-bf-vk header.\"},\"extra_fields\":{\"routing_info\":{},\"provider\":\"openai\",\"original_model_requested\":\"gpt-4o-mini\",\"resolved_model_used\":\"gpt-4o-mini\",\"r"
+   ],
+   "ok": false
+  },
+  {
+   "format": "anthropic",
+   "kind": "unchanged",
+   "session_via": "none",
+   "session_rows": {},
+   "recorded": 0,
+   "lost_sessions": {},
+   "causes": [],
+   "expected": [
+    "first_write",
+    "none",
+    "none",
+    "none",
+    "none"
+   ],
+   "reads": [],
+   "provider": [],
+   "errors": [
+    "turn 1: 401 {\"type\":\"error\",\"error\":{\"type\":\"authentication_error\",\"message\":\"virtual key is required. Provide a virtual key via the x-bf-vk header.\"}}",
+    "turn 2: 401 {\"type\":\"error\",\"error\":{\"type\":\"authentication_error\",\"message\":\"virtual key is required. Provide a virtual key via the x-bf-vk header.\"}}",
+    "turn 3: 401 {\"type\":\"error\",\"error\":{\"type\":\"authentication_error\",\"message\":\"virtual key is required. Provide a virtual key via the x-bf-vk header.\"}}",
+    "turn 4: 401 {\"type\":\"error\",\"error\":{\"type\":\"authentication_error\",\"message\":\"virtual key is required. Provide a virtual key via the x-bf-vk header.\"}}",
+    "turn 5: 401 {\"type\":\"error\",\"error\":{\"type\":\"authentication_error\",\"message\":\"virtual key is required. Provide a virtual key via the x-bf-vk header.\"}}"
+   ],
+   "ok": false
+  },
+  {
+   "format": "anthropic",
+   "kind": "tool_reserialize",
+   "session_via": "none",
+   "session_rows": {},
+   "recorded": 0,
+   "lost_sessions": {},
+   "causes": [],
+   "expected": [
+    "first_write",
+    "none",
+    "tool_reserialize",
+    "none",
+    "none"
+   ],
+   "reads": [],
+   "provider": [],
+   "errors": [
+    "turn 1: 401 {\"type\":\"error\",\"error\":{\"type\":\"authentication_error\",\"message\":\"virtual key is required. Provide a virtual key via the x-bf-vk header.\"}}",
+    "turn 2: 401 {\"type\":\"error\",\"error\":{\"type\":\"authentication_error\",\"message\":\"virtual key is required. Provide a virtual key via the x-bf-vk header.\"}}",
+    "turn 3: 401 {\"type\":\"error\",\"error\":{\"type\":\"authentication_error\",\"message\":\"virtual key is required. Provide a virtual key via the x-bf-vk header.\"}}",
+    "turn 4: 401 {\"type\":\"error\",\"error\":{\"type\":\"authentication_error\",\"message\":\"virtual key is required. Provide a virtual key via the x-bf-vk header.\"}}",
+    "turn 5: 401 {\"type\":\"error\",\"error\":{\"type\":\"authentication_error\",\"message\":\"virtual key is required. Provide a virtual key via the x-bf-vk header.\"}}"
+   ],
+   "ok": false
+  },
+  {
+   "format": "anthropic",
+   "kind": "volatile_system",
+   "session_via": "none",
+   "session_rows": {},
+   "recorded": 0,
+   "lost_sessions": {},
+   "causes": [],
+   "expected": [
+    "first_write",
+    "none",
+    "volatile_system",
+    "none",
+    "none"
+   ],
+   "reads": [],
+   "provider": [],
+   "errors": [
+    "turn 1: 401 {\"type\":\"error\",\"error\":{\"type\":\"authentication_error\",\"message\":\"virtual key is required. Provide a virtual key via the x-bf-vk header.\"}}",
+    "turn 2: 401 {\"type\":\"error\",\"error\":{\"type\":\"authentication_error\",\"message\":\"virtual key is required. Provide a virtual key via the x-bf-vk header.\"}}",
+    "turn 3: 401 {\"type\":\"error\",\"error\":{\"type\":\"authentication_error\",\"message\":\"virtual key is required. Provide a virtual key via the x-bf-vk header.\"}}",
+    "turn 4: 401 {\"type\":\"error\",\"error\":{\"type\":\"authentication_error\",\"message\":\"virtual key is required. Provide a virtual key via the x-bf-vk header.\"}}",
+    "turn 5: 401 {\"type\":\"error\",\"error\":{\"type\":\"authentication_error\",\"message\":\"virtual key is required. Provide a virtual key via the x-bf-vk header.\"}}"
+   ],
+   "ok": false
+  },
+  {
+   "format": "anthropic",
+   "kind": "system_edit",
+   "session_via": "none",
+   "session_rows": {},
+   "recorded": 0,
+   "lost_sessions": {},
+   "causes": [],
+   "expected": [
+    "first_write",
+    "none",
+    "system_edit",
+    "none",
+    "none"
+   ],
+   "reads": [],
+   "provider": [],
+   "errors": [
+    "turn 1: 401 {\"type\":\"error\",\"error\":{\"type\":\"authentication_error\",\"message\":\"virtual key is required. Provide a virtual key via the x-bf-vk header.\"}}",
+    "turn 2: 401 {\"type\":\"error\",\"error\":{\"type\":\"authentication_error\",\"message\":\"virtual key is required. Provide a virtual key via the x-bf-vk header.\"}}",
+    "turn 3: 401 {\"type\":\"error\",\"error\":{\"type\":\"authentication_error\",\"message\":\"virtual key is required. Provide a virtual key via the x-bf-vk header.\"}}",
+    "turn 4: 401 {\"type\":\"error\",\"error\":{\"type\":\"authentication_error\",\"message\":\"virtual key is required. Provide a virtual key via the x-bf-vk header.\"}}",
+    "turn 5: 401 {\"type\":\"error\",\"error\":{\"type\":\"authentication_error\",\"message\":\"virtual key is required. Provide a virtual key via the x-bf-vk header.\"}}"
+   ],
+   "ok": false
+  },
+  {
+   "format": "anthropic",
+   "kind": "history_edit",
+   "session_via": "none",
+   "session_rows": {},
+   "recorded": 0,
+   "lost_sessions": {},
+   "causes": [],
+   "expected": [
+    "first_write",
+    "none",
+    "history_edit",
+    "none",
+    "none"
+   ],
+   "reads": [],
+   "provider": [],
+   "errors": [
+    "turn 1: 401 {\"type\":\"error\",\"error\":{\"type\":\"authentication_error\",\"message\":\"virtual key is required. Provide a virtual key via the x-bf-vk header.\"}}",
+    "turn 2: 401 {\"type\":\"error\",\"error\":{\"type\":\"authentication_error\",\"message\":\"virtual key is required. Provide a virtual key via the x-bf-vk header.\"}}",
+    "turn 3: 401 {\"type\":\"error\",\"error\":{\"type\":\"authentication_error\",\"message\":\"virtual key is required. Provide a virtual key via the x-bf-vk header.\"}}",
+    "turn 4: 401 {\"type\":\"error\",\"error\":{\"type\":\"authentication_error\",\"message\":\"virtual key is required. Provide a virtual key via the x-bf-vk header.\"}}",
+    "turn 5: 401 {\"type\":\"error\",\"error\":{\"type\":\"authentication_error\",\"message\":\"virtual key is required. Provide a virtual key via the x-bf-vk header.\"}}"
+   ],
+   "ok": false
+  }
+ ]
+}

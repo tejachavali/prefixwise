@@ -121,8 +121,11 @@ def request(fmt, kind, turn, sid, args):
     return path, body, headers
 
 
-def send(base, path, body, headers):
-    req = urllib.request.Request(base.rstrip("/") + path, data=json.dumps(body).encode(), headers=headers)
+def send(base, path, body, headers, chunked=False):
+    data = json.dumps(body).encode()
+    # An iterable body with no Content-Length makes urllib send Transfer-Encoding: chunked, as
+    # Envoy-based gateways do when they rewrite a body (Plano).
+    req = urllib.request.Request(base.rstrip("/") + path, data=iter([data]) if chunked else data, headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=60) as r:
             r.read()
@@ -230,6 +233,7 @@ def main():
     p.add_argument("--openai-model", default="gpt-4o-mini")
     p.add_argument("--anthropic-model", default="claude-haiku-4-5")
     p.add_argument("--stream", action="store_true")
+    p.add_argument("--chunked", action="store_true", help="send request bodies chunked, with no Content-Length")
     p.add_argument("--header", action="append", help="extra header for the gateway, K:V (its own auth)")
     p.add_argument("--session-header", action="append",
                    help="also send the session id under this header name (e.g. x-bf-eh-x-prefixwise-session-id)")
@@ -262,7 +266,7 @@ def main():
                 errors, before = [], last_id(args.ledger)
                 for turn in range(1, 6):
                     path, body, headers = request(fmt, kind, turn, sid, args)
-                    status, err = send(base, path, body, headers)
+                    status, err = send(base, path, body, headers, args.chunked)
                     if status != 200:
                         errors.append(f"turn {turn}: {status} {err}")
                     time.sleep(0.2)

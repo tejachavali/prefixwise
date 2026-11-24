@@ -31,7 +31,8 @@ python gateway_check.py --gateway http://127.0.0.1:8080 --ledger gw.db \
 
 Other options: `--header K:V` (the gateway's own headers), `--session-header NAME` (also send the conversation
 id under a gateway's forwarded-header name, e.g. Bifrost's `x-bf-eh-x-prefixwise-session-id`),
-`--openai-model`, `--anthropic-model`, `--formats openai,anthropic`. It writes `--out` (JSON) and exits 1 when
+`--openai-model`, `--anthropic-model`, `--formats openai,anthropic`, `--chunked` (send request bodies with
+`Transfer-Encoding: chunked` and no `Content-Length`, as Envoy-based gateways do when they rewrite a body). It writes `--out` (JSON) and exits 1 when
 any conversation is wrong. With `--backend` it refuses ports already in use, and it reads the ledger
 read-only, so a wrong `--ledger` path is an error rather than an empty new file.
 Several checks can share one backend at a time, as long as each gateway passes some conversation id:
@@ -39,4 +40,6 @@ calls recorded under no id are counted by every check running then.
 
 Results are under `runs/`, one record per round, with each gateway's version (where known) and how its upstream
 was set. Round 1 (2026-11-24): Envoy AI Gateway passed every check, streamed and not; Portkey passed without
-streaming and returned errors when streamed; Bifrost and Plano did not start.
+streaming and returned errors when streamed; Bifrost and Plano did not start. Round 2: Portkey's streaming errors
+happen without Prefixwise too (its own); Bifrost needs a virtual key; Plano showed that `prefixwise serve` read
+chunked request bodies as empty (fixed; `--chunked` checks it).

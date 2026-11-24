@@ -242,3 +242,61 @@ def test_live_overhead_script_runs_against_fake_upstream():
             assert "ledger rows: 8/8" in r.stdout, r.stdout[-500:] + r.stderr[-500:]
     finally:
         up.stop()
+
+
+def _raw_post(port, head: bytes, body: bytes) -> bytes:
+    c = socket.create_connection(("127.0.0.1", port))
+    c.settimeout(10)
+    c.sendall(b"POST /v1/chat/completions HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n" + head
+              + b"\r\n" + body)
+    raw = b""
+    while chunk := c.recv(65536):
+        raw += chunk
+    return raw
+
+
+def _chunked(data: bytes, sizes=(7, 100, 1)) -> bytes:
+    out, i, k = b"", 0, 0
+    while i < len(data):
+        n = min(sizes[k % len(sizes)], len(data) - i)
+        out += f"{n:x};ext=1\r\n".encode() if k == 1 else f"{n:X}\r\n".encode()
+        out += data[i:i + n] + b"\r\n"
+        i, k = i + n, k + 1
+    return out
+
+
+def test_a_chunked_request_body_is_read_whole():
+    """Envoy-based gateways (Plano, 2026-11-24) send Transfer-Encoding: chunked with no Content-Length.
+    Reading only Content-Length forwarded an empty body and recorded 0 prompt tokens."""
+    from test_proxy import FakeUpstream
+
+    up = FakeUpstream(payload=OPENAI_OK)
+    proxy, server, port = run_proxy(upstream_url=up.url)
+    try:
+        data = json.dumps(BODY).encode()
+        raw = _raw_post(port, b"Transfer-Encoding: chunked\r\n", _chunked(data) + b"0\r\nX-Trailer: t\r\n\r\n")
+        assert raw.startswith(b"HTTP/1.0 200") or raw.startswith(b"HTTP/1.1 200"), raw[:200]
+        assert up.requests[-1]["body"]["messages"] == BODY["messages"]  # forwarded whole
+        rows = proxy.ledger.recent(1)
+        assert rows and rows[0]["prompt_tokens"] == 2000
+    finally:
+        server.shutdown(); up.server.shutdown()
+
+
+def test_a_malformed_or_oversized_chunked_body_is_refused(monkeypatch):
+    import prefixwise.proxy as px
+    from test_proxy import FakeUpstream
+
+    up = FakeUpstream(payload=OPENAI_OK)
+    proxy, server, port = run_proxy(upstream_url=up.url)
+    try:
+        bad = _raw_post(port, b"Transfer-Encoding: chunked\r\n", b"zz\r\n{}\r\n0\r\n\r\n")
+        assert bad.split(b"\r\n", 1)[0].endswith(b"400 Bad Request"), bad[:200]
+        gz = _raw_post(port, b"Transfer-Encoding: gzip\r\n", b"")
+        assert b" 400 " in gz.split(b"\r\n", 1)[0]
+        monkeypatch.setattr(px, "MAX_BODY_BYTES", 50)
+        big = _raw_post(port, b"Transfer-Encoding: chunked\r\n", _chunked(json.dumps(BODY).encode()) + b"0\r\n\r\n")
+        assert big.split(b"\r\n", 1)[0].split()[1] in (b"400", b"413")
+        assert up.requests == []  # nothing malformed was forwarded
+    finally:
+        server.shutdown(); up.server.shutdown()

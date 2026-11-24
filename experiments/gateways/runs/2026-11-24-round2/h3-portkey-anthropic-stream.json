@@ -1,0 +1,222 @@
+{
+ "gateway": "http://127.0.0.1:8787",
+ "stream": true,
+ "formats": [
+  "anthropic"
+ ],
+ "recorded": 25,
+ "matched": 25,
+ "sent": 25,
+ "results": [
+  {
+   "format": "anthropic",
+   "kind": "unchanged",
+   "session_via": "prefixwise",
+   "session_rows": {
+    "prefixwise": 5
+   },
+   "recorded": 5,
+   "lost_sessions": {},
+   "causes": [
+    "first_write",
+    "none",
+    "none",
+    "none",
+    "none"
+   ],
+   "expected": [
+    "first_write",
+    "none",
+    "none",
+    "none",
+    "none"
+   ],
+   "reads": [
+    "0/4911",
+    "4911/4936",
+    "4936/4961",
+    "4961/4986",
+    "4986/5011"
+   ],
+   "provider": [
+    "anthropic"
+   ],
+   "errors": [
+    "turn 1: 500 {\"status\":\"failure\",\"message\":\"Something went wrong\"}",
+    "turn 2: 500 {\"status\":\"failure\",\"message\":\"Something went wrong\"}",
+    "turn 3: 500 {\"status\":\"failure\",\"message\":\"Something went wrong\"}",
+    "turn 4: 500 {\"status\":\"failure\",\"message\":\"Something went wrong\"}",
+    "turn 5: 500 {\"status\":\"failure\",\"message\":\"Something went wrong\"}"
+   ],
+   "ok": false
+  },
+  {
+   "format": "anthropic",
+   "kind": "tool_reserialize",
+   "session_via": "prefixwise",
+   "session_rows": {
+    "prefixwise": 5
+   },
+   "recorded": 5,
+   "lost_sessions": {},
+   "causes": [
+    "first_write",
+    "none",
+    "tool_reserialize",
+    "none",
+    "none"
+   ],
+   "expected": [
+    "first_write",
+    "none",
+    "tool_reserialize",
+    "none",
+    "none"
+   ],
+   "reads": [
+    "0/4911",
+    "4911/4936",
+    "0/4961",
+    "4961/4986",
+    "4986/5011"
+   ],
+   "provider": [
+    "anthropic"
+   ],
+   "errors": [
+    "turn 1: 500 {\"status\":\"failure\",\"message\":\"Something went wrong\"}",
+    "turn 2: 500 {\"status\":\"failure\",\"message\":\"Something went wrong\"}",
+    "turn 3: 500 {\"status\":\"failure\",\"message\":\"Something went wrong\"}",
+    "turn 4: 500 {\"status\":\"failure\",\"message\":\"Something went wrong\"}",
+    "turn 5: 500 {\"status\":\"failure\",\"message\":\"Something went wrong\"}"
+   ],
+   "ok": false
+  },
+  {
+   "format": "anthropic",
+   "kind": "volatile_system",
+   "session_via": "prefixwise",
+   "session_rows": {
+    "prefixwise": 5
+   },
+   "recorded": 5,
+   "lost_sessions": {},
+   "causes": [
+    "first_write",
+    "none",
+    "volatile_system",
+    "none",
+    "none"
+   ],
+   "expected": [
+    "first_write",
+    "none",
+    "volatile_system",
+    "none",
+    "none"
+   ],
+   "reads": [
+    "0/4911",
+    "4911/4936",
+    "0/4961",
+    "4961/4986",
+    "4986/5011"
+   ],
+   "provider": [
+    "anthropic"
+   ],
+   "errors": [
+    "turn 1: 500 {\"status\":\"failure\",\"message\":\"Something went wrong\"}",
+    "turn 2: 500 {\"status\":\"failure\",\"message\":\"Something went wrong\"}",
+    "turn 3: 500 {\"status\":\"failure\",\"message\":\"Something went wrong\"}",
+    "turn 4: 500 {\"status\":\"failure\",\"message\":\"Something went wrong\"}",
+    "turn 5: 500 {\"status\":\"failure\",\"message\":\"Something went wrong\"}"
+   ],
+   "ok": false
+  },
+  {
+   "format": "anthropic",
+   "kind": "system_edit",
+   "session_via": "prefixwise",
+   "session_rows": {
+    "prefixwise": 5
+   },
+   "recorded": 5,
+   "lost_sessions": {},
+   "causes": [
+    "first_write",
+    "none",
+    "system_edit",
+    "none",
+    "none"
+   ],
+   "expected": [
+    "first_write",
+    "none",
+    "system_edit",
+    "none",
+    "none"
+   ],
+   "reads": [
+    "0/4911",
+    "4911/4936",
+    "0/5148",
+    "5148/5173",
+    "5173/5198"
+   ],
+   "provider": [
+    "anthropic"
+   ],
+   "errors": [
+    "turn 1: 500 {\"status\":\"failure\",\"message\":\"Something went wrong\"}",
+    "turn 2: 500 {\"status\":\"failure\",\"message\":\"Something went wrong\"}",
+    "turn 3: 500 {\"status\":\"failure\",\"message\":\"Something went wrong\"}",
+    "turn 4: 500 {\"status\":\"failure\",\"message\":\"Something went wrong\"}",
+    "turn 5: 500 {\"status\":\"failure\",\"message\":\"Something went wrong\"}"
+   ],
+   "ok": false
+  },
+  {
+   "format": "anthropic",
+   "kind": "history_edit",
+   "session_via": "prefixwise",
+   "session_rows": {
+    "prefixwise": 5
+   },
+   "recorded": 5,
+   "lost_sessions": {},
+   "causes": [
+    "first_write",
+    "none",
+    "history_edit",
+    "none",
+    "none"
+   ],
+   "expected": [
+    "first_write",
+    "none",
+    "history_edit",
+    "none",
+    "none"
+   ],
+   "reads": [
+    "0/4911",
+    "4911/4936",
+    "4369/4963",
+    "4963/4988",
+    "4988/5013"
+   ],
+   "provider": [
+    "anthropic"
+   ],
+   "errors": [
+    "turn 1: 500 {\"status\":\"failure\",\"message\":\"Something went wrong\"}",
+    "turn 2: 500 {\"status\":\"failure\",\"message\":\"Something went wrong\"}",
+    "turn 3: 500 {\"status\":\"failure\",\"message\":\"Something went wrong\"}",
+    "turn 4: 500 {\"status\":\"failure\",\"message\":\"Something went wrong\"}",
+    "turn 5: 500 {\"status\":\"failure\",\"message\":\"Something went wrong\"}"
+   ],
+   "ok": false
+  }
+ ]
+}
