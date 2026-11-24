@@ -140,6 +140,25 @@ def test_routing_miss_needs_a_short_gap():
     assert _pair(gap=None).cause is MissCause.UNKNOWN
 
 
+
+def test_a_short_read_within_the_ttl_is_a_routing_miss_with_its_size():
+    """An unchanged prefix that came back only in part, too soon to have expired: the same miss as a
+    zero read, only smaller. It was `unknown` ("expiry or routing"), though no cache expires that fast."""
+    c = _pair(gap=10, cached=150)
+    assert c.cause is MissCause.ROUTING_MISS
+    assert "read 150 of the 2,000-token unchanged prefix" in c.evidence
+    assert _pair(gap=200, ttl=3600, cached=150).cause is MissCause.ROUTING_MISS
+    assert "nothing read from cache" in _pair(gap=90).evidence
+
+
+def test_a_short_read_past_the_ttl_or_with_no_timing_keeps_its_verdict():
+    c = _pair(gap=900, ttl=300, cached=150)
+    assert c.cause is MissCause.TTL_EXPIRED and "read 150 of the 2,000-token" in c.evidence
+    c = _pair(gap=1200, cached=150)  # TTL unknown and past the shortest any provider keeps
+    assert c.cause is MissCause.UNKNOWN and "unknown TTL" in c.evidence and "read 150 of" in c.evidence
+    assert _pair(gap=None, cached=150).cause is MissCause.UNKNOWN
+    assert _pair(gap=10, cached=1000).cause is MissCause.NONE  # half or more of the prefix: a hit
+
 def test_evicted_only_when_cache_read_low():
     assert _pair(gap=30, evicted_blocks=1).cause is MissCause.EVICTED
     assert _pair(gap=30, cached=1900, evicted_blocks=1).cause is MissCause.NONE

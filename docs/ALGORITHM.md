@@ -141,7 +141,7 @@ is not scored against the verdict, since it answers another question.
 | Behind several caches without deciding events | `unknown` |
 | Behind one engine | `evicted`, inferred |
 | The gap exceeds the TTL | `ttl_expired` |
-| Nothing read, gap within the TTL (or within the shortest provider TTL when unknown) | `routing_miss`, inferred |
+| Less than half of the reusable prefix read (nothing, or only part), gap within the TTL (or within the shortest provider TTL when unknown): too soon to have expired | `routing_miss`, inferred |
 | Otherwise | `unknown` |
 
 ### 2.4 Facts outside the two requests

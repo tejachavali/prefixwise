@@ -585,25 +585,33 @@ def classify(prev: RequestSnapshot | None, curr: RequestSnapshot,
                               secondary, native_reason)
 
     gap, ttl = curr.gap_seconds, curr.ttl_seconds
+    # How much of the unchanged prefix came back, named in every verdict below: a partial read is
+    # a miss of its own size, not a hit.
+    read = (f"read {curr.cached_tokens:,} of the {_reusable(prev, curr):,}-token unchanged prefix" if curr.cached_tokens
+            else "nothing read from cache")
     if ttl is not None and gap is not None and gap > ttl:
         return Classification(MissCause.TTL_EXPIRED, True,
-                              f"gap {gap:.0f}s since last turn exceeds the cache TTL {ttl:.0f}s",
+                              f"gap {gap:.0f}s since last turn exceeds the cache TTL {ttl:.0f}s; {read}",
                               secondary, native_reason)
 
-    if curr.cached_tokens == 0 and curr.prompt_tokens > 0 and gap is not None and \
+    # Within the TTL (or, when it is unknown, within the shortest TTL any provider keeps), an
+    # unchanged prefix that came back short did not expire. With no eviction evidence, the request
+    # most likely reached a cache that did not hold it (another server). A partial read is the same
+    # miss as a zero read, only smaller: implicit caches (OpenAI, DeepSeek, Gemini) do both.
+    if curr.prompt_tokens > 0 and gap is not None and \
        (gap <= (ttl if ttl is not None else MIN_PROVIDER_TTL_SECONDS)):
         window = f"TTL {ttl:.0f}s" if ttl is not None else f"shortest provider TTL {MIN_PROVIDER_TTL_SECONDS}s"
         return Classification(MissCause.ROUTING_MISS, None,
                               f"inferred: blocks and params equal, gap {gap:.0f}s within {window}, "
-                              "no eviction evidence, nothing read from cache",
+                              f"no eviction evidence, {read}",
                               secondary, native_reason)
     if curr.prompt_tokens > 0 and gap is not None and ttl is None:
         return Classification(MissCause.UNKNOWN, None,
-                              f"prefix reusable but cache_read low after a {gap:.0f}s gap with unknown TTL:"
-                              " expiry or routing, not distinguishable",
+                              f"prefix reusable but cache_read low ({read}) after a {gap:.0f}s gap with unknown"
+                              " TTL: expiry or routing, not distinguishable",
                               secondary, native_reason)
     return Classification(MissCause.UNKNOWN, None,
-                          "prefix reusable but cache_read low; no timing or usage evidence to name a cause",
+                          f"prefix reusable but cache_read low ({read}); no timing or usage evidence to name a cause",
                           secondary, native_reason)
 
 
