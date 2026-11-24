@@ -22,6 +22,7 @@ Usage:
   python gateway_check.py --gateway http://127.0.0.1:8080 --ledger gw.db \\
       --openai-path /v1/chat/completions --anthropic-path /anthropic/v1/messages \\
       --openai-model openai/gpt-4o-mini --anthropic-model anthropic/claude-haiku-4-5 [--stream] [--header K:V]
+      [--session-header NAME]
   python gateway_check.py --backend --gateway self ...   (no gateway: the client talks to the proxy
       directly, to check this script)
 Prints a table and writes --out (JSON). Exit code 1 when anything is wrong.
@@ -101,6 +102,8 @@ def request(fmt, kind, turn, sid, args):
     for h in args.header or []:
         k, _, v = h.partition(":")
         headers[k.strip().lower()] = v.strip()
+    for name in args.session_header or []:  # a gateway that forwards only its own prefixed headers
+        headers[name.strip().lower()] = f"h-{sid}"
     return path, body, headers
 
 
@@ -166,6 +169,8 @@ def main():
     p.add_argument("--anthropic-model", default="claude-haiku-4-5")
     p.add_argument("--stream", action="store_true")
     p.add_argument("--header", action="append", help="extra header for the gateway, K:V (its own auth)")
+    p.add_argument("--session-header", action="append",
+                   help="also send the session id under this header name (e.g. x-bf-eh-x-prefixwise-session-id)")
     p.add_argument("--out", default="gateway-check.json")
     args = p.parse_args()
     procs = start_backend(args) if args.backend else []
