@@ -1,7 +1,7 @@
 # Prefixwise behind an LLM gateway
 
 `gateway_check.py` checks Prefixwise behind any gateway that lets you set a provider's base URL (Bifrost,
-Envoy AI Gateway / Agent Router, Portkey's open-source gateway, Plano, Kong, ...). It needs no API keys: a cache
+Envoy AI Gateway / Agent Router, Portkey's open-source gateway, Plano, ...). It needs no API keys: a cache
 mock (`../litellm/cachemock.py`) stands in for the provider.
 
 ```
@@ -12,9 +12,11 @@ It sends five 5-turn conversations per format (OpenAI chat completions, Anthropi
 four with one change at turn 3 (tools reordered, a timestamp in the system prompt changed, the system prompt
 edited, the first user message edited), and reports:
 
-1. whether every call was recorded;
-2. which conversation id reached Prefixwise through the gateway: a header (`x-prefixwise-session-id`,
-   `x-session-id`), the body (OpenAI `user`, Anthropic `metadata.user_id`), or none;
+1. whether every call was recorded (counted from the ledger's rows, whatever session they went under);
+2. which conversation id reached Prefixwise through the gateway. Each is sent with its own prefix, so the
+   report names the one that got through: `prefixwise` (`x-prefixwise-session-id`), `forwarded` (a
+   `--session-header`), `generic` (`x-session-id`), `body` (OpenAI `user`, Anthropic `metadata.user_id`),
+   `none`, or `split:a+b` when it got through on some calls and not others;
 3. whether each conversation got the expected verdicts: `first_write, none, <the change>, none, none`.
 
 ```bash
@@ -30,6 +32,7 @@ python gateway_check.py --gateway http://127.0.0.1:8080 --ledger gw.db \
 Other options: `--header K:V` (the gateway's own headers), `--session-header NAME` (also send the conversation
 id under a gateway's forwarded-header name, e.g. Bifrost's `x-bf-eh-x-prefixwise-session-id`),
 `--openai-model`, `--anthropic-model`, `--formats openai,anthropic`. It writes `--out` (JSON) and exits 1 when
-any conversation is wrong.
+any conversation is wrong. With `--backend` it refuses ports already in use, and it reads the ledger
+read-only, so a wrong `--ledger` path is an error rather than an empty new file.
 
-Results go under `runs/`, one record per gateway and date, with the gateway's version and config.
+Results will go under `runs/`, one record per gateway and date, with the gateway's version and config.

@@ -11,10 +11,15 @@ Anthropic base URLs set to http://127.0.0.1:<proxy-port>.
 Five 5-turn conversations per format, unchanged and with one change at turn 3: tools reordered, a
 timestamp in the system prompt changed, the system prompt edited, the first user message edited. The
 expected verdicts are first_write, none, <the change>, none, none. Each request names its
-conversation three ways, so the report shows which one the gateway let through:
-  header   x-prefixwise-session-id and x-session-id: "h-<id>"
-  body     OpenAI `user` / Anthropic `metadata.user_id`: "u-<id>"
-With neither, Prefixwise has no conversation to compare against and the run says so.
+conversation four ways, each with its own prefix, so the report shows which one the gateway let
+through (the proxy takes them in this order):
+  prefixwise  x-prefixwise-session-id: "p-<id>"
+  forwarded   each --session-header (a gateway's forwarded-header form): "f-<id>"
+  generic     x-session-id: "s-<id>"
+  body        OpenAI `user` / Anthropic `metadata.user_id`: "u-<id>"
+A gateway that maps a forwarded header onto x-prefixwise-session-id shows as "forwarded". Calls
+recorded under none of these (Prefixwise then has no conversation to compare against) are counted
+separately, from the ledger's row count, so "recorded" never depends on the id getting through.
 
 Usage:
   python gateway_check.py --backend --proxy-port 4100 --mock-port 4101 --ledger gw.db --setup-only
@@ -30,6 +35,7 @@ Prints a table and writes --out (JSON). Exit code 1 when anything is wrong.
 import argparse
 import json
 import os
+import socket
 import sqlite3
 import subprocess
 import sys
@@ -40,6 +46,8 @@ import uuid
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 MOCK = os.path.join(HERE, "..", "litellm", "cachemock.py")
+CARRIERS = (("p-", "prefixwise"), ("f-", "forwarded"), ("s-", "generic"), ("u-", "body"))
+FORMATS = ("openai", "anthropic")
 KINDS = ("unchanged", "tool_reserialize", "volatile_system", "system_edit", "history_edit")
 EXPECT = {"unchanged": None, "tool_reserialize": "tool_reserialize", "volatile_system": "volatile_system",
           "system_edit": "system_edit", "history_edit": "history_edit"}
@@ -96,14 +104,14 @@ def request(fmt, kind, turn, sid, args):
         if args.stream:
             body["stream"] = True
         path = args.anthropic_path
-    headers = {"content-type": "application/json", "x-prefixwise-session-id": f"h-{sid}",
-               "x-session-id": f"h-{sid}", "authorization": "Bearer sk-test", "x-api-key": "sk-test",
+    headers = {"content-type": "application/json", "x-prefixwise-session-id": f"p-{sid}",
+               "x-session-id": f"s-{sid}", "authorization": "Bearer sk-test", "x-api-key": "sk-test",
                "anthropic-version": "2023-06-01"}
     for h in args.header or []:
         k, _, v = h.partition(":")
         headers[k.strip().lower()] = v.strip()
     for name in args.session_header or []:  # a gateway that forwards only its own prefixed headers
-        headers[name.strip().lower()] = f"h-{sid}"
+        headers[name.strip().lower()] = f"f-{sid}"
     return path, body, headers
 
 
@@ -119,8 +127,10 @@ def send(base, path, body, headers):
         return 0, f"{type(e).__name__}: {e}"[:300]
 
 
-def wait_for(url, seconds=30):
+def wait_for(url, seconds=30, proc=None):
     for _ in range(seconds * 10):
+        if proc is not None and proc.poll() is not None:
+            return False  # it exited: it will never answer
         try:
             urllib.request.urlopen(url, timeout=1)
             return True
@@ -131,27 +141,62 @@ def wait_for(url, seconds=30):
     return False
 
 
-def start_backend(args):
-    mock = subprocess.Popen([sys.executable, "-I", MOCK, str(args.mock_port)])
-    wait_for(f"http://127.0.0.1:{args.mock_port}/")
+def start_backend(args, procs):
+    """Start the mock and the proxy into procs (so the caller stops them whatever happens). Both ports
+    must be free first: a port something else answers on (an earlier backend, say) would make this run
+    send to that proxy and read the wrong ledger."""
+    for port in (args.mock_port, args.proxy_port):
+        with socket.socket() as sock:
+            if sock.connect_ex(("127.0.0.1", port)) == 0:
+                sys.exit(f"port {port} is already in use (an earlier backend still running?)")
+    procs.append(subprocess.Popen([sys.executable, "-I", MOCK, str(args.mock_port)],
+                                  stdout=subprocess.DEVNULL))
+    if not wait_for(f"http://127.0.0.1:{args.mock_port}/", proc=procs[-1]):
+        sys.exit(f"the cache mock did not start on port {args.mock_port} (in use?)")
     env = dict(os.environ, PREFIXWISE_LEDGER_PATH=os.path.abspath(args.ledger))
-    proxy = subprocess.Popen([sys.executable, "-m", "prefixwise", "serve", "--upstream",
-                              f"http://127.0.0.1:{args.mock_port}", "--port", str(args.proxy_port),
-                              "--ledger", os.path.abspath(args.ledger)], env=env,
-                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    if not wait_for(f"http://127.0.0.1:{args.proxy_port}/health"):
-        sys.exit("prefixwise serve did not start")
-    return [mock, proxy]
+    procs.append(subprocess.Popen([sys.executable, "-m", "prefixwise", "serve", "--upstream",
+                                   f"http://127.0.0.1:{args.mock_port}", "--port", str(args.proxy_port),
+                                   "--ledger", os.path.abspath(args.ledger)], env=env,
+                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
+    if not wait_for(f"http://127.0.0.1:{args.proxy_port}/health", proc=procs[-1]):
+        sys.exit(f"prefixwise serve did not start on port {args.proxy_port} (in use, or a bad --ledger path?)")
+
+
+def _read(ledger, sql, params=()):
+    """Read-only, so a wrong --ledger path is an error, not a new empty file."""
+    try:
+        c = sqlite3.connect(f"file:{os.path.abspath(ledger)}?mode=ro", uri=True)
+    except sqlite3.OperationalError:
+        sys.exit(f"no ledger at {ledger}: pass the --ledger the backend writes to")
+    try:
+        return c.execute(sql, params).fetchall()
+    except sqlite3.OperationalError as e:
+        sys.exit(f"{ledger} is not a Prefixwise ledger ({e}): pass the --ledger the backend writes to")
+    finally:
+        c.close()
+
+
+def row_count(ledger):
+    return _read(ledger, "SELECT COUNT(*) FROM entries")[0][0]
 
 
 def rows_for(ledger, sid):
-    with sqlite3.connect(ledger) as c:
-        for name in ("h-" + sid, "u-" + sid):
-            rows = c.execute("SELECT cause, prompt_tokens, cached_tokens, provider FROM entries "
-                             "WHERE session_id = ? ORDER BY id", (name,)).fetchall()
-            if rows:
-                return ("header" if name.startswith("h-") else "body"), rows
-    return "none", []
+    """(how the id got through, rows under the conversation's id, rows per carrier). Rows under more
+    than one carrier (the id got through on some calls and not others) are "split:a+b"."""
+    found = {}
+    for prefix, label in CARRIERS:
+        rows = _read(ledger, "SELECT id, cause, prompt_tokens, cached_tokens, provider FROM entries "
+                             "WHERE session_id = ? ORDER BY id", (prefix + sid,))
+        if rows:
+            found[label] = rows
+    if not found:
+        return "none", [], {}
+    counts = {k: len(v) for k, v in found.items()}
+    if len(found) > 1:
+        rows = sorted(r for v in found.values() for r in v)  # in the order they were recorded
+        return "split:" + "+".join(found), [r[1:] for r in rows], counts
+    (label, rows), = found.items()
+    return label, [r[1:] for r in rows], counts
 
 
 def main():
@@ -173,8 +218,15 @@ def main():
                    help="also send the session id under this header name (e.g. x-bf-eh-x-prefixwise-session-id)")
     p.add_argument("--out", default="gateway-check.json")
     args = p.parse_args()
-    procs = start_backend(args) if args.backend else []
+    formats = [f.strip() for f in args.formats.split(",") if f.strip()]
+    if not formats or any(f not in FORMATS for f in formats):
+        p.error(f"--formats takes {', '.join(FORMATS)} (comma-separated), not {args.formats!r}")
+    if args.setup_only and not args.backend:
+        p.error("--setup-only needs --backend (it starts the mock and the proxy, then waits)")
+    procs = []
     try:
+        if args.backend:
+            start_backend(args, procs)
         if args.setup_only:
             print(f"mock on {args.mock_port}, prefixwise serve on {args.proxy_port}, ledger {args.ledger}; "
                   "Ctrl-C to stop", flush=True)
@@ -182,10 +234,12 @@ def main():
                 time.sleep(3600)
         base = f"http://127.0.0.1:{args.proxy_port}" if args.gateway == "self" else args.gateway
         results, bad = [], 0
-        for fmt in args.formats.split(","):
+        if not os.path.exists(args.ledger):
+            sys.exit(f"no ledger at {args.ledger}: pass the --ledger the backend writes to")
+        for fmt in formats:
             for kind in KINDS:
                 sid = f"{fmt[:2]}-{kind[:6]}-{uuid.uuid4().hex[:6]}"
-                errors = []
+                errors, before = [], row_count(args.ledger)
                 for turn in range(1, 6):
                     path, body, headers = request(fmt, kind, turn, sid, args)
                     status, err = send(base, path, body, headers)
@@ -193,21 +247,30 @@ def main():
                         errors.append(f"turn {turn}: {status} {err}")
                     time.sleep(0.2)
                 time.sleep(1.0)
-                via, rows = rows_for(args.ledger, sid)
+                # Every row the ledger gained while this conversation ran, whatever session it went
+                # under: only this script writes to the ledger during a run.
+                recorded = row_count(args.ledger) - before
+                via, rows, counts = rows_for(args.ledger, sid)
                 causes = [r[0] for r in rows]
                 want = ["first_write", "none", EXPECT[kind] or "none", "none", "none"]
-                ok = not errors and causes == want
+                ok = not errors and recorded == 5 and not via.startswith("split") and causes == want
                 bad += not ok
-                results.append({"format": fmt, "kind": kind, "session_via": via, "causes": causes,
-                                "expected": want, "reads": [f"{r[2]}/{r[1]}" for r in rows],
+                results.append({"format": fmt, "kind": kind, "session_via": via, "session_rows": counts,
+                                "recorded": recorded, "causes": causes, "expected": want,
+                                "reads": [f"{r[2]}/{r[1]}" for r in rows],
                                 "provider": sorted({r[3] for r in rows}), "errors": errors, "ok": ok})
-                print(f"{'ok ' if ok else 'BAD'} {fmt:9s} {kind:16s} session via {via:6s} {causes}"
+                lost = recorded - len(rows)
+                print(f"{'ok ' if ok else 'BAD'} {fmt:9s} {kind:16s} recorded {recorded}/5  session via {via:10s}"
+                      f" {causes}" + (f"  ({lost} under no id of this conversation)" if lost else "")
                       + (f"  errors: {errors[:2]}" if errors else ""), flush=True)
-        recorded = sum(len(r["causes"]) for r in results)
+        recorded = sum(r["recorded"] for r in results)
+        matched = sum(len(r["causes"]) for r in results)
         sent = 5 * len(results)
-        print(f"\n{recorded} of {sent} calls recorded; {len(results) - bad} of {len(results)} conversations right")
-        json.dump({"gateway": args.gateway, "stream": args.stream, "formats": args.formats,
-                   "recorded": recorded, "sent": sent, "results": results}, open(args.out, "w"), indent=1)
+        print(f"\n{recorded} of {sent} calls recorded ({matched} under the conversation's id); "
+              f"{len(results) - bad} of {len(results)} conversations right")
+        with open(args.out, "w") as f:
+            json.dump({"gateway": args.gateway, "stream": args.stream, "formats": formats, "recorded": recorded,
+                       "matched": matched, "sent": sent, "results": results}, f, indent=1)
         sys.exit(1 if bad else 0)
     finally:
         for pr in procs:
