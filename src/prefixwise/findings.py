@@ -318,7 +318,17 @@ def findings(ledger, since: float | None = None, until: float | None = None,
             "unpriced_models": sorted(unpriced), "approximate_prices": sorted(approximate),
             "bill": bill(ledger, **window),
             "cache_not_reported": not_reported,
-            "unexplained_share": unexplained_share(ledger, since, until)}
+            "unexplained_share": unexplained_share(ledger, since, until),
+            "observed_lifetimes": observed_lifetimes(ledger, since, until)}
+
+
+def observed_lifetimes(ledger, since: float | None = None, until: float | None = None) -> list[dict]:
+    """How long caches with no stated TTL were seen to last, per provider and model (prefixwise.lifetime):
+    observed in this ledger, not a promise of the provider's."""
+    from .lifetime import from_ledger
+    return [{"provider": p, "model": m, "alive_up_to_seconds": o.alive_up_to, "cold_from_seconds": o.cold_from,
+             "hits": o.hits, "colds": o.colds, "what": o.describe()}
+            for (p, m), o in sorted(from_ledger(ledger, since, until).items())]
 
 
 def _starts_with(col: str) -> str:
@@ -480,6 +490,14 @@ def render(f: dict, command: str = "serve", headline: bool = True) -> str:
         else:
             lines.append(head + f"But it would cost {_usd(t['extra_write_cost_usd'])} more in cache writes and "
                          f"save at most {_usd(t['saved_at_most_usd'])}: it cannot pay, keep the 5-minute cache.")
+    for o in f.get("observed_lifetimes") or []:
+        use = []
+        if o["alive_up_to_seconds"] is not None:
+            use.append("an unchanged prompt that came back short within it is counted as a routing miss")
+        if o["cold_from_seconds"] is not None:
+            use.append("one that came back short past it as an expiry")
+        lines.append(f"Observed cache lifetime, {o['model']} ({o['provider']}): {o['what']}. Seen in this ledger, "
+                     f"not a promise of the provider's; {', and '.join(use)}.")
     if f["failures"]:
         parts = [f"{x['requests']} x {x['error']}" for x in f["failures"]]
         lines.append("Failed requests (no verdict): " + ", ".join(parts) + ".")

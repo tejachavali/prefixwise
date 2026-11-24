@@ -141,6 +141,8 @@ is not scored against the verdict, since it answers another question.
 | Behind several caches without deciding events | `unknown` |
 | Behind one engine | `evicted`, inferred |
 | The gap exceeds the TTL | `ttl_expired` |
+| No TTL known, and this ledger has seen the cache on this provider and model still read an unchanged prefix after idle gaps up to *A* (at least 3 such turns after more than a minute): less than half read within *A* | `routing_miss`, inferred, naming the observed lifetime |
+| No TTL known, and less than half was read after a gap at least *C*, where *C* is the shortest gap, longer than every gap that was read, after which at least 3 unchanged prefixes read less than half | `ttl_expired`, inferred, naming the observed lifetime |
 | Less than half of the reusable prefix read (nothing, or only part), gap within the TTL (or within the shortest provider TTL when unknown): too soon to have expired. On Anthropic a part read counts only within 5 minutes: a 1-hour breakpoint early in the prompt can still read after a later 5-minute one expired | `routing_miss`, inferred |
 | Otherwise | `unknown` |
 

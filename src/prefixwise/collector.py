@@ -24,6 +24,7 @@ from .classifier import (UNSEEN_PARENT, Classification, MissCause, RequestSnapsh
 from .details import Facts, detail_for
 from .diagnostics import AgreementScorer
 from .ledger import Ledger, LedgerEntry, avoidable_for_turn, unread_write
+from .lifetime import LEDGER_SQL, LifetimeTracker
 from .pricing import PriceTable, breakdown, cache_reported, completion_tokens_of, normalize_usage
 from .prom import Metrics
 from .records import RecordError, TurnRecord
@@ -95,6 +96,9 @@ def _best_parent(lane: _Lane, identity: tuple, compaction: bool = False) -> tupl
     return latest, False, bool(not compaction and system and system != theirs)
 
 
+
+SEED_ROWS = 20_000  # recent ledger turns a collector learns cache lifetimes from at start
+
 class Collector:
     def __init__(self, ledger: Ledger, prices: PriceTable, metrics: Metrics | None = None,
                  scorer: AgreementScorer | None = None):
@@ -115,6 +119,15 @@ class Collector:
         self.session_facts: dict[str, Facts] = _SessionMap(MAX_SESSIONS)
         self._seen: OrderedDict = OrderedDict()  # request ids ingested, for idempotent batches
         self.stats = {"records": 0, "failures": 0, "duplicates": 0, "rejected": 0, "errors": 0, "concurrent": 0}
+        # How long caches with no stated TTL have been seen to last (prefixwise.lifetime), seeded
+        # from the ledger's recent turns so a restart does not forget it.
+        self.lifetimes = LifetimeTracker()
+        try:
+            with ledger.reader() as conn:
+                rows = conn.execute(LEDGER_SQL + "ORDER BY id DESC LIMIT ?", (SEED_ROWS,)).fetchall()
+            self.lifetimes.seed(reversed(rows))
+        except Exception:  # noqa: BLE001 - an empty or older ledger: start with nothing learned
+            pass
 
     # -- what the edge asks before a request goes out -----------------------------------------
 
@@ -341,7 +354,15 @@ class Collector:
                                     "had finished: a parallel request, or its record arrived late; it could not have "
                                     "read that turn's cache write", native_reason=native_reason)
         else:
+            learn = rec.ttl_seconds is None and rec.engine is None and provider != "anthropic"
+            if learn:
+                curr.observed_lifetime = self.lifetimes.estimate(provider, rec.model)
             result = classify(prev, curr, native_reason=native_reason)
+            if learn and prev is not None and gap_seconds is not None and prompt_tokens > 0 and curr.cache_reported:
+                if result.cause is MissCause.NONE:
+                    self.lifetimes.observe(provider, rec.model, gap_seconds, hit=True)
+                elif result.cold_unchanged:
+                    self.lifetimes.observe(provider, rec.model, gap_seconds, hit=False)
             if interleaved:
                 result.evidence = (f"{result.evidence}; compared with this conversation's last turn "
                                    "(another conversation in this session came between)")
