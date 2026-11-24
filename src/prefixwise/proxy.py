@@ -1693,41 +1693,51 @@ class PrefixwiseProxy:
 MAX_BODY_BYTES = int(os.environ.get("PREFIXWISE_MAX_BODY_BYTES", str(32 * 1024 * 1024)))
 
 
+MAX_ID_CHARS = 256  # session / agent / task ids: labels, not payloads
+
+
+class ClientError(ValueError):
+    """A request the proxy refuses: answered 400, never a dropped connection."""
+
+
+class BodyTooLarge(ClientError):
+    """A request body over MAX_BODY_BYTES: answered 413."""
+
+
+_CHUNK_SIZE = re.compile(rb"[0-9A-Fa-f]{1,16}")
+
+
 def _read_chunked(rfile, limit: int) -> bytes:
-    """A Transfer-Encoding: chunked request body (RFC 9112 section 7.1): hex size lines (extensions
-    after ';' ignored), each chunk followed by CRLF, a zero-size chunk, then trailer lines up to a
-    blank line. More than `limit` bytes is a ClientError, as is malformed framing."""
-    out = bytearray()
+    """A Transfer-Encoding: chunked request body (RFC 9112 section 7.1): a hex size line (extensions
+    after ';' ignored), the chunk and its CRLF, repeated until a zero-size chunk, then trailer lines
+    up to a blank line. Malformed framing is a ClientError; more than `limit` bytes is BodyTooLarge,
+    raised before the chunk that would pass it is read. Chunks are kept as read and joined once, so
+    the peak is about twice the body."""
+    parts, total = [], 0
     while True:
         line = rfile.readline(1024)
         if not line.endswith(b"\n"):
             raise ClientError("malformed chunked body: bad chunk size line")
-        try:
-            size = int(line.split(b";", 1)[0].strip(), 16)
-        except ValueError:
+        field = line.split(b";", 1)[0].strip()
+        if not _CHUNK_SIZE.fullmatch(field):
             raise ClientError("malformed chunked body: chunk size is not hexadecimal")
-        if size < 0:
-            raise ClientError("malformed chunked body: negative chunk size")
+        size = int(field, 16)
         if size == 0:
             break
-        if len(out) + size > limit:
-            raise ClientError(f"body larger than {limit} bytes")
+        if total + size > limit:
+            raise BodyTooLarge(f"body larger than {limit} bytes")
         data = rfile.read(size)
         if len(data) != size:
             raise ClientError("malformed chunked body: truncated chunk")
-        out += data
+        parts.append(data)
+        total += size
         if rfile.readline(1024).strip():
             raise ClientError("malformed chunked body: missing CRLF after a chunk")
     for _ in range(100):  # trailers, then the blank line that ends the body
         line = rfile.readline(8192)
         if not line or not line.strip():
             break
-    return bytes(out)
-MAX_ID_CHARS = 256  # session / agent / task ids: labels, not payloads
-
-
-class ClientError(ValueError):
-    """A request the proxy refuses: answered 400, never a dropped connection."""
+    return b"".join(parts)
 
 
 def validate_body(body: dict) -> None:
@@ -1892,10 +1902,11 @@ def make_handler(proxy: PrefixwiseProxy):
             (Envoy-based gateways do, e.g. Plano), by chunks. Reading only Content-Length there would
             forward an empty body. Raises ClientError on a malformed or oversized body; OSError when
             the client stalls or hangs up."""
-            te = (self.headers.get("Transfer-Encoding") or "").lower()
-            if te:
-                if [t.strip() for t in te.split(",")][-1] != "chunked":
-                    raise ClientError(f"unsupported Transfer-Encoding: {te}")
+            codings = [t.strip().lower() for v in (self.headers.get_all("Transfer-Encoding") or [])
+                       for t in v.split(",") if t.strip()]
+            if codings:
+                if codings != ["chunked"]:  # a compressed body would reach the classifier undecoded
+                    raise ClientError("unsupported Transfer-Encoding: only chunked is accepted")
                 self.close_connection = True  # the connection's framing is ours to end
                 return _read_chunked(self.rfile, MAX_BODY_BYTES)
             try:
@@ -1905,7 +1916,7 @@ def make_handler(proxy: PrefixwiseProxy):
             if length < 0:
                 raise ClientError("Content-Length is negative")
             if length > MAX_BODY_BYTES:
-                raise ClientError(f"body larger than {MAX_BODY_BYTES} bytes")
+                raise BodyTooLarge(f"body larger than {MAX_BODY_BYTES} bytes")
             return self.rfile.read(length)
 
         def _passthrough(self, method: str):
@@ -1916,7 +1927,8 @@ def make_handler(proxy: PrefixwiseProxy):
                 try:
                     body = self._read_body()
                 except ClientError as e:
-                    return self._json(413 if "larger" in str(e) else 400, _error(400, str(e)))
+                    code = 413 if isinstance(e, BodyTooLarge) else 400
+                    return self._json(code, _error(code, str(e)))
                 except OSError:  # client stalled past CLIENT_TIMEOUT or hung up mid-body
                     self.close_connection = True
                     return
@@ -2022,7 +2034,7 @@ def make_handler(proxy: PrefixwiseProxy):
                 try:
                     return self._json(*api.post(proxy, path, self._read_json()))
                 except ClientError as exc:
-                    code = 413 if "larger than" in str(exc) else 400
+                    code = 413 if isinstance(exc, BodyTooLarge) else 400
                     return self._json(code, _error(code, str(exc)))
                 except ValueError as exc:
                     return self._json(400, _error(400, f"invalid JSON body: {exc}"))
@@ -2045,7 +2057,7 @@ def make_handler(proxy: PrefixwiseProxy):
             try:
                 body = self._read_json()
             except ClientError as exc:
-                code = 413 if "larger than" in str(exc) else 400
+                code = 413 if isinstance(exc, BodyTooLarge) else 400
                 return self._json(code, _error(code, str(exc)))
             except ValueError as exc:
                 return self._json(400, _error(400, f"invalid JSON body: {exc}"))

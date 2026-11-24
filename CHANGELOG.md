@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- **The proxy reads chunked request bodies.** A client that sends `Transfer-Encoding: chunked` with no `Content-Length` had its body read as empty. `prefixwise serve` then forwarded an empty body upstream and recorded the call with 0 prompt tokens, so every later turn was `unknown`. Envoy-based gateways send bodies this way when they rewrite them. Behind Plano (v0.4.39), every call was recorded like this: found in the gateway runs of 2026-11-24 (`experiments/gateways/runs/2026-11-24-round2.md`). Against a real provider, the empty body would have failed each call. Chunked bodies are now read whole, with the same size limit. Malformed chunking, or a transfer coding other than chunked, gets a 400 and is not forwarded. `experiments/gateways/gateway_check.py --chunked` sends bodies this way, to check it.
+- **The proxy reads chunked request bodies.** A client that sends `Transfer-Encoding: chunked` with no `Content-Length` had its body read as empty. `prefixwise serve` then forwarded `{}` upstream and recorded the call with 0 prompt tokens, so every later turn was misjudged: `unknown` on OpenAI's format, `breakpoint_misplaced` on Anthropic's. Envoy-based gateways send bodies this way when they rewrite them. Behind Plano (v0.4.39), every call was recorded like this: found in the gateway runs of 2026-11-24 (`experiments/gateways/runs/2026-11-24-round2.md`). Against a real provider, the empty request would have failed each call. Chunked bodies are now read whole, under the same size limit. Malformed chunking, or any transfer coding other than plain `chunked`, gets a 400 and is not forwarded, and an oversized body gets a 413. `experiments/gateways/gateway_check.py --chunked` sends bodies this way, to check it.
 
 ## 0.12.5: 2026-11-23
 
