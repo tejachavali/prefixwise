@@ -134,6 +134,9 @@ CREATE TABLE prefixwise.entries (
 ) ENGINE = MergeTree ORDER BY (model, recorded_at);
 ```
 
+A table made from an earlier version of this statement needs each newer column added before rows that carry it
+arrive, for example for schema 8: `ALTER TABLE prefixwise.entries ADD COLUMN lifetime_evidence Nullable(UInt8)`.
+
 `cause` is null on a failure row (`status` >= 400 or `error` set); booleans arrive as 0/1. A sink receives rows
 from the moment it is configured; earlier rows are in the ledger (`prefixwise export`). A ClickHouse error that
 names a permanent cause (a schema mismatch) drops the batch and is counted, while a busy server is retried.

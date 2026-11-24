@@ -237,8 +237,6 @@ class Ledger:
             self.conn.execute("CREATE INDEX IF NOT EXISTS entries_request ON entries(request_id)")
             self.conn.execute("CREATE INDEX IF NOT EXISTS entries_session ON entries(session_id)")
             self.conn.execute("CREATE INDEX IF NOT EXISTS entries_time ON entries(recorded_at)")
-            self.conn.execute("CREATE INDEX IF NOT EXISTS entries_lifetime ON entries(provider, model) "
-                              "WHERE lifetime_evidence IS NOT NULL")
             self.conn.execute(
                 """CREATE TABLE IF NOT EXISTS tasks (
                     task_id TEXT PRIMARY KEY, success INTEGER NOT NULL, recorded_at REAL
