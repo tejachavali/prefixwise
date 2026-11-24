@@ -172,7 +172,7 @@ def test_an_anthropic_part_read_after_five_minutes_is_not_called_routing():
     1-hour part reads. The request's TTL is the longest (1 h), so the gap is "within" it, yet the
     5-minute part expired: not a routing miss. Found by review."""
     c = _anthropic_pair(gap=600, cached=15_000, ttl=3600)
-    assert c.cause is not MissCause.ROUTING_MISS
+    assert c.cause is MissCause.UNKNOWN and "5-minute breakpoint may have expired" in c.evidence
     assert _anthropic_pair(gap=120, cached=15_000, ttl=3600).cause is MissCause.ROUTING_MISS
     assert _anthropic_pair(gap=600, cached=0, ttl=3600).cause is MissCause.ROUTING_MISS  # nothing read: as before
 

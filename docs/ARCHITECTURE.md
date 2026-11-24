@@ -245,7 +245,7 @@ first rule that fires wins; later ones are kept as secondary causes. In order:
    zero read as evidence):
    - a **hit**, `none`: at least half of the reusable prefix was read from cache;
    - engine evidence: a confirmed `evicted`, or a confirmed `routing_miss` across caches;
-   - `retry_replay`: the identical request again within a minute, nothing cached;
+   - `retry_replay`: the identical request again within a minute, less than half read;
    - with one self-hosted engine and no event evidence: `evicted`, inferred and said so (with
      several caches known, `unknown` instead);
    - `ttl_expired` when the gap exceeds the cache's TTL, `routing_miss` when less than half was read

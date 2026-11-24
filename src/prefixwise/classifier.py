@@ -607,10 +607,18 @@ def classify(prev: RequestSnapshot | None, curr: RequestSnapshot,
         limit = min(limit, MIN_PROVIDER_TTL_SECONDS)
     if curr.prompt_tokens > 0 and gap is not None and gap <= limit:
         window = (f"TTL {ttl:.0f}s" if ttl is not None and limit == ttl
+                  else f"{MIN_PROVIDER_TTL_SECONDS // 60} minutes (the shortest TTL a breakpoint can have)"
+                  if curr.provider == "anthropic" and curr.cached_tokens
                   else f"shortest provider TTL {MIN_PROVIDER_TTL_SECONDS}s")
         return Classification(MissCause.ROUTING_MISS, None,
                               f"inferred: blocks and params equal, gap {gap:.0f}s within {window}, "
                               f"no eviction evidence, {read}",
+                              secondary, native_reason)
+    if curr.prompt_tokens > 0 and gap is not None and curr.cached_tokens and curr.provider == "anthropic":
+        return Classification(MissCause.UNKNOWN, None,
+                              f"a part read ({read}) {gap:.0f}s after the last turn: a 5-minute breakpoint may "
+                              "have expired while an earlier 1-hour one held, or the request reached another "
+                              "server: expiry or routing, not distinguishable",
                               secondary, native_reason)
     if curr.prompt_tokens > 0 and gap is not None and ttl is None:
         return Classification(MissCause.UNKNOWN, None,
