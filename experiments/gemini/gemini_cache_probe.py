@@ -9,14 +9,16 @@ Every call is a plain REST request (no SDK), and every response's raw `usageMeta
 is printed and written to the output JSON. Each run starts its prompts with a random nonce, so no
 earlier run's cache can serve it.
 
-  python gemini_cache_probe.py out.json --model gemini-2.5-flash [--parts growth,order,minimum,
+  python gemini_cache_probe.py out.json --model gemini-3-flash [--pause 6] [--retries 4] [--parts growth,order,minimum,
       short,stream,explicit,openai,idle] [--idle-gaps 60,180,300] [--base URL]
 
 The key comes from GEMINI_API_KEY and is sent as the x-goog-api-key header (never printed). About
-60 calls without `idle`; a few cents on a Flash model.
+60 calls without `idle`; a few cents on a Flash model, or the free tier when paced (rate limits
+and overloads are retried, waiting what the API asks; each row records its retries).
 
 Parts:
-  growth    an unchanged conversation growing ~600 tokens a turn for 8 turns: what each turn reads
+  growth    an unchanged conversation growing ~600 words a turn for 10 turns (~6k to ~13k tokens):
+            what each turn reads, and whether reads step in fixed chunks
   stream    the same, streamed (streamGenerateContent?alt=sse): is the read the same?
   order     a large system instruction, large tools and contents; change only the first tool, then
             only the start of the system instruction: where the read stops gives the prefix order
@@ -30,13 +32,16 @@ import argparse
 import json
 import os
 import random
+import re
 import sys
 import time
 import urllib.error
 import urllib.request
 import uuid
 
-PAUSE = 2.0  # seconds between calls (--pause)
+PAUSE = 6.0      # seconds between calls (--pause); free-tier Flash allows a handful of requests a minute
+RETRIES = 4      # retries of a 429 or 503 (--retries)
+MAX_WAIT = 90.0  # longest single wait before a retry, seconds
 WORDS = ("alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa "
          "quebec romeo sierra tango uniform victor whiskey xray yankee zulu river stone cloud ember maple "
          "harbor lantern meadow orbit pixel quartz saddle timber velvet willow anchor basalt cobalt dune "
@@ -53,19 +58,40 @@ class Gemini:
         self.log: list[dict] = []
 
     def _post(self, url: str, body: dict, bearer=False, stream=False):
+        """POST, retrying a rate limit (429) or an overload (503) up to RETRIES times, waiting what the
+        API asks (its RetryInfo retryDelay, or Retry-After), else 10 s, 20 s, 40 s. Returns the last try,
+        with how many retries it took in self.retries."""
+        self.retries = 0
+        for attempt in range(RETRIES + 1):
+            status, raw, secs, wait = self._post_once(url, body, bearer)
+            if status not in (429, 503) or attempt == RETRIES:
+                return status, raw, secs
+            wait = min(wait if wait is not None else 10.0 * 2 ** attempt, MAX_WAIT)
+            print(f"    ({status}; retry {attempt + 1} in {wait:.0f} s)", flush=True)
+            time.sleep(wait)
+            self.retries += 1
+        return status, raw, secs
+
+    def _post_once(self, url: str, body: dict, bearer=False):
         headers = {"content-type": "application/json"}
         headers.update({"authorization": "Bearer " + self.key} if bearer else {"x-goog-api-key": self.key})
         req = urllib.request.Request(url, data=json.dumps(body).encode(), headers=headers)
-        t0 = time.time()
+        t0, wait = time.time(), None
         try:
             with urllib.request.urlopen(req, timeout=180) as r:
                 raw = r.read().decode()
                 status = r.status
         except urllib.error.HTTPError as e:
-            raw, status = e.read().decode(errors="replace")[:600], e.code
+            raw, status = e.read().decode(errors="replace")[:4000], e.code
+            m = re.search(r'"retryDelay"\s*:\s*"(\d+(?:\.\d+)?)s"', raw)
+            after = e.headers.get("Retry-After") if e.headers else None
+            if m:
+                wait = float(m.group(1)) + 1
+            elif after and after.strip().isdigit():
+                wait = float(after)
         except Exception as e:  # noqa: BLE001 - report and go on
             raw, status = f"{type(e).__name__}: {e}"[:600], 0
-        return status, raw, time.time() - t0
+        return status, raw, time.time() - t0, wait
 
     def generate(self, label: str, body: dict, stream=False) -> dict:
         verb = "streamGenerateContent?alt=sse" if stream else "generateContent"
@@ -83,7 +109,7 @@ class Gemini:
             else:
                 usage = json.loads(raw).get("usageMetadata")
         row = {"part": label, "t": round(time.time(), 1), "status": status, "secs": round(secs, 2),
-               "usage": usage, "error": None if status == 200 else raw[:300]}
+               "retries": self.retries, "usage": usage, "error": None if status == 200 else raw[:300]}
         self.log.append(row)
         u = usage or {}
         print(f"  {label:34s} {status}  prompt {u.get('promptTokenCount')}  cached {u.get('cachedContentTokenCount')}"
@@ -96,7 +122,12 @@ class Gemini:
             data = json.loads(raw)
         except ValueError:
             data = None
+        if isinstance(data, list):  # the OpenAI-compatible endpoint wraps an error in a list
+            data = data[0] if data and isinstance(data[0], dict) else None
+        if not isinstance(data, dict):
+            data = None
         row = {"part": label, "t": round(time.time(), 1), "status": status, "secs": round(secs, 2),
+               "retries": self.retries,
                "response": {k: v for k, v in (data or {}).items() if k in ("name", "usage", "usageMetadata",
                                                                             "expireTime", "model")} or None,
                "error": None if 200 <= status < 300 else raw[:300]}
@@ -128,7 +159,7 @@ def tool_decls(rng: random.Random, n=6, words=500) -> list[dict]:
 def growth(g: Gemini, rng, stream=False):
     nonce = uuid.uuid4().hex[:8]
     system, turns = text(4500, rng), []
-    for turn in range(8):
+    for turn in range(10):  # ~6k to ~13k tokens: past 8,192 and 12,288, if reads step in 4,096-token chunks
         turns.append(text(600, rng))
         g.generate(f"{'stream' if stream else 'growth'} turn {turn + 1}", conversation(nonce, system, turns), stream)
         time.sleep(PAUSE)
@@ -217,15 +248,16 @@ def idle(g: Gemini, rng, gaps):
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("out")
-    p.add_argument("--model", default="gemini-2.5-flash")
+    p.add_argument("--model", default="gemini-3-flash")
     p.add_argument("--parts", default="growth,stream,order,minimum,short,explicit,openai")
     p.add_argument("--idle-gaps", default="60,180,300")
     p.add_argument("--base", default="https://generativelanguage.googleapis.com")
     p.add_argument("--seed", type=int, default=7)
-    p.add_argument("--pause", type=float, default=2.0, help="seconds between calls")
+    p.add_argument("--pause", type=float, default=6.0, help="seconds between calls")
+    p.add_argument("--retries", type=int, default=4, help="retries of a 429 or 503")
     a = p.parse_args()
-    global PAUSE
-    PAUSE = a.pause
+    global PAUSE, RETRIES
+    PAUSE, RETRIES = a.pause, a.retries
     key = os.environ.get("GEMINI_API_KEY", "").strip()
     if not key:
         sys.exit("GEMINI_API_KEY is not set")

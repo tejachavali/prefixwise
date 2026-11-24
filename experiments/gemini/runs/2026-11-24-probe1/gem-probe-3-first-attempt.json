@@ -1,0 +1,603 @@
+{
+ "model": "gemini-3-flash-preview",
+ "parts": [
+  "growth",
+  "stream",
+  "order",
+  "minimum",
+  "short",
+  "explicit",
+  "openai"
+ ],
+ "calls": [
+  {
+   "part": "growth turn 1",
+   "t": 1795548030.0,
+   "status": 200,
+   "secs": 0.9,
+   "usage": {
+    "promptTokenCount": 6115,
+    "totalTokenCount": 6127,
+    "promptTokensDetails": [
+     {
+      "modality": "TEXT",
+      "tokenCount": 6115
+     }
+    ],
+    "thoughtsTokenCount": 12,
+    "serviceTier": "standard"
+   },
+   "error": null
+  },
+  {
+   "part": "growth turn 2",
+   "t": 1795548034.9,
+   "status": 200,
+   "secs": 2.94,
+   "usage": {
+    "promptTokenCount": 6840,
+    "candidatesTokenCount": 1,
+    "totalTokenCount": 6852,
+    "cachedContentTokenCount": 4075,
+    "promptTokensDetails": [
+     {
+      "modality": "TEXT",
+      "tokenCount": 6840
+     }
+    ],
+    "cacheTokensDetails": [
+     {
+      "modality": "TEXT",
+      "tokenCount": 4075
+     }
+    ],
+    "thoughtsTokenCount": 11,
+    "serviceTier": "standard"
+   },
+   "error": null
+  },
+  {
+   "part": "growth turn 3",
+   "t": 1795548040.9,
+   "status": 200,
+   "secs": 3.97,
+   "usage": {
+    "promptTokenCount": 7564,
+    "totalTokenCount": 7577,
+    "cachedContentTokenCount": 4072,
+    "promptTokensDetails": [
+     {
+      "modality": "TEXT",
+      "tokenCount": 7564
+     }
+    ],
+    "cacheTokensDetails": [
+     {
+      "modality": "TEXT",
+      "tokenCount": 4072
+     }
+    ],
+    "thoughtsTokenCount": 13,
+    "serviceTier": "standard"
+   },
+   "error": null
+  },
+  {
+   "part": "growth turn 4",
+   "t": 1795548045.6,
+   "status": 503,
+   "secs": 2.71,
+   "usage": null,
+   "error": "{ \"error\": { \"code\": 503, \"message\": \"This model is currently experiencing high demand. Spikes in demand are usually temporary. Please try again later.\", \"status\": \"UNAVAILABLE\" } } "
+  },
+  {
+   "part": "growth turn 5",
+   "t": 1795548050.3,
+   "status": 503,
+   "secs": 2.67,
+   "usage": null,
+   "error": "{ \"error\": { \"code\": 503, \"message\": \"This model is currently experiencing high demand. Spikes in demand are usually temporary. Please try again later.\", \"status\": \"UNAVAILABLE\" } } "
+  },
+  {
+   "part": "growth turn 6",
+   "t": 1795548054.3,
+   "status": 503,
+   "secs": 2.0,
+   "usage": null,
+   "error": "{ \"error\": { \"code\": 503, \"message\": \"This model is currently experiencing high demand. Spikes in demand are usually temporary. Please try again later.\", \"status\": \"UNAVAILABLE\" } } "
+  },
+  {
+   "part": "growth turn 7",
+   "t": 1795548056.4,
+   "status": 429,
+   "secs": 0.09,
+   "usage": null,
+   "error": "{ \"error\": { \"code\": 429, \"message\": \"You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://aistudio.google.com/docs/rate-limits. To monitor your current usage, head to: https://ai.dev/rate-limit. \\n* Quota exceede"
+  },
+  {
+   "part": "growth turn 8",
+   "t": 1795548061.0,
+   "status": 503,
+   "secs": 2.62,
+   "usage": null,
+   "error": "{ \"error\": { \"code\": 503, \"message\": \"This model is currently experiencing high demand. Spikes in demand are usually temporary. Please try again later.\", \"status\": \"UNAVAILABLE\" } } "
+  },
+  {
+   "part": "stream turn 1",
+   "t": 1795548063.0,
+   "status": 429,
+   "secs": 0.06,
+   "usage": null,
+   "error": "{ \"error\": { \"code\": 429, \"message\": \"You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://aistudio.google.com/docs/rate-limits. To monitor your current usage, head to: https://ai.dev/rate-limit. \\n* Quota exceede"
+  },
+  {
+   "part": "stream turn 2",
+   "t": 1795548067.4,
+   "status": 200,
+   "secs": 2.39,
+   "usage": {
+    "promptTokenCount": 6778,
+    "candidatesTokenCount": 1,
+    "totalTokenCount": 6790,
+    "promptTokensDetails": [
+     {
+      "modality": "TEXT",
+      "tokenCount": 6778
+     }
+    ],
+    "thoughtsTokenCount": 11,
+    "serviceTier": "standard"
+   },
+   "error": null
+  },
+  {
+   "part": "stream turn 3",
+   "t": 1795548069.5,
+   "status": 429,
+   "secs": 0.07,
+   "usage": null,
+   "error": "{ \"error\": { \"code\": 429, \"message\": \"You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://aistudio.google.com/docs/rate-limits. To monitor your current usage, head to: https://ai.dev/rate-limit. \\n* Quota exceede"
+  },
+  {
+   "part": "stream turn 4",
+   "t": 1795548072.8,
+   "status": 503,
+   "secs": 1.29,
+   "usage": null,
+   "error": "{ \"error\": { \"code\": 503, \"message\": \"This model is currently experiencing high demand. Spikes in demand are usually temporary. Please try again later.\", \"status\": \"UNAVAILABLE\" } } "
+  },
+  {
+   "part": "stream turn 5",
+   "t": 1795548074.9,
+   "status": 429,
+   "secs": 0.08,
+   "usage": null,
+   "error": "{ \"error\": { \"code\": 429, \"message\": \"You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://aistudio.google.com/docs/rate-limits. To monitor your current usage, head to: https://ai.dev/rate-limit. \\n* Quota exceede"
+  },
+  {
+   "part": "stream turn 6",
+   "t": 1795548077.0,
+   "status": 429,
+   "secs": 0.07,
+   "usage": null,
+   "error": "{ \"error\": { \"code\": 429, \"message\": \"You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://aistudio.google.com/docs/rate-limits. To monitor your current usage, head to: https://ai.dev/rate-limit. \\n* Quota exceede"
+  },
+  {
+   "part": "stream turn 7",
+   "t": 1795548079.0,
+   "status": 429,
+   "secs": 0.06,
+   "usage": null,
+   "error": "{ \"error\": { \"code\": 429, \"message\": \"You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://aistudio.google.com/docs/rate-limits. To monitor your current usage, head to: https://ai.dev/rate-limit. \\n* Quota exceede"
+  },
+  {
+   "part": "stream turn 8",
+   "t": 1795548084.5,
+   "status": 503,
+   "secs": 3.5,
+   "usage": null,
+   "error": "{ \"error\": { \"code\": 503, \"message\": \"This model is currently experiencing high demand. Spikes in demand are usually temporary. Please try again later.\", \"status\": \"UNAVAILABLE\" } } "
+  },
+  {
+   "part": "order base 1",
+   "t": 1795548086.6,
+   "status": 429,
+   "secs": 0.09,
+   "usage": null,
+   "error": "{ \"error\": { \"code\": 429, \"message\": \"You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://aistudio.google.com/docs/rate-limits. To monitor your current usage, head to: https://ai.dev/rate-limit. \\n* Quota exceede"
+  },
+  {
+   "part": "order base 2",
+   "t": 1795548089.1,
+   "status": 503,
+   "secs": 0.46,
+   "usage": null,
+   "error": "{ \"error\": { \"code\": 503, \"message\": \"This model is currently experiencing high demand. Spikes in demand are usually temporary. Please try again later.\", \"status\": \"UNAVAILABLE\" } } "
+  },
+  {
+   "part": "order base 3",
+   "t": 1795548091.5,
+   "status": 503,
+   "secs": 0.39,
+   "usage": null,
+   "error": "{ \"error\": { \"code\": 503, \"message\": \"This model is currently experiencing high demand. Spikes in demand are usually temporary. Please try again later.\", \"status\": \"UNAVAILABLE\" } } "
+  },
+  {
+   "part": "order first tool changed",
+   "t": 1795548093.9,
+   "status": 503,
+   "secs": 0.41,
+   "usage": null,
+   "error": "{ \"error\": { \"code\": 503, \"message\": \"This model is currently experiencing high demand. Spikes in demand are usually temporary. Please try again later.\", \"status\": \"UNAVAILABLE\" } } "
+  },
+  {
+   "part": "order system start changed",
+   "t": 1795548096.2,
+   "status": 503,
+   "secs": 0.3,
+   "usage": null,
+   "error": "{ \"error\": { \"code\": 503, \"message\": \"This model is currently experiencing high demand. Spikes in demand are usually temporary. Please try again later.\", \"status\": \"UNAVAILABLE\" } } "
+  },
+  {
+   "part": "order first user turn changed",
+   "t": 1795548101.7,
+   "status": 503,
+   "secs": 3.49,
+   "usage": null,
+   "error": "{ \"error\": { \"code\": 503, \"message\": \"This model is currently experiencing high demand. Spikes in demand are usually temporary. Please try again later.\", \"status\": \"UNAVAILABLE\" } } "
+  },
+  {
+   "part": "minimum ~800 words try 1",
+   "t": 1795548102.4,
+   "status": 200,
+   "secs": 0.76,
+   "usage": {
+    "promptTokenCount": 962,
+    "candidatesTokenCount": 1,
+    "totalTokenCount": 974,
+    "promptTokensDetails": [
+     {
+      "modality": "TEXT",
+      "tokenCount": 962
+     }
+    ],
+    "thoughtsTokenCount": 11,
+    "serviceTier": "standard"
+   },
+   "error": null
+  },
+  {
+   "part": "minimum ~800 words try 2",
+   "t": 1795548105.2,
+   "status": 200,
+   "secs": 0.81,
+   "usage": {
+    "promptTokenCount": 962,
+    "totalTokenCount": 974,
+    "promptTokensDetails": [
+     {
+      "modality": "TEXT",
+      "tokenCount": 962
+     }
+    ],
+    "thoughtsTokenCount": 12,
+    "serviceTier": "standard"
+   },
+   "error": null
+  },
+  {
+   "part": "minimum ~800 words try 3",
+   "t": 1795548107.8,
+   "status": 200,
+   "secs": 0.58,
+   "usage": {
+    "promptTokenCount": 962,
+    "totalTokenCount": 975,
+    "promptTokensDetails": [
+     {
+      "modality": "TEXT",
+      "tokenCount": 962
+     }
+    ],
+    "thoughtsTokenCount": 13,
+    "serviceTier": "standard"
+   },
+   "error": null
+  },
+  {
+   "part": "minimum ~1600 words try 1",
+   "t": 1795548109.9,
+   "status": 429,
+   "secs": 0.11,
+   "usage": null,
+   "error": "{ \"error\": { \"code\": 429, \"message\": \"You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://aistudio.google.com/docs/rate-limits. To monitor your current usage, head to: https://ai.dev/rate-limit. \\n* Quota exceede"
+  },
+  {
+   "part": "minimum ~1600 words try 2",
+   "t": 1795548112.6,
+   "status": 200,
+   "secs": 0.62,
+   "usage": {
+    "promptTokenCount": 1906,
+    "totalTokenCount": 1919,
+    "promptTokensDetails": [
+     {
+      "modality": "TEXT",
+      "tokenCount": 1906
+     }
+    ],
+    "thoughtsTokenCount": 13,
+    "serviceTier": "standard"
+   },
+   "error": null
+  },
+  {
+   "part": "minimum ~1600 words try 3",
+   "t": 1795548114.6,
+   "status": 429,
+   "secs": 0.08,
+   "usage": null,
+   "error": "{ \"error\": { \"code\": 429, \"message\": \"You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://aistudio.google.com/docs/rate-limits. To monitor your current usage, head to: https://ai.dev/rate-limit. \\n* Quota exceede"
+  },
+  {
+   "part": "minimum ~2400 words try 1",
+   "t": 1795548117.3,
+   "status": 200,
+   "secs": 0.65,
+   "usage": {
+    "promptTokenCount": 2839,
+    "candidatesTokenCount": 1,
+    "totalTokenCount": 2851,
+    "promptTokensDetails": [
+     {
+      "modality": "TEXT",
+      "tokenCount": 2839
+     }
+    ],
+    "thoughtsTokenCount": 11,
+    "serviceTier": "standard"
+   },
+   "error": null
+  },
+  {
+   "part": "minimum ~2400 words try 2",
+   "t": 1795548120.1,
+   "status": 200,
+   "secs": 0.84,
+   "usage": {
+    "promptTokenCount": 2839,
+    "candidatesTokenCount": 1,
+    "totalTokenCount": 2851,
+    "promptTokensDetails": [
+     {
+      "modality": "TEXT",
+      "tokenCount": 2839
+     }
+    ],
+    "thoughtsTokenCount": 11,
+    "serviceTier": "standard"
+   },
+   "error": null
+  },
+  {
+   "part": "minimum ~2400 words try 3",
+   "t": 1795548122.2,
+   "status": 429,
+   "secs": 0.08,
+   "usage": null,
+   "error": "{ \"error\": { \"code\": 429, \"message\": \"You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://aistudio.google.com/docs/rate-limits. To monitor your current usage, head to: https://ai.dev/rate-limit. \\n* Quota exceede"
+  },
+  {
+   "part": "minimum ~3200 words try 1",
+   "t": 1795548125.0,
+   "status": 200,
+   "secs": 0.83,
+   "usage": {
+    "promptTokenCount": 3784,
+    "totalTokenCount": 3797,
+    "promptTokensDetails": [
+     {
+      "modality": "TEXT",
+      "tokenCount": 3784
+     }
+    ],
+    "thoughtsTokenCount": 13,
+    "serviceTier": "standard"
+   },
+   "error": null
+  },
+  {
+   "part": "minimum ~3200 words try 2",
+   "t": 1795548127.1,
+   "status": 429,
+   "secs": 0.1,
+   "usage": null,
+   "error": "{ \"error\": { \"code\": 429, \"message\": \"You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://aistudio.google.com/docs/rate-limits. To monitor your current usage, head to: https://ai.dev/rate-limit. \\n* Quota exceede"
+  },
+  {
+   "part": "minimum ~3200 words try 3",
+   "t": 1795548129.2,
+   "status": 429,
+   "secs": 0.09,
+   "usage": null,
+   "error": "{ \"error\": { \"code\": 429, \"message\": \"You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://aistudio.google.com/docs/rate-limits. To monitor your current usage, head to: https://ai.dev/rate-limit. \\n* Quota exceede"
+  },
+  {
+   "part": "minimum ~4400 words try 1",
+   "t": 1795548131.3,
+   "status": 429,
+   "secs": 0.09,
+   "usage": null,
+   "error": "{ \"error\": { \"code\": 429, \"message\": \"You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://aistudio.google.com/docs/rate-limits. To monitor your current usage, head to: https://ai.dev/rate-limit. \\n* Quota exceede"
+  },
+  {
+   "part": "minimum ~4400 words try 2",
+   "t": 1795548133.4,
+   "status": 429,
+   "secs": 0.08,
+   "usage": null,
+   "error": "{ \"error\": { \"code\": 429, \"message\": \"You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://aistudio.google.com/docs/rate-limits. To monitor your current usage, head to: https://ai.dev/rate-limit. \\n* Quota exceede"
+  },
+  {
+   "part": "minimum ~4400 words try 3",
+   "t": 1795548136.2,
+   "status": 200,
+   "secs": 0.78,
+   "usage": {
+    "promptTokenCount": 5211,
+    "candidatesTokenCount": 1,
+    "totalTokenCount": 5223,
+    "promptTokensDetails": [
+     {
+      "modality": "TEXT",
+      "tokenCount": 5211
+     }
+    ],
+    "thoughtsTokenCount": 11,
+    "serviceTier": "standard"
+   },
+   "error": null
+  },
+  {
+   "part": "minimum ~6000 words try 1",
+   "t": 1795548138.9,
+   "status": 200,
+   "secs": 0.73,
+   "usage": {
+    "promptTokenCount": 7144,
+    "totalTokenCount": 7157,
+    "promptTokensDetails": [
+     {
+      "modality": "TEXT",
+      "tokenCount": 7144
+     }
+    ],
+    "thoughtsTokenCount": 13,
+    "serviceTier": "standard"
+   },
+   "error": null
+  },
+  {
+   "part": "minimum ~6000 words try 2",
+   "t": 1795548141.0,
+   "status": 429,
+   "secs": 0.09,
+   "usage": null,
+   "error": "{ \"error\": { \"code\": 429, \"message\": \"You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://aistudio.google.com/docs/rate-limits. To monitor your current usage, head to: https://ai.dev/rate-limit. \\n* Quota exceede"
+  },
+  {
+   "part": "minimum ~6000 words try 3",
+   "t": 1795548143.7,
+   "status": 200,
+   "secs": 0.71,
+   "usage": {
+    "promptTokenCount": 7144,
+    "candidatesTokenCount": 1,
+    "totalTokenCount": 7156,
+    "cachedContentTokenCount": 4080,
+    "promptTokensDetails": [
+     {
+      "modality": "TEXT",
+      "tokenCount": 7144
+     }
+    ],
+    "cacheTokensDetails": [
+     {
+      "modality": "TEXT",
+      "tokenCount": 4080
+     }
+    ],
+    "thoughtsTokenCount": 11,
+    "serviceTier": "standard"
+   },
+   "error": null
+  },
+  {
+   "part": "short repeat 1",
+   "t": 1795548145.8,
+   "status": 429,
+   "secs": 0.09,
+   "usage": null,
+   "error": "{ \"error\": { \"code\": 429, \"message\": \"You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://aistudio.google.com/docs/rate-limits. To monitor your current usage, head to: https://ai.dev/rate-limit. \\n* Quota exceede"
+  },
+  {
+   "part": "short repeat 2",
+   "t": 1795548147.9,
+   "status": 429,
+   "secs": 0.09,
+   "usage": null,
+   "error": "{ \"error\": { \"code\": 429, \"message\": \"You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://aistudio.google.com/docs/rate-limits. To monitor your current usage, head to: https://ai.dev/rate-limit. \\n* Quota exceede"
+  },
+  {
+   "part": "short repeat 3",
+   "t": 1795548150.3,
+   "status": 503,
+   "secs": 0.37,
+   "usage": null,
+   "error": "{ \"error\": { \"code\": 503, \"message\": \"This model is currently experiencing high demand. Spikes in demand are usually temporary. Please try again later.\", \"status\": \"UNAVAILABLE\" } } "
+  },
+  {
+   "part": "short repeat 4",
+   "t": 1795548152.7,
+   "status": 503,
+   "secs": 0.43,
+   "usage": null,
+   "error": "{ \"error\": { \"code\": 503, \"message\": \"This model is currently experiencing high demand. Spikes in demand are usually temporary. Please try again later.\", \"status\": \"UNAVAILABLE\" } } "
+  },
+  {
+   "part": "short repeat 5",
+   "t": 1795548155.2,
+   "status": 503,
+   "secs": 0.46,
+   "usage": null,
+   "error": "{ \"error\": { \"code\": 503, \"message\": \"This model is currently experiencing high demand. Spikes in demand are usually temporary. Please try again later.\", \"status\": \"UNAVAILABLE\" } } "
+  },
+  {
+   "part": "short repeat 6",
+   "t": 1795548157.2,
+   "status": 429,
+   "secs": 0.06,
+   "usage": null,
+   "error": "{ \"error\": { \"code\": 429, \"message\": \"You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://aistudio.google.com/docs/rate-limits. To monitor your current usage, head to: https://ai.dev/rate-limit. \\n* Quota exceede"
+  },
+  {
+   "part": "explicit create cachedContents",
+   "t": 1795548159.7,
+   "status": 429,
+   "secs": 0.41,
+   "response": null,
+   "error": "{ \"error\": { \"code\": 429, \"message\": \"TotalCachedContentStorageTokensPerModelFreeTier limit exceeded for model gemini-3-flash: limit=0, requested=7686\", \"status\": \"RESOURCE_EXHAUSTED\" } } "
+  },
+  {
+   "part": "openai-compatible 1",
+   "t": 1795548159.8,
+   "status": 429,
+   "secs": 0.1,
+   "response": null,
+   "error": "[{ \"error\": { \"code\": 429, \"message\": \"You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://aistudio.google.com/docs/rate-limits. To monitor your current usage, head to: https://ai.dev/rate-limit. \\n* Quota exceed"
+  },
+  {
+   "part": "openai-compatible 2",
+   "t": 1795548161.9,
+   "status": 429,
+   "secs": 0.12,
+   "response": null,
+   "error": "[{ \"error\": { \"code\": 429, \"message\": \"You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://aistudio.google.com/docs/rate-limits. To monitor your current usage, head to: https://ai.dev/rate-limit. \\n* Quota exceed"
+  },
+  {
+   "part": "openai-compatible 3",
+   "t": 1795548164.6,
+   "status": 200,
+   "secs": 0.74,
+   "response": {
+    "model": "gemini-3-flash-preview",
+    "usage": {
+     "completion_tokens": 0,
+     "prompt_tokens": 7117,
+     "total_tokens": 7129
+    }
+   },
+   "error": null
+  }
+ ]
+}
