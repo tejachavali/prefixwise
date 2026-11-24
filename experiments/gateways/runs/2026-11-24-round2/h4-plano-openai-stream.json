@@ -1,0 +1,192 @@
+{
+ "gateway": "http://127.0.0.1:12000",
+ "stream": true,
+ "formats": [
+  "openai"
+ ],
+ "recorded": 25,
+ "matched": 25,
+ "sent": 25,
+ "results": [
+  {
+   "format": "openai",
+   "kind": "unchanged",
+   "session_via": "prefixwise",
+   "session_rows": {
+    "prefixwise": 5
+   },
+   "recorded": 5,
+   "lost_sessions": {},
+   "causes": [
+    "first_write",
+    "unknown",
+    "unknown",
+    "unknown",
+    "unknown"
+   ],
+   "expected": [
+    "first_write",
+    "none",
+    "none",
+    "none",
+    "none"
+   ],
+   "reads": [
+    "0/0",
+    "0/0",
+    "0/0",
+    "0/0",
+    "0/0"
+   ],
+   "provider": [
+    "openai"
+   ],
+   "errors": [],
+   "ok": false
+  },
+  {
+   "format": "openai",
+   "kind": "tool_reserialize",
+   "session_via": "prefixwise",
+   "session_rows": {
+    "prefixwise": 5
+   },
+   "recorded": 5,
+   "lost_sessions": {},
+   "causes": [
+    "first_write",
+    "unknown",
+    "unknown",
+    "unknown",
+    "unknown"
+   ],
+   "expected": [
+    "first_write",
+    "none",
+    "tool_reserialize",
+    "none",
+    "none"
+   ],
+   "reads": [
+    "0/0",
+    "0/0",
+    "0/0",
+    "0/0",
+    "0/0"
+   ],
+   "provider": [
+    "openai"
+   ],
+   "errors": [],
+   "ok": false
+  },
+  {
+   "format": "openai",
+   "kind": "volatile_system",
+   "session_via": "prefixwise",
+   "session_rows": {
+    "prefixwise": 5
+   },
+   "recorded": 5,
+   "lost_sessions": {},
+   "causes": [
+    "first_write",
+    "unknown",
+    "unknown",
+    "unknown",
+    "unknown"
+   ],
+   "expected": [
+    "first_write",
+    "none",
+    "volatile_system",
+    "none",
+    "none"
+   ],
+   "reads": [
+    "0/0",
+    "0/0",
+    "0/0",
+    "0/0",
+    "0/0"
+   ],
+   "provider": [
+    "openai"
+   ],
+   "errors": [],
+   "ok": false
+  },
+  {
+   "format": "openai",
+   "kind": "system_edit",
+   "session_via": "prefixwise",
+   "session_rows": {
+    "prefixwise": 5
+   },
+   "recorded": 5,
+   "lost_sessions": {},
+   "causes": [
+    "first_write",
+    "unknown",
+    "unknown",
+    "unknown",
+    "unknown"
+   ],
+   "expected": [
+    "first_write",
+    "none",
+    "system_edit",
+    "none",
+    "none"
+   ],
+   "reads": [
+    "0/0",
+    "0/0",
+    "0/0",
+    "0/0",
+    "0/0"
+   ],
+   "provider": [
+    "openai"
+   ],
+   "errors": [],
+   "ok": false
+  },
+  {
+   "format": "openai",
+   "kind": "history_edit",
+   "session_via": "prefixwise",
+   "session_rows": {
+    "prefixwise": 5
+   },
+   "recorded": 5,
+   "lost_sessions": {},
+   "causes": [
+    "first_write",
+    "unknown",
+    "unknown",
+    "unknown",
+    "unknown"
+   ],
+   "expected": [
+    "first_write",
+    "none",
+    "history_edit",
+    "none",
+    "none"
+   ],
+   "reads": [
+    "0/0",
+    "0/0",
+    "0/0",
+    "0/0",
+    "0/0"
+   ],
+   "provider": [
+    "openai"
+   ],
+   "errors": [],
+   "ok": false
+  }
+ ]
+}

@@ -242,3 +242,83 @@ def test_live_overhead_script_runs_against_fake_upstream():
             assert "ledger rows: 8/8" in r.stdout, r.stdout[-500:] + r.stderr[-500:]
     finally:
         up.stop()
+
+
+
+def _raw_post(port, head: bytes, body: bytes, path=b"/v1/chat/completions", hang_up=False) -> bytes:
+    c = socket.create_connection(("127.0.0.1", port))
+    try:
+        c.settimeout(10)
+        c.sendall(b"POST " + path + b" HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n" + head
+                  + b"\r\n" + body)
+        if hang_up:
+            c.shutdown(socket.SHUT_WR)
+        raw = b""
+        while chunk := c.recv(65536):
+            raw += chunk
+        return raw
+    finally:
+        c.close()
+
+
+def _status(raw: bytes) -> int:
+    return int(raw.split(b"\r\n", 1)[0].split()[1])
+
+
+def _chunked(data: bytes, sizes=(7, 100, 1)) -> bytes:
+    out, i, k = b"", 0, 0
+    while i < len(data):
+        n = min(sizes[k % len(sizes)], len(data) - i)
+        out += f"{n:x};ext=1\r\n".encode() if k == 1 else f"{n:X}\r\n".encode()
+        out += data[i:i + n] + b"\r\n"
+        i, k = i + n, k + 1
+    return out
+
+
+def test_a_chunked_request_body_is_read_whole():
+    """Envoy-based gateways (Plano, 2026-11-24) send Transfer-Encoding: chunked with no Content-Length.
+    Reading only Content-Length forwarded `{}` and recorded 0 prompt tokens."""
+    from test_proxy import FakeUpstream
+
+    up = FakeUpstream(payload=OPENAI_OK)
+    proxy, server, port = run_proxy(upstream_url=up.url)
+    try:
+        data = json.dumps(BODY).encode()
+        raw = _raw_post(port, b"Transfer-Encoding: chunked\r\n", _chunked(data) + b"0\r\nX-Trailer: t\r\n\r\n")
+        assert _status(raw) == 200, raw[:200]
+        assert up.requests[-1]["body"]["messages"] == BODY["messages"]  # forwarded whole
+        rows = proxy.ledger.recent(1)
+        assert rows and rows[0]["prompt_tokens"] == 2000
+        # Transfer-Encoding wins over a Content-Length sent with it (RFC 9112 6.3).
+        raw = _raw_post(port, b"Transfer-Encoding: chunked\r\nContent-Length: 2\r\n", _chunked(data) + b"0\r\n\r\n")
+        assert _status(raw) == 200 and up.requests[-1]["body"]["messages"] == BODY["messages"]
+        # The passthrough routes read chunked bodies too.
+        raw = _raw_post(port, b"Transfer-Encoding: chunked\r\n", _chunked(b'{"input": "x"}') + b"0\r\n\r\n",
+                        path=b"/v1/embeddings")
+        assert _status(raw) == 200 and up.requests[-1]["body"] == {"input": "x"}
+    finally:
+        server.shutdown(); up.server.shutdown()
+
+
+def test_a_malformed_or_oversized_chunked_body_is_refused(monkeypatch):
+    import prefixwise.proxy as px
+    from test_proxy import FakeUpstream
+
+    up = FakeUpstream(payload=OPENAI_OK)
+    proxy, server, port = run_proxy(upstream_url=up.url)
+    te = b"Transfer-Encoding: chunked\r\n"
+    try:
+        assert _status(_raw_post(port, te, b"zz\r\n{}\r\n0\r\n\r\n")) == 400
+        assert _status(_raw_post(port, te, b"0x2\r\n{}\r\n0\r\n\r\n")) == 400  # 1*HEXDIG only
+        assert _status(_raw_post(port, te, b"10\r\n{\"a\": 1", hang_up=True)) == 400  # hung up mid-chunk
+        assert _status(_raw_post(port, b"Transfer-Encoding: gzip, chunked\r\n", b"0\r\n\r\n")) == 400
+        assert _status(_raw_post(port, te + b"Transfer-Encoding: gzip\r\n", b"0\r\n\r\n")) == 400
+        assert _status(_raw_post(port, te, b"9" * 900 + b"\r\n")) == 400  # too long to be a size line
+        monkeypatch.setattr(px, "MAX_BODY_BYTES", 50)
+        big = _chunked(json.dumps(BODY).encode()) + b"0\r\n\r\n"
+        assert _status(_raw_post(port, te, big)) == 413
+        assert _status(_raw_post(port, te, big, path=b"/v1/embeddings")) == 413
+        assert _status(_raw_post(port, b"Transfer-Encoding: larger\r\n", b"", path=b"/v1/embeddings")) == 400
+        assert up.requests == []  # nothing malformed or oversized was forwarded
+    finally:
+        server.shutdown(); up.server.shutdown()
