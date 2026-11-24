@@ -12,14 +12,18 @@ Five 5-turn conversations per format, unchanged and with one change at turn 3: t
 timestamp in the system prompt changed, the system prompt edited, the first user message edited. The
 expected verdicts are first_write, none, <the change>, none, none. Each request names its
 conversation four ways, each with its own prefix, so the report shows which one the gateway let
-through (the proxy takes them in this order):
+through:
   prefixwise  x-prefixwise-session-id: "p-<id>"
   forwarded   each --session-header (a gateway's forwarded-header form): "f-<id>"
   generic     x-session-id: "s-<id>"
   body        OpenAI `user` / Anthropic `metadata.user_id`: "u-<id>"
-A gateway that maps a forwarded header onto x-prefixwise-session-id shows as "forwarded". Calls
-recorded under none of these (Prefixwise then has no conversation to compare against) are counted
-separately, from the ledger's row count, so "recorded" never depends on the id getting through.
+The proxy reads x-prefixwise-session-id first, then x-session-id, then the body; it never reads a
+forwarded header itself, so "forwarded" means the gateway renamed one onto x-prefixwise-session-id
+(and, if it also passed the plain one, put the renamed one last). Run once without --session-header
+to see whether the plain header gets through on its own. Calls recorded under none of these ids
+(Prefixwise then has no conversation to compare against) are counted too, with the session they went
+under, so "recorded" never depends on the id getting through. Other checks may share the ledger at
+the same time: rows under another conversation's ids are not counted.
 
 Usage:
   python gateway_check.py --backend --proxy-port 4100 --mock-port 4101 --ledger gw.db --setup-only
@@ -170,14 +174,25 @@ def _read(ledger, sql, params=()):
         sys.exit(f"no ledger at {ledger}: pass the --ledger the backend writes to")
     try:
         return c.execute(sql, params).fetchall()
-    except sqlite3.OperationalError as e:
+    except sqlite3.DatabaseError as e:
         sys.exit(f"{ledger} is not a Prefixwise ledger ({e}): pass the --ledger the backend writes to")
     finally:
         c.close()
 
 
-def row_count(ledger):
-    return _read(ledger, "SELECT COUNT(*) FROM entries")[0][0]
+def last_id(ledger):
+    return _read(ledger, "SELECT COALESCE(MAX(id), 0) FROM entries")[0][0]
+
+
+# A carrier id of some conversation (this run's or a concurrent check's): "p-op-unchan-1a2b3c".
+CARRIER_ID = "[pfsu]-[oa][pn]-??????-??????"
+
+
+def lost_rows(ledger, after):
+    """Sessions of the rows recorded since row `after` under no conversation's carrier id: calls the
+    gateway delivered without any id this script sent (or with ids merged, e.g. "p-..., f-...")."""
+    return _read(ledger, "SELECT session_id, COUNT(*) FROM entries WHERE id > ? AND NOT "
+                         "(session_id GLOB ? AND length(session_id) = 18) GROUP BY session_id", (after, CARRIER_ID))
 
 
 def rows_for(ledger, sid):
@@ -230,8 +245,11 @@ def main():
         if args.setup_only:
             print(f"mock on {args.mock_port}, prefixwise serve on {args.proxy_port}, ledger {args.ledger}; "
                   "Ctrl-C to stop", flush=True)
-            while True:
-                time.sleep(3600)
+            try:
+                while True:
+                    time.sleep(3600)
+            except KeyboardInterrupt:
+                return
         base = f"http://127.0.0.1:{args.proxy_port}" if args.gateway == "self" else args.gateway
         results, bad = [], 0
         if not os.path.exists(args.ledger):
@@ -239,7 +257,7 @@ def main():
         for fmt in formats:
             for kind in KINDS:
                 sid = f"{fmt[:2]}-{kind[:6]}-{uuid.uuid4().hex[:6]}"
-                errors, before = [], row_count(args.ledger)
+                errors, before = [], last_id(args.ledger)
                 for turn in range(1, 6):
                     path, body, headers = request(fmt, kind, turn, sid, args)
                     status, err = send(base, path, body, headers)
@@ -247,21 +265,21 @@ def main():
                         errors.append(f"turn {turn}: {status} {err}")
                     time.sleep(0.2)
                 time.sleep(1.0)
-                # Every row the ledger gained while this conversation ran, whatever session it went
-                # under: only this script writes to the ledger during a run.
-                recorded = row_count(args.ledger) - before
+                # This conversation's rows, plus the rows recorded meanwhile under no conversation's id
+                # (another check sharing the ledger writes only under its own conversations' ids).
                 via, rows, counts = rows_for(args.ledger, sid)
+                lost = dict(lost_rows(args.ledger, before))
+                recorded = len(rows) + sum(lost.values())
                 causes = [r[0] for r in rows]
                 want = ["first_write", "none", EXPECT[kind] or "none", "none", "none"]
                 ok = not errors and recorded == 5 and not via.startswith("split") and causes == want
                 bad += not ok
                 results.append({"format": fmt, "kind": kind, "session_via": via, "session_rows": counts,
-                                "recorded": recorded, "causes": causes, "expected": want,
+                                "recorded": recorded, "lost_sessions": lost, "causes": causes, "expected": want,
                                 "reads": [f"{r[2]}/{r[1]}" for r in rows],
                                 "provider": sorted({r[3] for r in rows}), "errors": errors, "ok": ok})
-                lost = recorded - len(rows)
                 print(f"{'ok ' if ok else 'BAD'} {fmt:9s} {kind:16s} recorded {recorded}/5  session via {via:10s}"
-                      f" {causes}" + (f"  ({lost} under no id of this conversation)" if lost else "")
+                      f" {causes}" + (f"  (under no id sent: {lost})" if lost else "")
                       + (f"  errors: {errors[:2]}" if errors else ""), flush=True)
         recorded = sum(r["recorded"] for r in results)
         matched = sum(len(r["causes"]) for r in results)
