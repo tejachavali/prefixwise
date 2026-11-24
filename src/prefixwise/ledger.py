@@ -29,7 +29,7 @@ import sqlite3
 import sys
 from dataclasses import astuple, dataclass, fields
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 
 @dataclass
@@ -86,6 +86,9 @@ class LedgerEntry:
     cost_input: float | None = None
     cost_cache_write: float | None = None
     cost_output: float | None = None
+    # Schema 8: 1 when this turn showed the cache still holding an unchanged prefix after its idle gap,
+    # 0 when such a prefix came back short (prefixwise.lifetime learns lifetimes from them); None otherwise.
+    lifetime_evidence: int | None = None
     schema_version: int = SCHEMA_VERSION
 
 
@@ -184,7 +187,8 @@ _MIGRATIONS = {"task_id": "TEXT", "request_id": "TEXT", "completion_tokens": "IN
                "cache_ttl_seconds": "REAL",  # schema 5
                "unread_write_tokens": "INTEGER", "unread_write_cost": "REAL",  # schema 6
                "cost_cache_read": "REAL", "cost_input": "REAL", "cost_cache_write": "REAL",
-               "cost_output": "REAL"}  # schema 7
+               "cost_output": "REAL",  # schema 7
+               "lifetime_evidence": "INTEGER"}  # schema 8
 
 _COLUMNS = [f.name for f in fields(LedgerEntry)]
 
@@ -233,6 +237,8 @@ class Ledger:
             self.conn.execute("CREATE INDEX IF NOT EXISTS entries_request ON entries(request_id)")
             self.conn.execute("CREATE INDEX IF NOT EXISTS entries_session ON entries(session_id)")
             self.conn.execute("CREATE INDEX IF NOT EXISTS entries_time ON entries(recorded_at)")
+            self.conn.execute("CREATE INDEX IF NOT EXISTS entries_lifetime ON entries(provider, model) "
+                              "WHERE lifetime_evidence IS NOT NULL")
             self.conn.execute(
                 """CREATE TABLE IF NOT EXISTS tasks (
                     task_id TEXT PRIMARY KEY, success INTEGER NOT NULL, recorded_at REAL

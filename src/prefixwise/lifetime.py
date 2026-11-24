@@ -6,10 +6,12 @@ these, a turn whose unchanged prefix came back from the cache after an idle gap 
 was alive at least that long, and a turn that read nothing (or under half) after a gap may have
 found it expired. Per provider and model, this keeps both:
 
-- alive_up_to: the longest idle gap after which an unchanged prefix was still read (needs
-  MIN_EVIDENCE such hits after a gap of more than a minute, so a few lucky turns prove nothing);
-- cold_from: the shortest gap, longer than every hit, after which an unchanged prefix read less than
-  half, when at least MIN_EVIDENCE turns read so little at that gap or longer, and none was read.
+- alive_up_to: an idle gap after which an unchanged prefix was still read at least MIN_EVIDENCE times
+  (the MIN_EVIDENCE-th longest such gap, so one lucky off-peak hit does not stretch it), counting only
+  hits after more than MIN_IDLE_SECONDS;
+- cold_from: the shortest gap, longer than every hit and than the shortest TTL any provider keeps,
+  after which at least MIN_EVIDENCE unchanged prefixes read less than half, and only once at least
+  MIN_EVIDENCE idle hits show the cache works at all: a cache that never hits is not "expiring".
 
 The classifier uses them only when no TTL is known for the request (classifier.classify): a
 short read within alive_up_to is a routing miss (the cache would still have held it), one at
@@ -19,7 +21,13 @@ what this ledger saw.
 
 The evidence comes from the classifier's own split of turns: hits (`none`) and the low reads on an
 unchanged prefix (Classification.cold_unchanged), whatever cause they were then given, so what is
-learned does not depend on what it is later used to decide.
+learned does not depend on what it is later used to decide. A low read a changed cache key explains
+is left out. The collector marks each such row in the ledger (`lifetime_evidence`), so the report and
+the next collector read exactly what was used.
+
+Limit: the gap is idle time per conversation, not per cache entry. Where many conversations share a
+long prefix (one system prompt across a fleet), others can keep it warm, so a hit after a long gap
+can overstate the lifetime; the MIN_EVIDENCE-th longest hit, not the longest, limits that.
 """
 from __future__ import annotations
 
@@ -27,8 +35,9 @@ import threading
 from collections import defaultdict, deque
 from dataclasses import dataclass
 
-MIN_EVIDENCE = 3        # turns on each side before a window is claimed
+MIN_EVIDENCE = 5        # turns on each side before a window is claimed
 MIN_IDLE_SECONDS = 60   # a hit after a shorter gap says nothing about lifetime
+MIN_PROVIDER_TTL = 300  # classifier.MIN_PROVIDER_TTL_SECONDS: no cache expires sooner
 KEEP = 2000             # most recent gaps kept per (provider, model) and kind
 
 
@@ -59,13 +68,13 @@ def _dur(seconds: float) -> str:
 
 def estimate(hit_gaps, cold_gaps) -> Observed | None:
     """The window from the gaps of hits and of cold reads on an unchanged prefix."""
-    idle_hits = [g for g in hit_gaps if g is not None and g > MIN_IDLE_SECONDS]
-    alive = max(idle_hits) if len(idle_hits) >= MIN_EVIDENCE else None
-    longest_hit = max((g for g in hit_gaps if g is not None), default=0.0)
-    beyond = sorted(g for g in cold_gaps if g is not None and g > longest_hit)
+    idle_hits = sorted((g for g in hit_gaps if g is not None and g > MIN_IDLE_SECONDS), reverse=True)
+    if len(idle_hits) < MIN_EVIDENCE:
+        return None  # no evidence the cache holds anything across an idle gap: claim nothing
+    alive = idle_hits[MIN_EVIDENCE - 1]
+    floor = max(max(g for g in hit_gaps if g is not None), MIN_PROVIDER_TTL)
+    beyond = sorted(g for g in cold_gaps if g is not None and g > floor)
     cold = beyond[0] if len(beyond) >= MIN_EVIDENCE else None
-    if alive is None and cold is None:
-        return None
     return Observed(alive, cold, len(idle_hits), len(beyond) if cold is not None else 0)
 
 
@@ -100,16 +109,10 @@ class LifetimeTracker:
             self.observe(provider, model, gap, bool(hit))
 
 
-# The ledger's own record of the same split: a hit is cause `none`; a cold read on an unchanged
-# prefix is one the classifier's evidence says so of (its wording since #171: "nothing read from
-# cache" or "-token unchanged prefix"). Rows whose TTL was known are left out: their lifetime is
-# stated, not learned.
-LEDGER_SQL = (
-    "SELECT provider, model, gap_seconds, CASE WHEN cause = 'none' THEN 1 ELSE 0 END FROM entries "
-    "WHERE error IS NULL AND gap_seconds IS NOT NULL AND cache_ttl_seconds IS NULL AND prompt_tokens > 0 "
-    "AND (cause = 'none' OR (cause IN ('routing_miss', 'ttl_expired', 'unknown') "
-    "AND (evidence LIKE '%nothing read from cache%' OR evidence LIKE '%-token unchanged prefix%') "
-    "AND evidence NOT LIKE '%KV events%')) ")
+# The rows the collector marked as evidence (ledger column lifetime_evidence, schema 8): 1 a hit
+# after an idle gap, 0 a cold read on an unchanged prefix.
+LEDGER_SQL = ("SELECT provider, model, gap_seconds, lifetime_evidence FROM entries "
+              "WHERE lifetime_evidence IS NOT NULL AND gap_seconds IS NOT NULL ")
 
 
 def from_ledger(ledger, since: float | None = None, until: float | None = None) -> dict[tuple, Observed]:
@@ -121,8 +124,9 @@ def from_ledger(ledger, since: float | None = None, until: float | None = None) 
             args.append(val)
     with ledger.reader() as conn:
         rows = conn.execute(sql + "ORDER BY id", args).fetchall()
-    hits: dict[tuple, list] = defaultdict(list)
-    colds: dict[tuple, list] = defaultdict(list)
+    # The most recent KEEP per model and kind, as a collector would hold them.
+    hits: dict[tuple, deque] = defaultdict(lambda: deque(maxlen=KEEP))
+    colds: dict[tuple, deque] = defaultdict(lambda: deque(maxlen=KEEP))
     for provider, model, gap, hit in rows:
         (hits if hit else colds)[(provider, model)].append(gap)
     out = {}

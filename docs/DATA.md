@@ -51,6 +51,7 @@ Added (observed today, previously dropped):
 | `schema_version` | rows say which schema wrote them |
 | `cache_ttl_seconds` (schema 5) | the request's own cache lifetime: what its write was granted, or asked for (Anthropic 300 or 3,600; the `X-Prefixwise-Cache-Ttl` header; empty when unknown): what the 5-minute vs 1-hour advice reads |
 | `unread_write_tokens`, `unread_write_cost` (schema 6) | a miss of the same conversation that replaced the prefix (or let it expire) and did not read back the previous turn's cache write, in whole or in part: a read that stops inside the stable system+tools prefix leaves the whole write unread. The tokens written and never read, and the surcharge paid to write them above sending them uncached (`prefixwise report`: "cache writes never read"; not part of avoidable cost) |
+| `lifetime_evidence` (schema 8) | on a provider that states no cache lifetime: 1 when this turn's unchanged prefix was still read after its idle gap, 0 when it came back short (under half, and not explained by a changed cache key); empty otherwise. What the observed cache lifetime per model is learned from (`prefixwise report`) |
 | `cost_cache_read`, `cost_input`, `cost_cache_write`, `cost_output` (schema 7) | the request's cost split by what it paid for: tokens read from the cache, new uncached input, cache writes, output. They sum to `cost`; empty when unpriced, and on rows written before schema 7. The report's "Where the bill went" line, and the share that re-reads context already cached (a floor a better hit rate does not lower) |
 | `detail` (schema 4) | the why behind the cause, where the evidence allows: `ttl_shortened`, `lookback_exceeded`, `markers_ignored`, `sent_before_cache_written`, `shared_prefix_not_reused`, `thinking_stripped`, `cache_key_changed`, `host_restored`, `output_rerendered`, `session_header_dropped` (`prefixwise.details`); a dimension and filter in `/api/v1` |
 
@@ -128,7 +129,8 @@ CREATE TABLE prefixwise.entries (
     secondary_causes Nullable(String), divergence_role Nullable(String), divergence_index Nullable(Int64),
     detail Nullable(String), cache_ttl_seconds Nullable(Float64), unread_write_tokens Nullable(Int64),
     unread_write_cost Nullable(Float64), cost_cache_read Nullable(Float64), cost_input Nullable(Float64),
-    cost_cache_write Nullable(Float64), cost_output Nullable(Float64), schema_version Int64, recorded_at Float64
+    cost_cache_write Nullable(Float64), cost_output Nullable(Float64), lifetime_evidence Nullable(UInt8),
+    schema_version Int64, recorded_at Float64
 ) ENGINE = MergeTree ORDER BY (model, recorded_at);
 ```
 

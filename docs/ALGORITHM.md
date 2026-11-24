@@ -141,8 +141,8 @@ is not scored against the verdict, since it answers another question.
 | Behind several caches without deciding events | `unknown` |
 | Behind one engine | `evicted`, inferred |
 | The gap exceeds the TTL | `ttl_expired` |
-| No TTL known, and this ledger has seen the cache on this provider and model still read an unchanged prefix after idle gaps up to *A* (at least 3 such turns after more than a minute): less than half read within *A* | `routing_miss`, inferred, naming the observed lifetime |
-| No TTL known, and less than half was read after a gap at least *C*, where *C* is the shortest gap, longer than every gap that was read, after which at least 3 unchanged prefixes read less than half | `ttl_expired`, inferred, naming the observed lifetime |
+| No TTL known (not Anthropic, not behind an engine), and this ledger has seen the cache on this provider and model still read an unchanged prefix at least 5 times after idle gaps of *A* or longer (each more than a minute): less than half read within *A* | `routing_miss`, inferred, naming the observed lifetime |
+| No TTL known, at least 5 such idle hits seen, and less than half read after a gap at least *C*: the shortest gap, longer than every gap that was read and than 5 minutes, after which at least 5 unchanged prefixes read less than half (a changed cache key excluded) | `ttl_expired`, inferred, naming the observed lifetime |
 | Less than half of the reusable prefix read (nothing, or only part), gap within the TTL (or within the shortest provider TTL when unknown): too soon to have expired. On Anthropic a part read counts only within 5 minutes: a 1-hour breakpoint early in the prompt can still read after a later 5-minute one expired | `routing_miss`, inferred |
 | Otherwise | `unknown` |
 
@@ -269,6 +269,11 @@ Anthropic's request shape, and the Anthropic early-breakpoint case (each has han
 
 ## 7. Known limits
 
+- **Observed lifetimes are per conversation, not per cache entry.** The idle gap is measured within a
+  conversation. Where many conversations share a long prefix (one system prompt across a fleet), others
+  can keep it warm, so a hit after a long gap can overstate how long an unused entry lasts. The window
+  uses the 5th-longest idle hit, not the longest, to limit that, and it is shown as observed, never as
+  the provider's TTL.
 - **Per block, not per token.** A change at the end of a long system prompt is reported for the
   whole block; the avoidable count comes from usage, so it is still exact.
 - **Masking is broad.** Any token containing a digit is treated as volatile, so a system prompt that

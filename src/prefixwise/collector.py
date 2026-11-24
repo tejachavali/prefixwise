@@ -96,8 +96,8 @@ def _best_parent(lane: _Lane, identity: tuple, compaction: bool = False) -> tupl
     return latest, False, bool(not compaction and system and system != theirs)
 
 
-
 SEED_ROWS = 20_000  # recent ledger turns a collector learns cache lifetimes from at start
+
 
 class Collector:
     def __init__(self, ledger: Ledger, prices: PriceTable, metrics: Metrics | None = None,
@@ -126,8 +126,9 @@ class Collector:
             with ledger.reader() as conn:
                 rows = conn.execute(LEDGER_SQL + "ORDER BY id DESC LIMIT ?", (SEED_ROWS,)).fetchall()
             self.lifetimes.seed(reversed(rows))
-        except Exception:  # noqa: BLE001 - an empty or older ledger: start with nothing learned
-            pass
+        except Exception as exc:  # noqa: BLE001 - start with nothing learned, and say so
+            print(f"prefixwise: cache lifetimes not loaded from the ledger ({type(exc).__name__}: {exc})",
+                  file=sys.stderr)
 
     # -- what the edge asks before a request goes out -----------------------------------------
 
@@ -308,6 +309,7 @@ class Collector:
             gap_seconds = max(0.0, started - self.last_seen[session_id]) if session_id in self.last_seen else None
             concurrent = False
         unknown_parent = concurrent_verdict = False
+        lifetime_evidence = None  # set below when this turn shows how long the cache held (prefixwise.lifetime)
         if stitched:
             stitched_fps, prior = self._stitch(str(rec.previous_response_id), fps)
             if stitched_fps is None:
@@ -359,10 +361,7 @@ class Collector:
                 curr.observed_lifetime = self.lifetimes.estimate(provider, rec.model)
             result = classify(prev, curr, native_reason=native_reason)
             if learn and prev is not None and gap_seconds is not None and prompt_tokens > 0 and curr.cache_reported:
-                if result.cause is MissCause.NONE:
-                    self.lifetimes.observe(provider, rec.model, gap_seconds, hit=True)
-                elif result.cold_unchanged:
-                    self.lifetimes.observe(provider, rec.model, gap_seconds, hit=False)
+                lifetime_evidence = (1 if result.cause is MissCause.NONE else 0 if result.cold_unchanged else None)
             if interleaved:
                 result.evidence = (f"{result.evidence}; compared with this conversation's last turn "
                                    "(another conversation in this session came between)")
@@ -440,9 +439,14 @@ class Collector:
                 entry.unread_write_cost = self.prices.write_surcharge(priced_model, prev.prompt_tokens, w5, w1, cw)
         if entry.cost is not None:
             entry.price_as_of = self.prices.as_of
+        if lifetime_evidence == 0 and detail == "cache_key_changed":
+            lifetime_evidence = None  # a changed cache key explains the cold read, not the cache's lifetime
+        entry.lifetime_evidence = lifetime_evidence
 
         if write:  # the row first: a refused row leaves the state untouched for a redelivery
             self.ledger.record(entry)
+            if lifetime_evidence is not None:  # only once written: a replay or a redelivery is not counted twice
+                self.lifetimes.observe(provider, rec.model, gap_seconds, hit=bool(lifetime_evidence))
             self.metrics.observe(entry)
             self.stats["records"] += 1
             if concurrent_verdict:
