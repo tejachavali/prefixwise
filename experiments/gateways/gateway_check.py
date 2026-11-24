@@ -23,7 +23,9 @@ forwarded header itself, so "forwarded" means the gateway renamed one onto x-pre
 to see whether the plain header gets through on its own. Calls recorded under none of these ids
 (Prefixwise then has no conversation to compare against) are counted too, with the session they went
 under, so "recorded" never depends on the id getting through. Other checks may share the ledger at
-the same time: rows under another conversation's ids are not counted.
+the same time: rows under another conversation's ids are not counted. Rows under no id belong to
+no conversation, though, so every check running then counts them: run a check through a gateway
+that drops every id on its own (or on its own ledger).
 
 Usage:
   python gateway_check.py --backend --proxy-port 4100 --mock-port 4101 --ledger gw.db --setup-only

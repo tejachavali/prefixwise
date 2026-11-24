@@ -34,5 +34,7 @@ id under a gateway's forwarded-header name, e.g. Bifrost's `x-bf-eh-x-prefixwise
 `--openai-model`, `--anthropic-model`, `--formats openai,anthropic`. It writes `--out` (JSON) and exits 1 when
 any conversation is wrong. With `--backend` it refuses ports already in use, and it reads the ledger
 read-only, so a wrong `--ledger` path is an error rather than an empty new file.
+Several checks can share one backend at a time, as long as each gateway passes some conversation id:
+calls recorded under no id are counted by every check running then.
 
 Results will go under `runs/`, one record per gateway and date, with the gateway's version and config.
