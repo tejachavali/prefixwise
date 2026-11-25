@@ -123,8 +123,8 @@ def request(fmt, kind, turn, sid, args):
 
 def send(base, path, body, headers, chunked=False):
     data = json.dumps(body).encode()
-    # An iterable body with no Content-Length makes urllib send Transfer-Encoding: chunked, as
-    # Envoy-based gateways do when they rewrite a body (Plano).
+    # An iterable body with no Content-Length makes urllib send Transfer-Encoding: chunked, as Plano
+    # (built on Envoy) does.
     req = urllib.request.Request(base.rstrip("/") + path, data=iter([data]) if chunked else data, headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=60) as r:

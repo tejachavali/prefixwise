@@ -66,8 +66,8 @@ FIX_STATUS = {
     "cache_key": {
         "status": "recommended",
         "evidence": "Not yet an E4 run. Live 2026-11-22/23 (experiments/litellm): OpenAI's Responses API without "
-                    "prompt_cache_key read under half of the cached prefix (or nothing) on 93 of 132 turns of real "
-                    "Claude Code conversations, against 5 of 116 on Chat Completions. In a probe of one "
+                    "prompt_cache_key read under half of the cached prefix (or reported no usage) on 93 of 132 turns "
+                    "replaying four real Claude Code conversations through LiteLLM, against 5 of 116 on Chat Completions. In a probe of one "
                     "conversation on its own, the Responses API read nothing on most turns without the key and "
                     "the prefix on 3 of 3 with it (gpt-4.1-mini; runs/2026-11-22-live.md).",
     },

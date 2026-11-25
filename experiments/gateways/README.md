@@ -32,7 +32,7 @@ python gateway_check.py --gateway http://127.0.0.1:8080 --ledger gw.db \
 Other options: `--header K:V` (the gateway's own headers), `--session-header NAME` (also send the conversation
 id under a gateway's forwarded-header name, e.g. Bifrost's `x-bf-eh-x-prefixwise-session-id`),
 `--openai-model`, `--anthropic-model`, `--formats openai,anthropic`, `--chunked` (send request bodies with
-`Transfer-Encoding: chunked` and no `Content-Length`, as Envoy-based gateways do when they rewrite a body). It writes `--out` (JSON) and exits 1 when
+`Transfer-Encoding: chunked` and no `Content-Length`, as Plano, built on Envoy, does). It writes `--out` (JSON) and exits 1 when
 any conversation is wrong. With `--backend` it refuses ports already in use, and it reads the ledger
 read-only, so a wrong `--ledger` path is an error rather than an empty new file.
 Several checks can share one backend at a time, as long as each gateway passes some conversation id:
