@@ -44,7 +44,7 @@ import json
 
 from .fingerprint import schema_sets
 
-AVAILABLE_FIXES = ("canonical_tools", "auto_breakpoints")
+AVAILABLE_FIXES = ("canonical_tools", "auto_breakpoints", "cache_key")
 PROVEN_FIXES = ("canonical_tools", "auto_breakpoints")  # what --optimize turns on; a fix joins after an E4 run (FIX_STATUS)
 OPTIMIZE = "optimize"  # the name --optimize stands for in a fix list
 
@@ -63,7 +63,21 @@ FIX_STATUS = {
                     "task success flat (59/60 off, 60/60 on), no marker rejected. Multi-turn sessions; one model. "
                     "experiments/e4/runs/2026-11-09-auto-breakpoints-live.md",
     },
+    "cache_key": {
+        "status": "recommended",
+        "evidence": "Not yet an E4 run. Live 2026-11-22/23 (experiments/litellm): OpenAI's Responses API without "
+                    "prompt_cache_key read under half of the cached prefix (or nothing) on 93 of 132 turns of real "
+                    "Claude Code conversations, against 5 of 116 on Chat Completions; sent directly with the key, "
+                    "3 of 3 turns read the prefix (openai_cache_probe.py).",
+    },
 }
+
+
+def cache_key_for(session_id: str) -> str:
+    """The prompt_cache_key --fix cache_key sends for a conversation: stable for the session, and a hash,
+    so the session id itself (which may name a user) never reaches the provider."""
+    import hashlib
+    return "pw-" + hashlib.sha256(str(session_id).encode()).hexdigest()[:32]
 
 MARKER = {"type": "ephemeral"}
 _THINKING = ("thinking", "redacted_thinking")  # Anthropic rejects cache_control on these

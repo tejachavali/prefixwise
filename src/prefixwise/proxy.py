@@ -62,11 +62,11 @@ import urllib.request
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from .classifier import MIN_PROVIDER_TTL_SECONDS, _blocks_by_role, _role_unchanged, anthropic_min_prefix
+from .classifier import MIN_PROVIDER_TTL_SECONDS, _blocks_by_role, _role_unchanged, anthropic_min_prefix, openai_model
 from .details import Facts, body_facts, keeps_thinking, usage_facts
 from .diagnostics import anthropic_diagnostics
 from .fingerprint import Fingerprinter
-from .fixes import apply_fixes, auto_breakpoints, parse_fixes
+from .fixes import apply_fixes, auto_breakpoints, cache_key_for, parse_fixes
 from . import api
 from .pricing import PriceTable, breakdown, cache_reported, completion_tokens_of, normalize_usage  # noqa: F401 (re-exported)
 from .ledger import Ledger, LedgerEntry
@@ -1046,6 +1046,16 @@ class PrefixwiseProxy:
             if "comparison_response_id" not in opts:
                 opts["comparison_response_id"] = previous_id
                 inject("prompt_cache_options", opts)
+        # --fix cache_key: OpenAI routes a request to a cache machine by its first ~256 tokens, so every
+        # conversation that opens with the same system prompt lands on one machine, which overflows to
+        # machines that never saw it. A prompt_cache_key per conversation spreads them and keeps each on
+        # its own machine (fixes.py, FIX_STATUS). OpenAI's own models only (another server may refuse the
+        # field); never over a key the client set; never for requests with no session id.
+        if ("cache_key" in self.fixes and provider == "openai" and engine is None
+                and openai_model(str(body.get("model", ""))) and "prompt_cache_key" not in body
+                and session_id != self.default_session):
+            if inject("prompt_cache_key", cache_key_for(session_id)):
+                fixes_applied = [*fixes_applied, "cache_key"]
         # Caches are per model and per workspace (credentials), so both are in the prefix key.
         credential = hashlib.sha256((headers.get("x-api-key") or headers.get("authorization")
                                      or self.api_key or "").encode()).hexdigest()[:12]
@@ -1510,6 +1520,8 @@ class PrefixwiseProxy:
             if field in ("session_id", "vllm_xargs") and self.engine_events is not None:
                 self.engine_events.discard(ctx.get("engine_token"))
                 ctx["engine_token"] = None
+            if field == "prompt_cache_key":  # the cache_key fix did not reach the provider
+                ctx["fixes_applied"] = [f for f in ctx.get("fixes_applied") or [] if f != "cache_key"]
         return undone or bool(rejected)
 
     def _markers_were_refused(self, ctx: dict) -> None:
