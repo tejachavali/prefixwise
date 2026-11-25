@@ -36,7 +36,7 @@ def test_each_conversation_gets_its_own_stable_key():
     p.handle("openai", _turn(0), {"x-prefixwise-session-id": "bob"})
     alice, alice2, bob = (b["prompt_cache_key"] for b in sent)
     assert alice == alice2 == cache_key_for("alice") and bob == cache_key_for("bob") and alice != bob
-    assert "alice" not in alice  # a hash: the session id itself is not sent
+    assert alice.startswith("pw-") and "alice" not in alice  # a hash, not the session id
 
 
 def test_never_over_the_clients_key_never_off_openai_never_without_a_session_and_off_by_default():
@@ -78,3 +78,36 @@ def test_listed_as_recommended_not_proven():
     assert parse_fixes("cache_key") == ("cache_key",)
     assert "cache_key" not in parse_fixes("optimize")
     assert FIX_STATUS["cache_key"]["status"] == "recommended"
+
+
+def test_a_rejected_key_is_not_in_the_record():
+    """Found by review: the rejection undid the key in the request but not in the request's facts, so
+    a later turn could be told its cache key changed although nothing sent had."""
+    p = PrefixwiseProxy(mock=True, fixes=["cache_key"])
+    ctx = p.prepare("openai", _turn(0), {"x-prefixwise-session-id": "s"})
+    assert ctx["facts"].cache_key is not None and "prompt_cache_key" in ctx["forward_body"]
+    err = {"error": {"message": "Unrecognized request argument supplied: prompt_cache_key"}}
+    assert p._undo_rejected(ctx, 400, err)
+    assert "prompt_cache_key" not in ctx["forward_body"] and ctx["facts"].cache_key is None
+    assert "cache_key" not in ctx["fixes_applied"]
+
+
+def test_a_user_id_alone_still_gets_a_key_and_the_key_is_keyed_when_a_secret_is_set():
+    p, sent = _proxy()
+    p.handle("openai", _turn(0, user="end-user-7"))  # only OpenAI's `user`: that user's conversations share a key
+    assert sent[-1]["prompt_cache_key"] == cache_key_for("end-user-7")
+    assert cache_key_for("alice", b"secret") != cache_key_for("alice")
+    assert cache_key_for("alice", b"secret") == cache_key_for("alice", b"secret")
+    keyed = PrefixwiseProxy(mock=True, fixes=["cache_key"], hmac_key=b"secret")
+    seen = []
+    real = keyed._forward
+    keyed._forward = lambda prov, body, *a, **k: (seen.append(dict(body)), real(prov, body, *a, **k))[1]
+    keyed.handle("openai", _turn(0), {"x-prefixwise-session-id": "alice"})
+    assert seen[-1]["prompt_cache_key"] == cache_key_for("alice", b"secret")
+
+
+def test_the_responses_api_gets_it_too():
+    p, sent = _proxy()
+    r, _ = p.handle("openai", {"model": "gpt-5.6", "input": [{"role": "user", "content": "hi"}],
+                               "instructions": "be brief"}, {"x-prefixwise-session-id": "s"}, api="responses")
+    assert sent[-1]["prompt_cache_key"] == cache_key_for("s") and "cache_key" in r["fixes_applied"]

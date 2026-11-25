@@ -67,17 +67,22 @@ FIX_STATUS = {
         "status": "recommended",
         "evidence": "Not yet an E4 run. Live 2026-11-22/23 (experiments/litellm): OpenAI's Responses API without "
                     "prompt_cache_key read under half of the cached prefix (or nothing) on 93 of 132 turns of real "
-                    "Claude Code conversations, against 5 of 116 on Chat Completions; sent directly with the key, "
-                    "3 of 3 turns read the prefix (openai_cache_probe.py).",
+                    "Claude Code conversations, against 5 of 116 on Chat Completions. In a probe of one "
+                    "conversation on its own, the Responses API read nothing on most turns without the key and "
+                    "the prefix on 3 of 3 with it (gpt-4.1-mini; runs/2026-11-22-live.md).",
     },
 }
 
 
-def cache_key_for(session_id: str) -> str:
+def cache_key_for(session_id: str, hmac_key: bytes | None = None) -> str:
     """The prompt_cache_key --fix cache_key sends for a conversation: stable for the session, and a hash,
-    so the session id itself (which may name a user) never reaches the provider."""
+    so the session id itself (which may name a user) never reaches the provider. Keyed with
+    PREFIXWISE_HMAC_KEY when one is set, so a guessable id ("alice") cannot be recovered from the key."""
     import hashlib
-    return "pw-" + hashlib.sha256(str(session_id).encode()).hexdigest()[:32]
+    import hmac
+    raw = str(session_id).encode()
+    digest = (hmac.new(hmac_key, raw, hashlib.sha256) if hmac_key else hashlib.sha256(raw)).hexdigest()
+    return "pw-" + digest[:32]
 
 MARKER = {"type": "ephemeral"}
 _THINKING = ("thinking", "redacted_thinking")  # Anthropic rejects cache_control on these

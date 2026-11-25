@@ -1046,15 +1046,15 @@ class PrefixwiseProxy:
             if "comparison_response_id" not in opts:
                 opts["comparison_response_id"] = previous_id
                 inject("prompt_cache_options", opts)
-        # --fix cache_key: OpenAI routes a request to a cache machine by its first ~256 tokens, so every
-        # conversation that opens with the same system prompt lands on one machine, which overflows to
-        # machines that never saw it. A prompt_cache_key per conversation spreads them and keeps each on
-        # its own machine (fixes.py, FIX_STATUS). OpenAI's own models only (another server may refuse the
+        # --fix cache_key: a prompt_cache_key per conversation. OpenAI documents that it routes a request
+        # to a cache machine by the start of its prompt, combined with this key when set; measured, its
+        # Responses API without the key mostly read nothing even for one conversation alone, and read the
+        # prefix with it (fixes.py, FIX_STATUS). OpenAI's own models only (another server may refuse the
         # field); never over a key the client set; never for requests with no session id.
         if ("cache_key" in self.fixes and provider == "openai" and engine is None
                 and openai_model(str(body.get("model", ""))) and "prompt_cache_key" not in body
                 and session_id != self.default_session):
-            if inject("prompt_cache_key", cache_key_for(session_id)):
+            if inject("prompt_cache_key", cache_key_for(session_id, self.fingerprinter.hmac_key)):
                 fixes_applied = [*fixes_applied, "cache_key"]
         # Caches are per model and per workspace (credentials), so both are in the prefix key.
         credential = hashlib.sha256((headers.get("x-api-key") or headers.get("authorization")
@@ -1522,6 +1522,9 @@ class PrefixwiseProxy:
                 ctx["engine_token"] = None
             if field == "prompt_cache_key":  # the cache_key fix did not reach the provider
                 ctx["fixes_applied"] = [f for f in ctx.get("fixes_applied") or [] if f != "cache_key"]
+                if ctx.get("facts") is not None:  # the record says what was sent: no key (or the client's)
+                    key = ctx["forward_body"].get("prompt_cache_key")
+                    ctx["facts"].cache_key = (hashlib.sha256(str(key).encode()).hexdigest()[:32] if key else None)
         return undone or bool(rejected)
 
     def _markers_were_refused(self, ctx: dict) -> None:
