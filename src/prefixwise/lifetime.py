@@ -1,7 +1,7 @@
 """How long a provider's prompt cache actually lasts, learned from the turns Prefixwise has seen.
 
-Anthropic states its cache lifetime (5 minutes, or 1 hour on request). OpenAI's default retention,
-DeepSeek's and Gemini's implicit caches do not give one fixed number, and in practice it varies. On
+Anthropic states its cache lifetime (5 minutes, or 1 hour on request). OpenAI's default retention and
+DeepSeek's implicit cache do not give one fixed number, and in practice it varies. On
 these, a turn whose unchanged prefix came back from the cache after an idle gap shows the cache
 was alive at least that long, and a turn that read nothing (or under half) after a gap may have
 found it expired. Per provider and model, this keeps both:

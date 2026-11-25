@@ -605,7 +605,7 @@ def classify(prev: RequestSnapshot | None, curr: RequestSnapshot,
     # Within the TTL (or, when it is unknown, within the shortest TTL any provider keeps), an
     # unchanged prefix that came back short did not expire. With no eviction evidence, the request
     # most likely reached a cache that did not hold it (another server). A partial read is the same
-    # miss as a zero read, only smaller: implicit caches (OpenAI, DeepSeek, Gemini) do both.
+    # miss as a zero read, only smaller: implicit caches (OpenAI, DeepSeek) do both.
     # On Anthropic a part read after more than 5 minutes is what a mixed lifetime looks like: a 1-hour
     # breakpoint early in the prompt still read, a 5-minute one after it expired. The request's TTL is
     # the longest any breakpoint asked for, so a part read is judged by the shortest (5 minutes).
