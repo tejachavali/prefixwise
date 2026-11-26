@@ -87,7 +87,8 @@ loses everything after them; Qwen3's template puts tools after the system prompt
 - **The cause, not the count.** 19 causes, one per miss: the first thing, in prompt order,
   that broke reuse. Each comes with whether it was waste and what to change.
 - **Priced.** Avoidable tokens and dollars, from the provider's own usage and a dated price
-  table. Join requests to tasks and you get **tokens per successful task**.
+  table. Join requests to tasks and the report says what **a successful task cost**, failed ones
+  included, and how much of that was avoidable.
 - **Evidence, not guesses.** Where the provider explains a miss (Anthropic), Prefixwise checks
   itself against it. Behind vLLM or SGLang it reads the engine's KV-cache events to confirm an
   eviction, or rule it out. When the evidence is missing it says `unknown`.

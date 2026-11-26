@@ -72,7 +72,8 @@ task, day/hour:
 - cost, avoidable cost, priced requests (dollars cover priced requests only, and say so)
 - cost of cache re-reads, new input, cache writes and output (requests priced since schema 7)
 - waste requests (verdict says the miss was avoidable)
-- tokens per successful task, cost per successful task
+- tokens per successful task, cost per successful task (the report's "Tasks" lines add what the failed tasks
+  took of it, what was avoidable on those tasks and the cause that wasted most; `tasks` in `report --json`)
 - latency p50/p95, Prefixwise overhead p50/p95 (requests with a verdict; exact, computed in
   SQLite, so a query never loads a whole column)
 - native agreement (where a provider gives its own reason)
