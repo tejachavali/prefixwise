@@ -318,7 +318,8 @@ def test_a_stream_sent_under_a_json_content_type_is_still_a_stream():
     from test_production import HeaderUpstream
 
     usage = b'data: {"id":"c1","choices":[],"usage":{"prompt_tokens":2000,"completion_tokens":1}}\n\n'
-    up = HeaderUpstream(200, headers={"Content-Type": "application/json"}, stream_lines=[CONTENT, FINISH, usage, DONE])
+    up = HeaderUpstream(200, headers={"Content-Type": "application/json"},
+                        stream_lines=[b"\n", CONTENT, FINISH, usage, DONE])   # a blank line first changes nothing
     proxy, server, port = run_proxy(upstream_url=up.url)
     try:
         raw = raw_post(port, "/v1/chat/completions", json.dumps({**BODY, "stream": True}).encode())
@@ -326,6 +327,85 @@ def test_a_stream_sent_under_a_json_content_type_is_still_a_stream():
         assert b"text/event-stream" in head and b'"usage"' not in body and body.rstrip().endswith(b"[DONE]")
         time.sleep(0.3)
         assert [r[:2] for r in rows(proxy)] == [(200, None)] and rows(proxy, "prompt_tokens")[0][0] == 2000
+    finally:
+        server.shutdown(); up.server.shutdown()
+
+
+class SlowStart:
+    """Sends its response headers at once, and its first line `wait` seconds later."""
+
+    def __init__(self, wait: float, lines: list[bytes]):
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_POST(self):
+                self.rfile.read(int(self.headers["Content-Length"]))
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.end_headers()
+                self.wfile.flush()
+                time.sleep(wait)
+                try:
+                    for line in lines:
+                        self.wfile.write(line)
+                        self.wfile.flush()
+                except OSError:
+                    pass
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.server.daemon_threads = True
+        self.url = f"http://127.0.0.1:{start(self.server)}"
+
+
+def test_a_streams_headers_are_not_held_back_for_its_first_line():
+    """The client gets the response headers when the upstream sends its own, not when the first token
+    arrives: a client with a response-header timeout must not fail only through the proxy."""
+    up = SlowStart(1.5, [CONTENT, FINISH, DONE])
+    proxy, server, port = run_proxy(upstream_url=up.url)
+    try:
+        body = json.dumps({**BODY, "stream": True}).encode()
+        with socket.create_connection(("127.0.0.1", port)) as sock:
+            sock.settimeout(10)
+            began = time.perf_counter()
+            sock.sendall(f"POST /v1/chat/completions HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n"
+                         f"Content-Length: {len(body)}\r\n\r\n".encode() + body)
+            head = b""
+            while b"\r\n\r\n" not in head:
+                head += sock.recv(4096)
+            assert time.perf_counter() - began < 1.0 and b"text/event-stream" in head
+    finally:
+        server.shutdown(); up.server.shutdown()
+
+
+def test_a_client_that_resets_while_waiting_for_the_first_token_is_a_row():
+    class Events:
+        def __init__(self):
+            self.open: set = set()
+
+        def request_sent(self, session_id):
+            self.open.add(session_id)
+            return session_id
+
+        def discard(self, token):
+            self.open.discard(token)
+
+        def __getattr__(self, name):  # whatever else the engine join is asked: nothing to say
+            return lambda *a, **k: None
+
+    up = SlowStart(1.0, [CONTENT, FINISH, DONE])
+    proxy, server, port = run_proxy(upstream_url=up.url, engine="vllm")
+    try:
+        proxy.engine_events = events = Events()
+        body = json.dumps({**BODY, "stream": True}).encode()
+        sock = socket.create_connection(("127.0.0.1", port))
+        sock.sendall(f"POST /v1/chat/completions HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n"
+                     f"X-Prefixwise-Session-Id: conv-1\r\nContent-Length: {len(body)}\r\n\r\n".encode() + body)
+        time.sleep(0.3)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+        sock.close()
+        time.sleep(1.6)
+        assert rows(proxy) == [(499, "client_disconnected", None)] and events.open == set()
     finally:
         server.shutdown(); up.server.shutdown()
 

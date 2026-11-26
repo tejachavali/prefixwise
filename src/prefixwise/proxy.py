@@ -2331,36 +2331,50 @@ def make_handler(proxy: PrefixwiseProxy):
             # ride in them: fetch it afterwards from GET /requests/<id>.
             # An upstream may answer a stream request with a plain JSON body (a gateway that does not
             # stream, an error it reports with 200): it is relayed as what it is, and read as a payload.
-            # Told by the body, not only its label: a stream sent under a JSON content type is still a
-            # stream. The first line is read before any header goes out.
+            # A stream goes out at once: its headers are never held back for the body. Only when the
+            # upstream labels the body as JSON is its start read first, since that label can sit on a
+            # real JSON body or on a stream (told by the body, not the label).
             ctype = ctx.get("upstream_content_type") or "text/event-stream"
             source = iter(lines)
-            first, failure = None, None
-            try:
-                first = next(source)
-            except StopIteration:
-                pass
-            except (http.client.HTTPException, OSError):
-                failure = "upstream_dropped"
-            looks_sse = first is not None and first.lstrip().startswith((b"data:", b"event:", b"id:", b"retry:", b":"))
-            plain = "json" in ctype.lower() and "event-stream" not in ctype.lower() and not looks_sse
+            held: list[bytes] = []  # lines read before the headers went out, relayed first
+            failure = None
+            plain = False
+            if "json" in ctype.lower() and "event-stream" not in ctype.lower():
+                try:
+                    while not held or not held[-1].strip():  # to the first line that is not blank
+                        held.append(next(source))
+                except StopIteration:
+                    pass
+                except (http.client.HTTPException, OSError):
+                    failure = "upstream_dropped"
+                start = held[-1].lstrip() if held else b""
+                plain = not start.startswith((b"data:", b"event:", b"id:", b"retry:", b":"))
             body_parts: list[bytes] = []
             body_size = 0
-            self.send_response(status)
-            self.send_header("Content-Type", ctype if plain else "text/event-stream")
-            self.send_header("Cache-Control", "no-cache")
-            self.send_header("X-Prefixwise-Request-Id", ctx["request_id"])
-            for k, v in relayed.items():
-                self.send_header(k, v)
-            self.end_headers()
+            try:
+                self.send_response(status)
+                self.send_header("Content-Type", ctype if plain else "text/event-stream")
+                self.send_header("Cache-Control", "no-cache")
+                self.send_header("X-Prefixwise-Request-Id", ctx["request_id"])
+                for k, v in relayed.items():
+                    self.send_header(k, v)
+                self.end_headers()
+            except OSError:  # the client left before the answer began: a row, and nothing left held
+                self.close_connection = True
+                if proxy.engine_events is not None:
+                    proxy.engine_events.discard(ctx.get("engine_token"))
+                ctx["upstream_ms"] = (time.perf_counter() - sent) * 1000
+                proxy.record_failure(ctx, 499, error="client_disconnected")
+                return None
             self._streaming = True  # the response has begun: from here nothing else may be written as one
             recording = None  # set once the client has the whole answer, before it is recorded
             try:
                 # Reading (the upstream's side) and writing (the client's side) fail apart: the same
                 # error class means "the upstream dropped" on one and "the client left" on the other.
-                line, pending = first, first is not None
                 while failure is None:
-                    if not pending:
+                    if held:
+                        line = held.pop(0)
+                    else:
                         try:
                             line = next(source)
                         except StopIteration:
@@ -2369,7 +2383,6 @@ def make_handler(proxy: PrefixwiseProxy):
                             # After the model finished, an abrupt close cost the client nothing.
                             failure = None if acc.complete else "upstream_dropped"
                             break
-                    pending = False
                     if plain:
                         if body_size < MAX_BODY_BYTES:
                             body_parts.append(line)

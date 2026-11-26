@@ -202,7 +202,10 @@ def _takes_marker(tool: object) -> bool:
     """Whether a `cache_control` may be put on this tool. Not on a tool-search tool or a tool whose
     loading is deferred (they are not part of the prompt's tool prefix; LiteLLM never marks them),
     nor on something that is not a tool object."""
-    return (isinstance(tool, dict) and not tool.get("defer_loading")
+    if not isinstance(tool, dict):
+        return False
+    fn = tool.get("function") if isinstance(tool.get("function"), dict) else {}
+    return (not tool.get("defer_loading") and not fn.get("defer_loading")
             and not str(tool.get("type") or "").startswith("tool_search_tool"))
 
 
