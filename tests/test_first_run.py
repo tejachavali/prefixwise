@@ -354,6 +354,9 @@ def test_explain_refuses_what_is_not_a_request(tmp_path):
                  {"model": "m", "instructions": "Be brief.", "prompt": {"id": "pmpt_1"}}):
         ok.write_text(json.dumps(body))
         assert cli("explain", str(ok)).returncode == 0, body
+    fa.write_text(json.dumps({"model": "c", "instructions": "s", "prompt": "one"}))          # a text prompt is not read
+    fb.write_text(json.dumps({"model": "c", "instructions": "s", "prompt": "another"}))
+    no_traceback(cli("explain", str(fa), str(fb)), 1, "not a request Prefixwise can read")
 
 
 def test_check_bodies_with_no_request_is_nothing_checked_not_an_error(tmp_path):
@@ -481,8 +484,8 @@ def test_environment_variables_in_the_code_are_in_the_docs():
 
     in_code = set()
     for path in (ROOT / "src" / "prefixwise").glob("*.py"):
-        in_code |= set(re.findall(r'environ(?:\.get)?\(\s*"(PREFIXWISE_[A-Z_]+)"', path.read_text()))
-        in_code |= set(re.findall(r'environ\[\s*"(PREFIXWISE_[A-Z_]+)"', path.read_text()))
+        # every quoted PREFIXWISE_ name, however it is read (environ, getenv, a helper that takes names)
+        in_code |= set(re.findall(r"""["'](PREFIXWISE_[A-Z0-9_]+)["']""", path.read_text()))
     docs = "".join(p.read_text() for p in [ROOT / "README.md", *sorted((ROOT / "docs").glob("*.md"))])
     missing = sorted(v for v in in_code if v not in docs)
     assert not missing, missing

@@ -1136,8 +1136,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("serve", help="run the proxy")
     p.add_argument("--host", default=os.environ.get("PREFIXWISE_HOST", "127.0.0.1"),
-                   help="address to listen on (default: $PREFIXWISE_HOST or 127.0.0.1; beyond localhost it needs "
-                        "a token, see --allow-unauthenticated)")
+                   help="address to listen on (default: $PREFIXWISE_HOST or 127.0.0.1). Beyond localhost, set "
+                        "PREFIXWISE_AUTH_TOKEN: without one, anyone who can reach the port can use the proxy and "
+                        "read the ledger (it starts with a warning; with PREFIXWISE_API_KEY set it refuses, see "
+                        "--allow-unauthenticated)")
     p.add_argument("--port", type=int, default=int(os.environ.get("PORT", "8080")),
                    help="port to listen on (default: $PORT or 8080)")
     p.add_argument("--upstream", help="upstream base URL, e.g. https://api.openai.com "
