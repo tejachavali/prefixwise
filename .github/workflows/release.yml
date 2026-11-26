@@ -66,21 +66,39 @@ jobs:
         run: |
           awk -v v="${GITHUB_REF_NAME#v}" -f .github/release-notes.awk CHANGELOG.md > notes.md
           test -s notes.md || { echo "CHANGELOG.md has no section for ${GITHUB_REF_NAME#v}"; exit 1; }
-      # Once: a published release with its files is left alone. A create that failed half way (a 5xx
-      # from the API, 0.12.5) can leave a draft with no files, which a re-run must finish, not skip:
-      # attach this run's files (the ones PyPI got) and publish it.
-      - name: Create the release (once), or finish a draft left half made
+      # Once: a published release with all of this run's files is left alone, whatever else was done to
+      # it by hand. A create that failed half way (a 5xx from the API, 0.12.5) can leave a draft or a
+      # release without its files, which a re-run must finish, not skip: attach the files it lacks (the
+      # ones PyPI got) and publish a draft with the CHANGELOG notes. Only "release not found" creates
+      # one; any other error fails the step, so an API outage cannot leave a second draft.
+      - name: Create the release (once), or finish one left half made
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          state=$(gh release view "$GITHUB_REF_NAME" --json isDraft,assets --jq '"\(.isDraft) \(.assets|length)"' 2>/dev/null || true)
-          if [ -z "$state" ]; then
-            gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --title "${GITHUB_REF_NAME#v}" \
-              --notes-file notes.md
-          elif [ "$state" = "false $(ls dist | wc -l | tr -d ' ')" ]; then
-            echo "release exists with its files"
-          else
-            echo "release exists but is incomplete ($state): attaching this run's files"
-            gh release upload "$GITHUB_REF_NAME" dist/* --clobber
+          if ! state=$(gh release view "$GITHUB_REF_NAME" --json isDraft,assets \
+                         --jq '"\(.isDraft) \([.assets[].name] | join(","))"' 2>view.err); then
+            if grep -qi "release not found" view.err; then
+              gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --title "${GITHUB_REF_NAME#v}" \
+                --notes-file notes.md
+              exit 0
+            fi
+            cat view.err
+            exit 1
+          fi
+          draft=${state%% *}
+          attached=",${state#* },"
+          missing=()
+          for f in dist/*; do
+            case "$attached" in *",$(basename "$f"),"*) ;; *) missing+=("$f") ;; esac
+          done
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "attaching ${#missing[@]} missing file(s)"
+            gh release upload "$GITHUB_REF_NAME" "${missing[@]}"
+          fi
+          if [ "$draft" = "true" ]; then
+            echo "publishing the draft"
             gh release edit "$GITHUB_REF_NAME" --draft=false --notes-file notes.md
+          fi
+          if [ ${#missing[@]} -eq 0 ] && [ "$draft" = "false" ]; then
+            echo "release exists with its files"
           fi
