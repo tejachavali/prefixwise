@@ -587,6 +587,31 @@ def _spans(setting):
         return None
 
 
+def _no_userinfo(url: str) -> str:
+    """The URL as it may be printed: a user name and password before the host are replaced by '...'."""
+    return re.sub(r"^((?:[A-Za-z][A-Za-z0-9+.-]*:)?(?://)?)[^/?#]*@", r"\1...@", url)
+
+
+def checked_upstream(url: str, name: str = "the upstream") -> str:
+    """The upstream base URL, trimmed; ValueError (one line, naming where it came from) when requests
+    could never be sent to it: not http(s), no host, a port that is not a number, or credentials in
+    the URL (they belong in a header: PREFIXWISE_API_KEY, or the client's own). The message never
+    repeats a password."""
+    url = (url or "").strip()
+    try:
+        parts = urllib.parse.urlsplit(url)
+        ok = parts.scheme in ("http", "https") and bool(parts.hostname)
+        parts.port  # raises on a port that is not a number
+    except ValueError:
+        ok = False
+    if not ok:
+        raise ValueError(f"{name} must be an http:// or https:// URL, got {_no_userinfo(url)!r}")
+    if parts.username or parts.password:
+        raise ValueError(f"{name} must not carry a user name or password in the URL ({_no_userinfo(url)}): "
+                         "send credentials in a header")
+    return url.rstrip("/")
+
+
 class PrefixwiseProxy:
     def __init__(self, ledger_path: str = ":memory:", hmac_key: bytes | None = None,
                  upstream_url: str | None = None, api_key: str | None = None,
@@ -649,10 +674,10 @@ class PrefixwiseProxy:
         # Set by serve() from --auth-token / PREFIXWISE_AUTH_TOKEN; None = open.
         self.auth_token: str | None = None
         self.fingerprinter = Fingerprinter(hmac_key=hmac_key)
-        self.upstream_url = (upstream_url or os.environ.get("PREFIXWISE_UPSTREAM_URL") or "").rstrip("/")
+        self.upstream_url = (upstream_url or os.environ.get("PREFIXWISE_UPSTREAM_URL") or "").strip().rstrip("/")
         # Per-provider upstreams ({"anthropic": url, "openai": url}) override upstream_url, so
         # one proxy can serve an agent that talks to both (prefixwise run).
-        self.upstreams = {k: v.rstrip("/") for k, v in (upstreams or {}).items() if v}
+        self.upstreams = {k: v.strip().rstrip("/") for k, v in (upstreams or {}).items() if v and v.strip()}
         # Providers whose upstream base already ends in its API version, like an
         # OPENAI_BASE_URL (https://api.openai.com/v1, or a gateway's .../openai):
         # requests go to <base>/chat/completions, exactly as the SDK would send them.
@@ -665,6 +690,12 @@ class PrefixwiseProxy:
                              and h.strip().lower() not in NEVER_PASSED}
         self.mock = mock if mock is not None else (
             not (self.upstream_url or self.upstreams) or os.environ.get("PREFIXWISE_MOCK_UPSTREAM") == "1")
+        if not self.mock:  # a bad upstream would otherwise fail on every request, with a bare 500
+            for key, url in self.upstreams.items():
+                checked_upstream(url, f"the {key} upstream")
+            # The general upstream is used only for a provider with no upstream of its own.
+            if self.upstream_url and not {"anthropic", "openai"} <= set(self.upstreams):
+                checked_upstream(self.upstream_url, "the upstream (--upstream or PREFIXWISE_UPSTREAM_URL)")
         self.default_session = "default"  # for requests that carry no session id
         # prefixwise check (prefixwise.check): sees every request's blocks (never stored), makes the
         # mock answer a user turn that offers tools with a tool call so an agent's loop runs a second
@@ -2224,7 +2255,9 @@ def serve(host: str = "127.0.0.1", port: int = 8080, *, ledger_path: str | None 
     once the server listens (tests). sinks: URLs (prefixwise.sinks) that receive a copy of every row."""
     hmac_key = os.environ.get("PREFIXWISE_HMAC_KEY")
     ledger_path = ledger_path or os.environ.get("PREFIXWISE_LEDGER_PATH", ":memory:")
-    proxy = PrefixwiseProxy(ledger_path=ledger_path, upstream_url=upstream_url, mock=mock or collect_only,
+    # mock stays None when not asked for, so the proxy's own default applies: mock when no upstream is set.
+    proxy = PrefixwiseProxy(ledger_path=ledger_path, upstream_url=upstream_url,
+                            mock=True if collect_only else mock,
                             hmac_key=hmac_key.encode() if hmac_key else None, fixes=fixes,
                             prices=prices, engine=engine, kv_events=kv_events, full_attention=full_attention,
                             otel=otel, collector_url="" if collect_only else collector_url)
@@ -2281,8 +2314,13 @@ def serve(host: str = "127.0.0.1", port: int = 8080, *, ledger_path: str | None 
         print("  POST /api/v1/ingest   GET /api/v1/*  GET /metrics  GET /health", flush=True)
     elif not quiet:
         target = "MOCK upstream (synthetic usage, no API calls)" if proxy.mock else proxy.upstream_url
+        if proxy.mock and proxy.upstream_url:  # asked for by --mock or PREFIXWISE_MOCK_UPSTREAM=1
+            target += f"; {_no_userinfo(proxy.upstream_url)} is not used"
         print(f"Prefixwise proxy on http://{host}:{server.server_address[1]}")
         print(f"  upstream: {target}")
+        if proxy.mock and proxy.api_key and not mock and os.environ.get("PREFIXWISE_MOCK_UPSTREAM") != "1":
+            print("  WARNING:  PREFIXWISE_API_KEY is set but no upstream is: answering with mock responses. "
+                  "Pass --upstream URL (or PREFIXWISE_UPSTREAM_URL) to forward, or --mock to say this is meant.")
         if getattr(proxy.collector, "remote", False):
             print(f"  collector: {proxy.collector.url} (records are sent there; no ledger here)")
         else:

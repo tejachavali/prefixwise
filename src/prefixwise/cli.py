@@ -109,14 +109,42 @@ def _pass_headers(args) -> None:
         os.environ["PREFIXWISE_PASS_HEADERS"] = ",".join(old + names)
 
 
+def _listen_error(exc: Exception, host: str, port: int) -> str:
+    """What to do about a port that cannot be bound, instead of the bare OS error."""
+    import errno
+    if isinstance(exc, OverflowError):
+        return f"--port must be between 0 and 65535, got {port}"
+    if isinstance(exc, OSError) and exc.errno == errno.EADDRINUSE:
+        return f"port {port} on {host} is already in use: pass another --port (0 picks a free one)"
+    return str(exc)
+
+
+def _listen_local(proxy, port: int):
+    """The proxy's server on 127.0.0.1 for `run` and `check`; a busy or bad port ends with a message."""
+    from .proxy import PrefixwiseHTTPServer, make_handler
+    try:
+        return PrefixwiseHTTPServer(("127.0.0.1", port), make_handler(proxy))
+    except (OSError, OverflowError) as exc:
+        sys.exit(f"prefixwise: {_listen_error(exc, '127.0.0.1', port)}")
+
+
 def cmd_serve(args) -> int:
     from .proxy import serve
 
     _pass_headers(args)
 
     ledger = args.ledger or os.environ.get("PREFIXWISE_LEDGER_PATH") or DEFAULT_LEDGER
-    engine, kv_events, lines = _detect_engine(args.upstream or os.environ.get("PREFIXWISE_UPSTREAM_URL"), args.engine,
-                                              args.kv_events, args.full_attention, mock=bool(args.mock))
+    upstream = (args.upstream or os.environ.get("PREFIXWISE_UPSTREAM_URL") or "").strip()
+    # Mock is decided once, as the proxy decides it, so nothing below contacts an upstream that will
+    # not be used: the engine probe would send it the API key.
+    mock = bool(args.mock) or os.environ.get("PREFIXWISE_MOCK_UPSTREAM") == "1" or not upstream
+    if not mock:
+        from .proxy import checked_upstream
+        try:  # before the probe: a URL nothing could be sent to is refused, not tried
+            upstream = checked_upstream(upstream, "--upstream" if args.upstream else "PREFIXWISE_UPSTREAM_URL")
+        except ValueError as exc:
+            sys.exit(f"prefixwise: {exc}")
+    engine, kv_events, lines = _detect_engine(upstream, args.engine, args.kv_events, args.full_attention, mock=mock)
     for line in lines:
         print(line, file=sys.stderr, flush=True)
     try:
@@ -125,8 +153,8 @@ def cmd_serve(args) -> int:
               fixes=_fixes(args), allow_unauthenticated=args.allow_unauthenticated,
               prices=args.prices, engine=engine, kv_events=kv_events,
               full_attention=args.full_attention, otel=args.otel, collector_url=args.collector, sinks=args.sink)
-    except (ValueError, OSError) as exc:  # unknown --fix, --engine, --otel or --sink value
-        sys.exit(f"prefixwise: {exc}")
+    except (ValueError, OSError, OverflowError) as exc:  # unknown --fix, --engine, --otel, --sink; a bad port
+        sys.exit(f"prefixwise: {_listen_error(exc, args.host, args.port)}")
     return 0
 
 
@@ -138,8 +166,8 @@ def cmd_collect(args) -> int:
         serve(host=args.host, port=args.port, ledger_path=ledger, prices=args.prices,
               allow_unauthenticated=args.allow_unauthenticated, otel="", collect_only=True,
               log_url=args.log, log_partitions=args.partitions, sinks=args.sink)
-    except (ValueError, ImportError, OSError) as exc:  # bad --partitions or --sink, or redis-py missing
-        sys.exit(f"prefixwise: {exc}")
+    except (ValueError, ImportError, OSError, OverflowError) as exc:  # bad --partitions, --sink or port; no redis-py
+        sys.exit(f"prefixwise: {_listen_error(exc, args.host, args.port)}")
     except Exception as exc:  # noqa: BLE001 - an unreachable or refusing Redis
         if type(exc).__module__.startswith("redis"):
             sys.exit(f"prefixwise: the record log is not reachable ({type(exc).__name__}: {exc})")
@@ -544,10 +572,17 @@ def cmd_run(args) -> int:
         return 2
     # Where the agent would have gone: its own base URLs if set (a gateway), kept exactly
     # as given, else the providers. OPENAI_BASE_URL includes the API version path.
-    anthropic = (os.environ.get("ANTHROPIC_BASE_URL") or "https://api.anthropic.com").rstrip("/")
-    openai = (os.environ.get("OPENAI_BASE_URL") or "https://api.openai.com/v1").rstrip("/")
+    anthropic = (os.environ.get("ANTHROPIC_BASE_URL") or "").strip().rstrip("/") or "https://api.anthropic.com"
+    openai = (os.environ.get("OPENAI_BASE_URL") or "").strip().rstrip("/") or "https://api.openai.com/v1"
+    mock = bool(args.mock) or os.environ.get("PREFIXWISE_MOCK_UPSTREAM") == "1"
     for name, url in (("ANTHROPIC_BASE_URL", anthropic), ("OPENAI_BASE_URL", openai)):
-        if not args.mock and _is_prefixwise(url):
+        if not mock:
+            from .proxy import checked_upstream
+            try:  # the agent's own base URL, checked before anything is sent to it
+                checked_upstream(url, name)
+            except ValueError as exc:
+                sys.exit(f"prefixwise: {exc}. Unset {name} to use the provider's own URL.")
+        if not mock and _is_prefixwise(url):
             print(f"prefixwise: {name} already points at a Prefixwise proxy ({_show_url(url)}). Unset it, "
                   "or use that proxy directly; chaining two would count every request twice.", file=sys.stderr)
             return 2
@@ -558,7 +593,7 @@ def cmd_run(args) -> int:
     # engine; traffic to another host through the same proxy is not judged as the engine's. Live:
     # without the join, an agent's miss against vLLM was `unknown` where the events would have named it.
     engine, kv_events, served = args.engine if args.engine != "none" else None, None, None
-    if not args.mock and args.engine != "none":
+    if not mock and args.engine != "none":
         for name, url in (("openai", openai), ("anthropic", anthropic)):
             found, kv_events, lines = _detect_engine(url, args.engine, None, args.full_attention)
             for line in lines:
@@ -568,8 +603,8 @@ def cmd_run(args) -> int:
                 served = {n for n, u in (("openai", openai), ("anthropic", anthropic)) if _host_of(u) == _host_of(url)}
                 break
     try:
-        proxy = PrefixwiseProxy(ledger_path=ledger, mock=True if args.mock else None, fixes=_fixes(args),
-                                upstreams=None if args.mock else {"anthropic": anthropic, "openai": openai},
+        proxy = PrefixwiseProxy(ledger_path=ledger, mock=True if mock else None, fixes=_fixes(args),
+                                upstreams=None if mock else {"anthropic": anthropic, "openai": openai},
                                 otel=args.otel, engine=engine, kv_events=kv_events, full_attention=args.full_attention)
     except ValueError as exc:
         sys.exit(f"prefixwise: {exc}")
@@ -581,7 +616,7 @@ def cmd_run(args) -> int:
     proxy.versioned = {"openai"}
     proxy.api_key = None  # the agent's own keys pass through; never replace them here
     proxy.default_session = f"run-{time.strftime('%Y%m%d-%H%M%S')}"
-    server = PrefixwiseHTTPServer(("127.0.0.1", args.port), make_handler(proxy))
+    server = _listen_local(proxy, args.port)
     base = f"http://127.0.0.1:{server.server_address[1]}"
     threading.Thread(target=server.serve_forever, daemon=True).start()
     env = {**os.environ, "ANTHROPIC_BASE_URL": base, "OPENAI_BASE_URL": base + "/v1", "PREFIXWISE_URL": base}
@@ -593,7 +628,7 @@ def cmd_run(args) -> int:
             server.server_close()
             return 2
         cmd = [cmd[0], *_codex_args(base), *cmd[1:]]
-    upstream = "mock" if args.mock else f"anthropic -> {_show_url(anthropic)}, openai -> {_show_url(openai)}"
+    upstream = "mock" if mock else f"anthropic -> {_show_url(anthropic)}, openai -> {_show_url(openai)}"
     print(f"prefixwise: proxy on {base} ({upstream}); ledger {ledger}", file=sys.stderr, flush=True)
     start = time.time()
     try:
@@ -638,7 +673,7 @@ def cmd_run(args) -> int:
         print(f"No requests reached Prefixwise. Does {cmd[0]} read ANTHROPIC_BASE_URL or OPENAI_BASE_URL? "
               "If not, set its base URL to the proxy by hand (see the README).", file=sys.stderr)
     else:
-        if args.mock:
+        if mock:
             print("(mock: synthetic responses and usage, so the numbers below are illustrative)", file=sys.stderr)
         print(render(found, command="run"), file=sys.stderr)
         print(f"All runs: prefixwise report --ledger {ledger}", file=sys.stderr)
@@ -704,7 +739,7 @@ def cmd_check(args) -> int:
     proxy.mock_tool_calls = True
     proxy.mock_first_turn_delay = max(0.0, args.first_turn_delay)
     proxy.request_observer = watch
-    server = PrefixwiseHTTPServer(("127.0.0.1", args.port), make_handler(proxy))
+    server = _listen_local(proxy, args.port)
     base = f"http://127.0.0.1:{server.server_address[1]}"
     threading.Thread(target=server.serve_forever, daemon=True).start()
     env = {**os.environ, "ANTHROPIC_BASE_URL": base, "OPENAI_BASE_URL": base + "/v1", "PREFIXWISE_URL": base,

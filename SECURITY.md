@@ -10,7 +10,7 @@ Please **don't** open a public issue. Use GitHub's private vulnerability reporti
 
 - It **stores** hashes of prompt blocks, token counts, cache-miss causes, and the session, task and agent labels you send. **Never** prompt text, completions or API keys. The ledger file is owner-only (0600).
 - It **forwards** your client's auth headers to the upstream you configured, and nowhere else. It makes no other network calls: no telemetry.
-- It **listens** on 127.0.0.1 by default. Beyond localhost, set `PREFIXWISE_AUTH_TOKEN`. With `PREFIXWISE_API_KEY` set, it refuses to listen beyond localhost without one.
+- It **listens** on 127.0.0.1 by default. Beyond localhost, set `PREFIXWISE_AUTH_TOKEN`. With `PREFIXWISE_API_KEY` set and an upstream to forward to, it refuses to listen beyond localhost without one. (With no upstream it is a mock: the key is never sent anywhere, and the banner warns that a key is set but unused.)
 
 ## Supported versions
 
