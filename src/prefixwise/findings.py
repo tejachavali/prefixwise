@@ -348,7 +348,142 @@ def findings(ledger, since: float | None = None, until: float | None = None,
             "bill": bill(ledger, **window),
             "cache_not_reported": not_reported,
             "unexplained_share": unexplained_share(ledger, since, until),
-            "observed_lifetimes": observed_lifetimes(ledger, since, until)}
+            "observed_lifetimes": observed_lifetimes(ledger, since, until),
+            "tasks": task_costs(ledger, since, until)}
+
+
+def task_costs(ledger, since: float | None = None, until: float | None = None) -> dict | None:
+    """What the tasks with a recorded outcome cost, and what a success cost: the unit a person
+    decides by. None when no task with requests in the window has an outcome.
+
+    A task's tokens and dollars are those of its requests that got a verdict (as in
+    prefixwise.metrics), and with a window only of its requests inside it (`window_only`).
+    `tasks_cut` counts the tasks that also have requests outside the window: they cost more than
+    is counted here. The cost of a success includes
+    the failed tasks: they were paid for too. Dollars are given only when every such request is
+    priced; a partial sum would understate them. The avoidable dollars need more: a request can be
+    priced and its avoidable part not (a price file with no cache-read rate), and then they are not
+    given either. `unresolved` counts the tasks that have requests and no outcome yet: they are in
+    none of the sums here."""
+    clauses, args = [], []
+    for op, val in ((">=", since), ("<", until)):
+        if val is not None:
+            clauses.append(f"recorded_at {op} ?")
+            args.append(val)
+    where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+    rows = f"(SELECT *, ({metrics.OK}) AS ok FROM entries{where})"
+    with ledger.reader() as conn:
+        by_outcome = conn.execute(
+            f"""SELECT t.success, COUNT(DISTINCT t.task_id), SUM(e.ok),
+                       SUM(CASE WHEN e.ok AND e.cost IS NOT NULL THEN 1 ELSE 0 END),
+                       SUM(CASE WHEN e.ok THEN e.cost END),
+                       SUM(CASE WHEN e.ok THEN e.prompt_tokens + COALESCE(e.completion_tokens, 0) END)
+                FROM {rows} e JOIN tasks t ON e.task_id = t.task_id GROUP BY t.success""", args).fetchall()
+        if not by_outcome:
+            return None
+        causes = conn.execute(
+            f"""SELECT e.cause, SUM(e.avoidable_tokens), SUM(e.avoidable_cost),
+                       SUM(CASE WHEN e.avoidable_cost IS NULL THEN 1 ELSE 0 END)
+                FROM {rows} e JOIN tasks t ON e.task_id = t.task_id
+                WHERE e.ok AND e.avoidable_tokens > 0 GROUP BY e.cause""", args).fetchall()
+        unresolved = conn.execute(
+            f"""SELECT COUNT(DISTINCT task_id) FROM entries{where}{' AND' if where else ' WHERE'} task_id IS NOT NULL
+                AND task_id != '' AND task_id NOT IN (SELECT task_id FROM tasks)""", args).fetchone()[0]
+        cut = 0
+        if where:  # resolved tasks counted here that also have requests outside the window, with a
+            # verdict (a failed request is in none of the sums, so leaving it out changes nothing); a
+            # row with no time (written before 0.3.1) is outside every window
+            cut = conn.execute(
+                f"""SELECT COUNT(DISTINCT task_id) FROM entries
+                    WHERE (recorded_at IS NULL OR NOT ({' AND '.join(clauses)})) AND ({metrics.OK})
+                    AND task_id IN (SELECT task_id FROM tasks)
+                    AND task_id IN (SELECT task_id FROM entries{where})""", args + args).fetchone()[0]
+    got = {bool(r[0]): r for r in by_outcome}
+    zero = (None, 0, 0, 0, None, None)
+    ok, bad = got.get(True, zero), got.get(False, zero)
+    both = lambda i: (ok[i] or 0) + (bad[i] or 0)  # noqa: E731
+    all_priced = both(3) == both(2)  # every request with a verdict has a cost (none at all: nothing was spent)
+    successful, tokens = ok[1], both(5)
+    # The avoidable dollars are known when the requests are priced and every avoidable row has its own.
+    avoidable_known = all_priced and not any(c[3] for c in causes)
+    avoidable_tokens = sum(c[1] for c in causes)
+    causes = [(c[0], c[1], max(0.0, c[2] or 0.0), c[3]) for c in causes]  # (an odd price file: never negative)
+    avoidable_cost = sum(c[2] for c in causes) if avoidable_known else None
+    out = {"resolved": ok[1] + bad[1], "successful": successful, "failed": bad[1], "unresolved": unresolved,
+           "window_only": since is not None or until is not None, "tasks_cut": cut,
+           "tokens": tokens, "tokens_failed": bad[5] or 0,
+           "tokens_per_successful": tokens / successful if successful else None,
+           "avoidable_tokens": avoidable_tokens,
+           "cost_usd": both(4) if all_priced else None,
+           "cost_failed_usd": (bad[4] or 0) if all_priced else None,
+           "cost_per_successful_usd": both(4) / successful if all_priced and successful else None,
+           "avoidable_cost_usd": avoidable_cost,
+           "top_waste": None}
+    if causes:
+        # The cause that wasted most: by dollars where they are known, else by tokens. `share` is
+        # its part of the avoidable total in that same unit.
+        size = (lambda c: c[2]) if avoidable_known else (lambda c: c[1])
+        total = avoidable_cost if avoidable_known else avoidable_tokens
+        top = max(causes, key=lambda c: (size(c), c[1], c[0]))
+        out["top_waste"] = {"cause": top[0], "what": CAUSE_PLAIN.get(top[0], top[0]), "avoidable_tokens": top[1],
+                            "avoidable_cost_usd": top[2] if avoidable_known else None,
+                            "share": size(top) / total if total else None}
+    return out
+
+
+def _small(x: float) -> str:
+    """Dollars, with a sum too small for four decimals said as such, not as $0.0000."""
+    return "under $0.0001" if 0 < x < 0.00005 else _usd(x)
+
+
+def _tasks(t: dict | None, span: str = "window") -> list[str]:
+    """The report's lines on what a finished task cost. `span` names what a time window is to the
+    reader: "window" for `report --since`, "run" for the summary `prefixwise run` prints."""
+    if not t:
+        return []
+    n, ok, bad = t["resolved"], t["successful"], t["failed"]
+    dollars = t["cost_usd"] is not None
+    spent = _small(t["cost_usd"]) if dollars else f"{_n(t['tokens'])} tokens"
+    here = f" in this {span}" if t["tasks_cut"] else ""
+    head = f"Tasks: {n:,} with an outcome, {ok:,} succeeded."
+    if not ok:
+        head = f"Tasks: {n:,} with an outcome, none succeeded: {spent} spent on {'it' if n == 1 else 'them'}{here}."
+    else:
+        each = (f"{_small(t['cost_per_successful_usd'])} ({_n(t['tokens_per_successful'])} tokens)" if dollars
+                else f"{_n(t['tokens_per_successful'])} tokens")
+        head += f" Each success cost {each}{here}"
+        if bad:
+            lost = t["cost_failed_usd"] if dollars else t["tokens_failed"]
+            total = t["cost_usd"] if dollars else t["tokens"]
+            head += (f", the {'failed task' if bad == 1 else f'{bad:,} failed tasks'} included: "
+                     f"{'it was' if bad == 1 else 'they were'} "
+                     f"{_small(lost) if dollars else _n(lost) + ' tokens'} of the {spent} spent"
+                     + (f" ({share_pct(lost / total)})" if total else ""))
+        head += "."
+    lines = [head]
+    w = t["top_waste"]
+    if w and t["avoidable_tokens"]:
+        if t["avoidable_cost_usd"] is not None and t["cost_usd"]:
+            per = f"{_small(t['avoidable_cost_usd'] / ok)} a success, " if ok else ""
+            amount = f"{per}{share_pct(t['avoidable_cost_usd'] / t['cost_usd'])} of what they cost"
+        else:  # no dollars for them, or tasks that cost nothing (a model priced at zero)
+            amount = f"{_n(t['avoidable_tokens'])} tokens" + (
+                " (their dollars are not known: a rate is missing for them)"
+                if dollars and t["avoidable_cost_usd"] is None else "")
+        part = ("" if w["share"] is None else "Most of it: " if w["share"] > 0.5
+                else f"The largest part ({share_pct(w['share'])}): ")
+        lines.append(f"  Avoidable on these tasks: {amount}." + (f" {part}{w['what']}." if part else ""))
+    if not dollars:
+        lines.append("  No dollars: not every request of these tasks is priced.")
+    if t["tasks_cut"]:
+        m = t["tasks_cut"]
+        lines.append(f"  {m:,} of these tasks also {'have' if m != 1 else 'has'} requests outside this {span}, which are "
+                     f"not counted: {'they' if m != 1 else 'it'} cost more than this.")
+    if t["unresolved"]:
+        m = t["unresolved"]
+        lines.append(f"  {m:,} more task{'s have' if m != 1 else ' has'} requests and no outcome yet, and "
+                     f"{'are' if m != 1 else 'is'} not counted here: prefixwise task ID --success (or --failure).")
+    return lines
 
 
 def observed_lifetimes(ledger, since: float | None = None, until: float | None = None) -> list[dict]:
@@ -568,8 +703,7 @@ f"{n:,} request{'' if n == 1 else 's'} on {m} (recorded before the table of {sin
         lines.append("The provider rejected the credentials (401/403). Prefixwise passes your agent's own API key "
                      "through; an agent signed in with a subscription instead of an API key (for example Codex "
                      "with a ChatGPT login) cannot be routed through a proxy.")
-    if s["tasks_successful"]:
-        lines.append(f"Tokens per successful task: {_n(s['tokens_per_successful_task'])}.")
+    lines.extend(_tasks(f.get("tasks"), span="run" if command == "run" else "window"))
     return "\n".join(lines)
 
 
