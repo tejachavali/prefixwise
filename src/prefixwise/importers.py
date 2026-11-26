@@ -10,19 +10,35 @@ each API response there carries its usage: cache reads, and cache writes split i
 ledger row, and never stores message text. The prompt itself is not in the log, so a
 cause is claimed only from what the log shows changed in the cached prefix:
 
-  none               read at least half of what could be reused (also for a first request
-                     that reused an entry written elsewhere: a parent, a fork, a resume)
+  none               read what the previous request on this model left in the cache (also for
+                     a first request that reused an entry written elsewhere: a parent, a fork,
+                     a resume, a sibling subagent); or read at least half of it when nothing in
+                     the log explains the rest
   first_write        the first request in a log, reading little
-  model_switch       the served model changed (caches are per model)
-  compaction_rewrite a compaction boundary since the previous request
-  system_edit        Claude Code was upgraded (the version changed), or its logged system
-                     prompt changed (compared by hash, never stored)
-  param_rendered     the effort setting changed, on models where that breaks the cache
-  ttl_expired        more time passed since the previous request than its write was kept
-                     (Anthropic reports 5-minute and 1-hour writes); `ttl_shortened` when
-                     that request asked for 1 hour and was kept 5 minutes
+  model_switch       the first request on a model in this log (unless it read its whole
+                     prompt); or a switch to a model whose own cache had expired while the
+                     conversation went on elsewhere (caches are per model)
+  compaction_rewrite a compaction boundary since the previous request on this model
+  ttl_expired        more time passed since the previous request on this model was sent than its
+                     write was kept (Anthropic reports 5-minute and 1-hour writes; with neither,
+                     what the request asked for, or one hour); `ttl_shortened` when that request
+                     asked for 1 hour and was kept 5 minutes
   (Anthropic's own)  a cache_miss_reason in the response, when the client asked for one
+  system_edit        under half was read and the logged system prompt changed (compared by hash,
+                     never stored), or Claude Code was upgraded
+  param_rendered     under half was read and the effort setting changed, on models where that
+                     breaks the cache
   unknown            nothing in the log explains it, and it says so
+
+Each request is compared with the previous one on the same model that used the cache, since
+caches are per model: a small side call on another model in between is not taken for the
+conversation, and a call that read and wrote nothing does not count as a use. A request that read less than was left,
+after a compaction, an expiry or a model switch, gets that cause even when it read more than half:
+a short or just-compacted conversation can lose all of its own history and still read most of its
+prompt, because the system prompt and tools at the front can be in the cache independently of it
+(measured: about 60,000 tokens read on the first call of a session and after 21 hours idle). A
+changed system prompt, effort or version is at the front of the prompt, so it is named only when
+under half was read: a read that goes past the front was not broken there.
 
 What Claude Code appends mid-conversation (deferred tool loads, MCP instruction updates,
 skill and agent listings, the date, file-change notices) comes after the cached prefix
@@ -47,7 +63,19 @@ from .fingerprint import schema_sets
 from .ledger import Ledger, LedgerEntry, avoidable_for_turn, unread_write
 from .pricing import PriceTable, breakdown
 
+CLASSIFIER_VERSION = "log-3"  # of the Claude Code rules below; stored on each row
 HIT_SHARE = 0.5  # as the proxy: a turn that read at least half of the reusable prefix is a hit
+# A turn that read this share of what the previous one left cached reused all of it: the log has
+# exact token counts, so a full reuse reads at least 100% (measured on 10,245 real hits).
+FULL_SHARE = 0.95
+# Attachments Claude Code writes when the response arrives, not when the request is sent (measured:
+# stamped within 50 ms of the response on 2,905 of 2,905). They say nothing about the send time.
+_AT_RESPONSE = {"deferred_tools_record"}
+# The same for a record type not known here: an attachment or system entry stamped this close to the
+# response was written with it. Those written with the request are stamped earlier by the time the
+# model takes to start answering (measured: 0.5 s at least). A user entry always counts.
+RESPONSE_SLACK = 0.1
+ANY_TTL = 3600.0  # the longest Anthropic keeps a cache entry: past it, expired under any lifetime
 # Appended after the cached prefix: context for an unexplained miss, never a cause.
 _APPENDED = {"deferred_tools_delta": "deferred tools loaded", "mcp_instructions_delta": "MCP instructions updated",
              "skill_listing": "skill listing", "agent_listing_delta": "agent listing updated", "date": "date notice"}
@@ -80,7 +108,7 @@ def _clean_usage(u: dict) -> dict:
 @dataclass
 class _Request:
     request_id: str
-    sent: float | None  # time of the last log entry before the response (the request's inputs)
+    sent: float | None  # when the request was sent: its last logged input, or the previous response's end if later
     done: float  # response time
     model: str
     usage: dict
@@ -113,7 +141,7 @@ def _requests(path: Path) -> dict[str, list[_Request]]:
     streams: dict[str, list[_Request]] = {}
     by_id: dict[str, _Request] = {}
     pending: dict[str, list[str]] = {}
-    last_input: dict[str, float] = {}
+    inputs: dict[str, list[tuple[float, bool]]] = {}  # (stamp, is a user entry) since the stream's previous response
     system_hash: dict[str, str] = {}
     with open(path, encoding="utf-8", errors="replace") as fh:
         for line in fh:
@@ -147,7 +175,14 @@ def _requests(path: Path) -> dict[str, list[_Request]]:
                 diag = msg.get("diagnostics") if isinstance(msg.get("diagnostics"), dict) else {}
                 miss = diag.get("cache_miss_reason")
                 native = (miss.get("type") if isinstance(miss, dict) else miss) or None
-                r = _Request(ids[0], last_input.get(key), ts, model, usage, e.get("promptCacheRequested"),
+                # Sent after its last input and after the previous response ended. An input can be
+                # stamped earlier than that (a message queued while the previous response streamed).
+                before = streams.get(key)
+                stamps = [t for t, user in inputs.pop(key, ()) if t <= ts and (user or t < ts - RESPONSE_SLACK)]
+                if before and before[-1].done <= ts:
+                    stamps.append(before[-1].done)
+                sent = max(stamps, default=None)
+                r = _Request(ids[0], sent, ts, model, usage, e.get("promptCacheRequested"),
                              e.get("version"), e.get("perTurnEffort") or e.get("effort"), system_hash.get(key),
                              str(native) if native else None, pending.pop(key, []))
                 for i in ids:
@@ -161,10 +196,12 @@ def _requests(path: Path) -> dict[str, list[_Request]]:
                         json.dumps(att["systemPrompt"], sort_keys=True).encode()).hexdigest()[:16]
                 elif att.get("type"):
                     pending.setdefault(key, []).append(str(att["type"]))
+                if att.get("type") in _AT_RESPONSE:
+                    continue
             elif kind == "system" and e.get("subtype") == "compact_boundary":
                 pending.setdefault(key, []).append("compact_boundary")
             if ts is not None and kind in ("user", "attachment", "system"):
-                last_input[key] = ts
+                inputs.setdefault(key, []).append((ts, kind == "user"))
     return streams
 
 
@@ -188,45 +225,110 @@ def _granted_ttl(usage: dict) -> float | None:
     return None
 
 
-def _classify(prev: _Request | None, prev_ttl: float | None, r: _Request, prompt: int, read: int,
-              prev_prompt: int | None, subagent: bool) -> tuple[str, bool | None, str, str | None]:
-    """(cause, legit, evidence, detail) from what the log shows."""
-    reusable = min(prev_prompt, prompt) if prev_prompt else prompt
-    if prompt > 0 and read >= HIT_SHARE * reusable:
-        return "none", None, ("read at least half of the reusable prompt from the cache" if prev is not None else
-                              "first request in this log, yet it read an existing cache entry "
-                              "(written by a parent session, a fork or a resume)"), None
-    iterations = r.usage.get("iterations")
-    if isinstance(iterations, list) and len(iterations) > 1:
-        return "unknown", None, "the response combined several model calls; its usage is their sum", None
+@dataclass
+class _Lane:
+    """The last request on one model in a stream. Caches are per model, so a request is compared
+    with this, not with whatever came just before it on another model."""
+    req: _Request
+    prompt: int
+    held: int           # what it left in the cache (read + written)
+    ttl: float | None   # how long its write is kept: granted, else carried from an earlier write, else asked for
+    granted: bool       # the log showed that lifetime on a write (not only what the request asked for)
+    usage: dict
+    compactions: int    # compaction boundaries the stream had seen by then
+    summed: bool        # its usage is the sum of several model calls: no basis for an exact comparison
+
+
+def _classify(prev: _Request | None, prev_lane: _Lane | None, same: _Lane | None, r: _Request, prompt: int,
+              read: int, subagent: bool, compacted: bool = False) -> tuple[str, bool | None, str, str | None]:
+    """(cause, legit, evidence, detail) from what the log shows. prev: the stream's previous request,
+    prev_lane: its model's lane; same: the previous request on this request's model that used the
+    cache; compacted: a compaction boundary was logged since `same`."""
+    several = isinstance(r.usage.get("iterations"), list) and len(r.usage["iterations"]) > 1
+    summed = ("unknown", None, "the response combined several model calls; its usage is their sum", None)
     if prev is None:
+        if prompt > 0 and read >= HIT_SHARE * prompt:
+            return "none", None, ("first request in this log, yet it read an existing cache entry (written by a "
+                                  "parent session, a fork, a resume, or another subagent with the same prompt)"), None
+        if several:
+            return summed
         return "first_write", True, ("first request of a subagent: it does not share the parent's prefix"
                                      if subagent else "first request in this log"), None
-    if prev.model != r.model:
-        return "model_switch", True, f"model {prev.model} -> {r.model}", None
-    if "compact_boundary" in r.events:
+    switch = f"model {prev.model} -> {r.model}"
+    if same is None:
+        # Nothing of this conversation was cached on this model, as far as the log shows: whatever was
+        # read (the front of the prompt can be in the cache independently) the rest is the switch's.
+        if prompt > 0 and read >= FULL_SHARE * prompt:
+            return "none", None, f"first request on {r.model} in this log, yet it read its whole prompt", None
+        return summed if several else ("model_switch", True, switch, None)
+    switched = prev.model != r.model
+    here = " on this model" if switched else ""
+    # No more than the previous request left could be read, and no more than this prompt holds.
+    exact = same.held > 0 and not same.summed
+    reusable = min(same.held, prompt) if exact else min(same.prompt, prompt)
+    if exact and prompt > 0 and read >= FULL_SHARE * reusable:
+        return "none", None, f"read what the previous request{here} left in the cache", None
+    if not exact and prompt > 0 and read >= FULL_SHARE * prompt:
+        # Nothing is known to have been left on this model, yet the whole prompt was read.
+        return "none", None, "read its whole prompt from the cache", None
+    partly = prompt > 0 and read >= HIT_SHARE * reusable
+    kept_half = ("none", None, f"read at least half of what the previous request{here} left in the cache, and "
+                               "the log shows nothing that explains the rest", None)
+    if several or (same.summed and partly):
+        # A sum of several calls is no basis for "less was read than was left": only a read under
+        # half of the prompt is taken as a miss.
+        return kept_half if partly else summed
+    was = same.req
+    since_use = (r.sent or r.done) - (was.sent or was.done)  # the cache was last used when that request was sent
+    expired = since_use > (same.ttl if same.ttl is not None else ANY_TTL)
+    # Less was read than was left. A compaction, an expiry or a model switch explains it even above
+    # half: the front of the prompt can be in the cache independently of this conversation.
+    if switched and expired and prev_lane is not None:
+        there = prev_lane.req  # the other model's last request that used its cache
+        since_prev = (r.sent or r.done) - (there.sent or there.done)
+        # The conversation was on the other model if that request carried a prompt of this one's
+        # size. A small side call (a title, a classification) is not the conversation.
+        carried = min(prev_lane.prompt, prompt) >= HIT_SHARE * max(prev_lane.prompt, prompt)
+        if carried and since_prev <= (prev_lane.ttl if prev_lane.ttl is not None else ANY_TTL):
+            # It was live there: staying would have hit.
+            return "model_switch", True, (f"{switch}; {r.model}'s own cache, last used {since_use:.0f} s ago, "
+                                          "had expired"), None
+    if compacted and (not switched or (exact and prompt < same.held)):
+        # (After a spell on another model, only a prompt smaller than what this model held was the
+        # one compacted: a side call on this model in between was not.)
         return "compaction_rewrite", True, "the conversation was compacted before this request", None
-    if prev.version and r.version and prev.version != r.version:
-        return "system_edit", True, f"Claude Code was upgraded ({prev.version} -> {r.version})", None
-    if prev.system_hash and r.system_hash and prev.system_hash != r.system_hash:
-        return "system_edit", None, "the system prompt Claude Code logged changed", None
-    if prev.effort != r.effort and prev.effort and r.effort and not _EFFORT_SAFE.search(r.model):
-        return "param_rendered", None, f"effort changed ({prev.effort} -> {r.effort})", None
-    since_use = (r.sent or r.done) - (prev.sent or prev.done)  # the cache was last used when prev was sent
-    if prev_ttl is not None and since_use > prev_ttl:
-        why = f"{since_use:.0f} s since the previous request; its cache write was kept {prev_ttl:.0f} s"
+    upgraded = (f"Claude Code was upgraded ({was.version} -> {r.version})"
+                if was.version and r.version and was.version != r.version else None)
+    if expired:
+        # An expiry explains the miss by itself. A change in the same gap is context, not the cause:
+        # the cache was gone either way.
+        why = f"{since_use:.0f} s since the previous request{here}; " + (
+            "longer than any cache lifetime (1 hour)" if same.ttl is None else
+            f"its cache write was kept {same.ttl:.0f} s" if same.granted else
+            f"it asked for a cache kept {same.ttl:.0f} s")
         detail = None
-        if prev.ttl_requested == "1h" and prev_ttl == 300.0:
+        if was.ttl_requested == "1h" and same.ttl == 300.0:
             detail, why = "ttl_shortened", why + " although that request asked for a 1-hour cache"
-        return "ttl_expired", True, why, detail
+        also = [x for x in (switch if switched else None, upgraded) if x]
+        return "ttl_expired", True, why + (f"; also in between: {'; '.join(also)}" if also else ""), detail
     if r.native and r.native not in NO_VERDICT and map_native_reason("anthropic", r.native) is not None:
         cause = map_native_reason("anthropic", r.native).value
         return cause, None, f"Anthropic's own diagnosis: {r.native}", None
+    if partly:
+        # The system prompt, the effort and the version are at the front of the prompt. A read that
+        # went past the front was not broken there, whatever changed.
+        return kept_half
+    if was.system_hash and r.system_hash and was.system_hash != r.system_hash:
+        return "system_edit", None, "the system prompt Claude Code logged changed", None
+    if was.effort != r.effort and was.effort and r.effort and not _EFFORT_SAFE.search(r.model):
+        return "param_rendered", None, f"effort changed ({was.effort} -> {r.effort})", None
+    if upgraded:
+        return "system_edit", True, upgraded + ", which can change its system prompt and tools", None
     seen = sorted({_APPENDED[e] for e in r.events if e in _APPENDED})
     context = (f"; the log shows {', '.join(seen)} before it, which Claude Code appends after the cached prefix"
                if seen else "")
-    return "unknown", None, (f"nothing in the log explains it ({since_use:.0f} s since the previous request, within "
-                             f"the cache lifetime): a change Claude Code does not log, or a server-side miss"
+    return "unknown", None, (f"nothing in the log explains it ({since_use:.0f} s since the previous request{here}, "
+                             f"within the cache lifetime): a change Claude Code does not log, or a server-side miss"
                              f"{context}"), None
 
 
@@ -241,9 +343,15 @@ def import_claude_code(root: str | os.PathLike | None = None, ledger: Ledger | N
     prices = prices or PriceTable.load(None)
     logs = sorted(root.glob("*/*.jsonl")) + sorted(root.glob("*/*/subagents/*.jsonl"))
     known = ledger.request_ids()
+    # Rows an earlier version of these rules classified. They are kept as they are (the logs they
+    # came from may be gone), and counted, so the caller can say how to get them classified again.
+    with ledger.reader() as conn:
+        older = {row[0] for row in conn.execute(
+            "SELECT request_id FROM entries WHERE classifier_version LIKE 'log-%' AND classifier_version != ?",
+            (CLASSIFIER_VERSION,))}
     seen: set[str] = set()  # imported in this run: the same session can be logged twice (two project dirs)
     stats = {"logs": 0, "requests": 0, "in_window": 0, "imported": 0, "skipped_known": 0, "duplicates": 0,
-             "unreadable": 0, "first": None, "last": None}
+             "unreadable": 0, "older_verdicts": 0, "first": None, "last": None}
     for log in logs:
         try:
             if not log.is_file():
@@ -262,24 +370,40 @@ def import_claude_code(root: str | os.PathLike | None = None, ledger: Ledger | N
             subagent = agent != "main"
             session = f"{session_base}/{log.stem}" if log.parent.name == "subagents" else (
                 session_base if stream == "main" else f"{session_base}/{stream}")
-            prev = prev_ttl = prev_prompt = None
+            prev = None
+            lanes: dict[str, _Lane] = {}  # per model: caches are per model
+            compactions = 0
             for r in reqs:
                 stats["requests"] += 1
                 u = r.usage
                 read = _int(u.get("cache_read_input_tokens"))
                 write = _int(u.get("cache_creation_input_tokens"))
                 prompt = _int(u.get("input_tokens")) + read + write
-                cause, legit, why, detail = _classify(prev, prev_ttl, r, prompt, read, prev_prompt, subagent)
+                compactions += r.events.count("compact_boundary")
+                same = lanes.get(r.model)
+                prev_lane = lanes.get(prev.model) if prev is not None else None
+                cause, legit, why, detail = _classify(prev, prev_lane, same, r, prompt, read, subagent,
+                                                      compacted=same is not None and compactions > same.compactions)
                 # This request's own cache lifetime: what its write was granted, else what it asked for.
-                own_ttl = _granted_ttl(u) or {"1h": 3600.0, "5m": 300.0}.get(r.ttl_requested or "")
-                gap = (r.sent or r.done) - prev.done if prev is not None else None
-                prev_u = prev.usage if prev is not None else None
-                held = None
-                if prev_u is not None:
-                    held = _int(prev_u.get("cache_read_input_tokens")) + _int(prev_u.get("cache_creation_input_tokens"))
-                avoidable = avoidable_for_turn(legit, prompt, read, prev_prompt, held)
-                prev, prev_prompt_before, prev_prompt = r, prev_prompt, prompt
-                prev_ttl = _granted_ttl(u) or prev_ttl
+                asked = {"1h": 3600.0, "5m": 300.0}.get(r.ttl_requested or "")
+                own_ttl = _granted_ttl(u) or asked
+                # Since the previous turn on this model (the ledger's definition), else the stream's.
+                before = same.req if same is not None else prev
+                gap = max(0.0, (r.sent or r.done) - before.done) if before is not None else None
+                prev_u = same.usage if same is not None else None
+                prev_prompt_before = same.prompt if same is not None else None
+                held = same.held if same is not None and same.held > 0 else None
+                avoidable = avoidable_for_turn(legit, prompt, read, prev_prompt_before, held)
+                several = isinstance(u.get("iterations"), list) and len(u["iterations"]) > 1
+                if read + write > 0 or same is None or same.held == 0:
+                    # A call that read and wrote nothing did not touch this model's cache: what the
+                    # lane holds, since when and for how long stay as they were.
+                    granted = _granted_ttl(u)
+                    lanes[r.model] = _Lane(req=r, prompt=prompt, held=read + write,
+                                           ttl=granted or (same.ttl if same else None) or asked,
+                                           granted=bool(granted or (same and same.granted)), usage=u,
+                                           compactions=compactions, summed=several)
+                prev = r
                 if since is not None and r.done < since:
                     continue
                 stats["in_window"] += 1
@@ -288,6 +412,7 @@ def import_claude_code(root: str | os.PathLike | None = None, ledger: Ledger | N
                     continue
                 if r.request_id in known:
                     stats["skipped_known"] += 1
+                    stats["older_verdicts"] += r.request_id in older
                     continue
                 parts = breakdown("anthropic", u)
                 entry = LedgerEntry(
@@ -299,9 +424,12 @@ def import_claude_code(root: str | os.PathLike | None = None, ledger: Ledger | N
                     cache_write_tokens=parts.cache_write_5m + parts.cache_write_1h + parts.cache_write,
                     gap_seconds=gap, evidence=f"from the log: {why}", detail=detail, native_reason=r.native,
                     cache_ttl_seconds=own_ttl,
-                    classifier_version="log-2")
+                    classifier_version=CLASSIFIER_VERSION)
                 entry.avoidable_cost = prices.avoidable_cost(r.model, avoidable, prompt, "anthropic", u)
-                if prev_u is not None and prompt > 0:
+                # A compaction's summary call reads the previous write, and Claude Code does not log
+                # that call: the write was not left unread. A request that used no cache at all leaves
+                # its model's lane as it was, so the write is counted at the next request that does.
+                if prev_u is not None and prompt > 0 and cause != "compaction_rewrite" and read + write > 0:
                     pw = breakdown("anthropic", prev_u)
                     w5, w1, _ = unread_write(cause, read, pw.cache_write_5m, pw.cache_write_1h, 0,
                                              _int(prev_u.get("cache_read_input_tokens")))
