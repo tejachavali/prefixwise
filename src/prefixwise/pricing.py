@@ -308,6 +308,37 @@ class PriceTable:
         paid = self._paid_rate(r, breakdown(provider, usage)) if provider and usage else None
         return round(avoidable_tokens * ((r["input"] if paid is None else paid) - read) / 1e6, 8)
 
+    def missed_cost(self, model: str, missed_tokens: int, prompt_tokens: int,
+                    provider: str | None = None, usage: dict | None = None) -> float | None:
+        """USD an expiry paid for `missed_tokens` above reading them from the cache. They are the
+        front of the prompt, so they were written to the cache again before anything else was: they
+        are priced at this request's cache-write rate as far as it wrote, and as uncached input
+        beyond that. (Not the blended rate `avoidable_cost` uses: a long uncached tail would dilute
+        the write rate the re-sent prefix actually paid.) None when a rate is not known."""
+        rates = self.rates_for(model)
+        if rates is None:
+            return None
+        if not missed_tokens:
+            return 0.0
+        r = self._tier(rates, prompt_tokens)
+        read, fresh = r.get("cache_read"), r.get("input")
+        if not isinstance(read, (int, float)) or not isinstance(fresh, (int, float)):
+            return None
+        b = breakdown(provider, usage) if provider and usage else None
+        written = cost = 0.0
+        for n, rate in (() if b is None else (
+                (b.cache_write_5m, r.get("cache_write_5m", r.get("cache_write"))),
+                (b.cache_write_1h, r.get("cache_write_1h")), (b.cache_write, r.get("cache_write")))):
+            if not n:
+                continue
+            rate = fresh if rate == "input" else rate
+            if not isinstance(rate, (int, float)):
+                return None
+            written, cost = written + n, cost + n * rate
+        at_write = min(missed_tokens, written)
+        write_rate = cost / written if written else fresh
+        return round((at_write * (write_rate - read) + (missed_tokens - at_write) * (fresh - read)) / 1e6, 8)
+
     def miss_rate(self, model: str, provider: str | None, prompt_tokens: int) -> float | None:
         """USD per token a miss costs above a hit for prefix tokens that are sent again: the rate
         paid to resend them (on Anthropic the 5-minute cache-write rate, as they are written again;

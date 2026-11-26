@@ -508,11 +508,16 @@ class Collector:
         )
         entry.avoidable_cost = self.prices.avoidable_cost(priced_model, entry.avoidable_tokens, prompt_tokens,
                                                           provider, usage)
+        # What an expiry sent again: only for a prompt that had not changed (no other cause beside
+        # the expiry, a comparison was made) and a previous turn known to have left something.
+        left = (prev.cached_tokens + prev.cache_written
+                if prev is not None and (prev.provider == "anthropic" or prev.cache_written) else None)
         entry.missed_tokens = missed_for_turn(entry.cause, result.legit, prompt_tokens, cached,
-                                              prev.prompt_tokens if prev else None, held)
-        if entry.missed_tokens is not None:  # priced like avoidable tokens: what was paid above a read
-            entry.missed_cost = self.prices.avoidable_cost(priced_model, entry.missed_tokens, prompt_tokens,
-                                                           provider, usage)
+                                              prev.prompt_tokens if prev else None, left,
+                                              unchanged=not result.secondary and not result.own_read)
+        if entry.missed_tokens is not None:
+            entry.missed_cost = self.prices.missed_cost(priced_model, entry.missed_tokens, prompt_tokens,
+                                                        provider, usage)
         if entry.cost is None:  # no rates, or no usage: nothing about this request has a dollar figure
             entry.avoidable_cost = entry.missed_cost = None
         # The previous turn's cache write, left unread: only when that turn is this conversation's

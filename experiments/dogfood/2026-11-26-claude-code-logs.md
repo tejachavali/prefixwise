@@ -129,9 +129,13 @@ before a long break). Showing what expected misses cost is tracked as a separate
 **After that change** (the same frozen logs, imported again): the report's expected-misses line reads
 `90 x too long since the previous turn: the cache entry expired (36,080,062 tokens the cache had held
 were sent again, [dollars] more than reading them, 23% of the bill)`. The 90 are the 72 and the 18 in
-the table above, and 23% agrees with their 21% and 1.4% (the table was worked out by hand from the
-raw logs, the line by the importer). The other rows of the table get no figure: after a compaction
-or a model switch, how much could have been read is not known in tokens.
+the table above, and the importer's 22.9% is close to their 21% and 1.4% (the table was worked out by
+hand from the raw logs). The token count is what was not read: it is less than 90 contexts of the
+average size above, because the front of the prompt was still read on many of these turns, as noted
+earlier in this record. The figure is gross: what was paid again, not what a longer cache lifetime
+would have saved (72 of the 90 came after more than an hour, longer than any stated lifetime). The
+other rows of the table get no figure: after a compaction or a model switch, how much could have been
+read is not known in tokens.
 
 ## Limits
 

@@ -94,11 +94,10 @@ class LedgerEntry:
     # the cache entry this request could read, which a stated TTL is compared with. `gap_seconds` is
     # the idle time (from that turn's end). None with no compared turn on this model, and on older rows.
     cache_age_seconds: float | None = None
-    # Schema 9: what an expected miss cost. On a miss with a legitimate cause where the prompt had not
-    # changed (EXPECTED_MISS_CAUSES: the entry expired, or the engine evicted it), the tokens the
-    # previous turn had left in the cache that this turn sent again, and what they cost above reading
-    # them (USD). Not waste, so not in `avoidable_*`: nothing in the request was wrong. None on every
-    # other row, and on older rows.
+    # Schema 9: what an expected miss cost. On an expiry (`ttl_expired`) of a prompt that had not
+    # changed, where what the previous turn left in the cache is known: the tokens it had left that
+    # this turn sent again, and what they cost above reading them (USD). Not waste, so not in
+    # `avoidable_*`: nothing in the request was wrong. None on every other row, and on older rows.
     missed_tokens: int | None = None
     missed_cost: float | None = None
     schema_version: int = SCHEMA_VERSION
@@ -175,24 +174,31 @@ def avoidable_for_turn(legit: bool | None, prompt_tokens: int, cached_tokens: in
     return max(0, reusable - cached_tokens)
 
 
-# Legitimate misses of a prompt that had not changed: what was sent again is what the cache had held.
-# (After a change with a legitimate cause, a compaction or a new tool, how much of the prompt before
-# the change could have been read is not known in tokens: no figure is given for those.)
-EXPECTED_MISS_CAUSES = frozenset({"ttl_expired", "evicted"})
+# The expected miss that gets a figure: the cache entry expired. (Not an engine's eviction yet: what
+# an engine held is counted in blocks and its dollars are not priced. Not a miss after a change with
+# a legitimate cause, a compaction or a new tool: how much of the prompt before the change could
+# have been read is not known in tokens.)
+EXPECTED_MISS_CAUSES = frozenset({"ttl_expired"})
 
 
 def missed_for_turn(cause: str | None, legit: bool | None, prompt_tokens: int, cached_tokens: int,
-                    prev_prompt_tokens: int | None, prev_held_tokens: int | None = None) -> int | None:
-    """Tokens an expected miss sent again that the previous turn had left in the cache: the same
-    arithmetic as `avoidable_for_turn`, for a miss that is not waste. None when the row is not such a
-    miss (waste is counted in `avoidable_tokens`, never in both), or the previous turn's size is not
-    known."""
-    if legit is False or cause not in EXPECTED_MISS_CAUSES or not prev_prompt_tokens:
+                    prev_prompt_tokens: int | None, prev_left_tokens: int | None, *,
+                    unchanged: bool = True) -> int | None:
+    """Tokens an expiry sent again that the previous turn had left in the cache, less what was read
+    all the same. A figure is given only where it is true:
+
+    - the cause is an expiry and is not waste (waste is counted in `avoidable_tokens`, never both);
+    - the prompt had not changed (`unchanged`): after a change, a live cache would not have served
+      the changed part, and how much it would have served is not known;
+    - what the previous turn left in the cache is known and is not zero (`prev_left_tokens`: what it
+      read plus what it wrote). A turn that left nothing had nothing to expire, and where a provider
+      does not report writes, what was held is a guess.
+
+    None otherwise."""
+    if (legit is False or cause not in EXPECTED_MISS_CAUSES or not unchanged
+            or not prev_prompt_tokens or not prev_left_tokens):
         return None
-    reusable = min(prev_prompt_tokens, prompt_tokens)
-    if prev_held_tokens:
-        reusable = min(reusable, prev_held_tokens)
-    return max(0, reusable - cached_tokens)
+    return max(0, min(prev_prompt_tokens, prompt_tokens, prev_left_tokens) - cached_tokens)
 
 
 def held_for_turn(prev, cause: str, cached_tokens: int) -> int | None:

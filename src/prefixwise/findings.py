@@ -265,7 +265,8 @@ def findings(ledger, since: float | None = None, until: float | None = None,
     s = metrics.summary(ledger, **window)
     by_cause = metrics.query(ledger, ["requests", "prompt_tokens", "cached_tokens", "avoidable_tokens",
                                       "avoidable_cost_usd", "requests_wasteful", "missed_tokens",
-                                      "missed_cost_usd"], by="cause", **window)
+                                      "missed_cost_usd", "requests_missed", "requests_missed_priced"],
+                             by="cause", **window)
     waste, expected, unexplained = [], [], []
     for r in by_cause:
         cause = r["cause"]
@@ -275,6 +276,7 @@ def findings(ledger, since: float | None = None, until: float | None = None,
                 "avoidable_tokens": r["avoidable_tokens"], "avoidable_cost_usd": r["avoidable_cost_usd"],
                 # what an expected miss sent again and what that cost: not waste, but on the bill
                 "missed_tokens": r["missed_tokens"], "missed_cost_usd": r["missed_cost_usd"],
+                "requests_missed": r["requests_missed"], "requests_missed_priced": r["requests_missed_priced"],
                 "details": _details(ledger, cause, window)}
         if cause == "unknown":  # not known to be expected, nor waste
             unexplained.append(item)
@@ -408,9 +410,17 @@ def _missed(e: dict, bill) -> str:
     tokens, cost = e.get("missed_tokens"), e.get("missed_cost_usd")
     if not tokens:
         return ""
-    money = f", {_usd(cost)} more than reading them" + (f", {_share(cost, bill)} of the bill" if bill else "") \
-        if cost else ""
-    return f" ({_n(tokens)} tokens the cache had held were sent again{money})"
+    # The figure covers the requests that have one, which can be fewer than the cause's count (a
+    # prompt that had also changed, a previous turn of unknown size, rows from an older version),
+    # and the dollars cover the priced ones among those: say so when the numbers differ.
+    n, with_figure, priced = e.get("requests") or 0, e.get("requests_missed") or 0, e.get("requests_missed_priced") or 0
+    scope = f"on {with_figure:,} of them, " if with_figure and with_figure != n else ""
+    money = ""
+    if cost:
+        money = (f", {_usd(cost)} more than reading them"
+                 + (f" on the {priced:,} that are priced" if priced and priced != with_figure else "")
+                 + (f", {_share(cost, bill)} of the bill" if bill else ""))
+    return f" ({scope}{_n(tokens)} tokens the cache had held were sent again{money})"
 
 
 def _req(n: int) -> str:

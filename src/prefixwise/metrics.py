@@ -72,12 +72,17 @@ CATALOG: tuple[Metric, ...] = (
            "by 0.11.6 or later).", f"SUM(CASE WHEN {OK} AND cost_cache_read IS NOT NULL THEN 1 ELSE 0 END)"),
     Metric("avoidable_cost_usd", "USD", "What the avoidable tokens cost as uncached input rather than "
            "cache reads (priced requests).", f"SUM(CASE WHEN {OK} THEN avoidable_cost END)"),
-    Metric("missed_tokens", "{token}", "Prompt tokens sent again on misses with a legitimate cause where the "
-           "prompt had not changed (the cache entry had expired, or the engine evicted it): what the previous "
-           "turn had left in the cache. Not waste, so not in avoidable_tokens.",
-           f"SUM(CASE WHEN {OK} THEN missed_tokens END)"),
-    Metric("missed_cost_usd", "USD", "What those tokens cost above reading them from the cache (priced requests).",
+    Metric("missed_tokens", "{token}", "Prompt tokens sent again because the cache entry had expired, on "
+           "requests whose prompt had not changed: what the previous turn had left in the cache, less what "
+           "was read all the same. Not waste, so not in avoidable_tokens. Requests with such a figure only "
+           "(requests_missed).", f"SUM(CASE WHEN {OK} THEN missed_tokens END)"),
+    Metric("missed_cost_usd", "USD", "What those tokens cost above reading them from the cache, before the "
+           "cost of anything that would have kept them (priced requests only: requests_missed_priced).",
            f"SUM(CASE WHEN {OK} THEN missed_cost END)"),
+    Metric("requests_missed", "{request}", "Requests that carry a missed_tokens figure.",
+           f"SUM(CASE WHEN {OK} AND missed_tokens IS NOT NULL THEN 1 ELSE 0 END)"),
+    Metric("requests_missed_priced", "{request}", "Of those, the ones with a missed_cost.",
+           f"SUM(CASE WHEN {OK} AND missed_cost IS NOT NULL THEN 1 ELSE 0 END)"),
     Metric("latency_ms_p50", "ms", "Median upstream latency of requests with a verdict (streams: to the "
            "last byte delivered).", percentile=("latency_ms", 0.50)),
     Metric("latency_ms_p95", "ms", "95th percentile upstream latency of requests with a verdict.",
