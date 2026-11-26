@@ -60,7 +60,7 @@ from pathlib import Path
 
 from .diagnostics import NO_VERDICT, map_native_reason
 from .fingerprint import schema_sets
-from .ledger import Ledger, LedgerEntry, avoidable_for_turn, unread_write
+from .ledger import Ledger, LedgerEntry, avoidable_for_turn, missed_for_turn, unread_write
 from .pricing import PriceTable, breakdown
 
 CLASSIFIER_VERSION = "log-3"  # of the Claude Code rules below; stored on each row
@@ -394,6 +394,7 @@ def import_claude_code(root: str | os.PathLike | None = None, ledger: Ledger | N
                 prev_prompt_before = same.prompt if same is not None else None
                 held = same.held if same is not None and same.held > 0 else None
                 avoidable = avoidable_for_turn(legit, prompt, read, prev_prompt_before, held)
+                missed = missed_for_turn(cause, legit, prompt, read, prev_prompt_before, held)
                 several = isinstance(u.get("iterations"), list) and len(u["iterations"]) > 1
                 if read + write > 0 or same is None or same.held == 0:
                     # A call that read and wrote nothing did not touch this model's cache: what the
@@ -426,8 +427,11 @@ def import_claude_code(root: str | os.PathLike | None = None, ledger: Ledger | N
                     cache_ttl_seconds=own_ttl,
                     classifier_version=CLASSIFIER_VERSION)
                 entry.avoidable_cost = prices.avoidable_cost(r.model, avoidable, prompt, "anthropic", u)
+                entry.missed_tokens = missed
+                if missed is not None:
+                    entry.missed_cost = prices.avoidable_cost(r.model, missed, prompt, "anthropic", u)
                 if entry.cost is None:  # no rates, or no usage: no dollar figure of any kind
-                    entry.avoidable_cost = None
+                    entry.avoidable_cost = entry.missed_cost = None
                 # A compaction's summary call reads the previous write, and Claude Code does not log
                 # that call: the write was not left unread. A request that used no cache at all leaves
                 # its model's lane as it was, so the write is counted at the next request that does.
@@ -600,6 +604,7 @@ def import_codex(root: str | os.PathLike | None = None, ledger: Ledger | None = 
                 write = _int((prev.usage.get("input_tokens_details") or {}).get("cache_write_tokens"))
                 held = prev.cached + write if write else None
             avoidable = avoidable_for_turn(legit, r.prompt, r.cached, prev_prompt, held)
+            missed = missed_for_turn(cause, legit, r.prompt, r.cached, prev_prompt, held)
             prev, prev_prompt = r, r.prompt
             if since is not None and r.done < since:
                 continue
@@ -619,8 +624,11 @@ def import_codex(root: str | os.PathLike | None = None, ledger: Ledger | None = 
                 uncached_tokens=parts.uncached_input, cache_write_tokens=parts.cache_write,
                 gap_seconds=gap, evidence=f"from the log: {why}", classifier_version="codex-log-2")
             entry.avoidable_cost = prices.avoidable_cost(r.model, avoidable, r.prompt, "openai", r.usage)
+            entry.missed_tokens = missed
+            if missed is not None:
+                entry.missed_cost = prices.avoidable_cost(r.model, missed, r.prompt, "openai", r.usage)
             if entry.cost is None:  # no rates, or no usage: no dollar figure of any kind
-                entry.avoidable_cost = None
+                entry.avoidable_cost = entry.missed_cost = None
             if entry.cost is not None:
                 entry.price_as_of = prices.as_of
             ledger.record(entry, at=r.done)

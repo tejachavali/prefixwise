@@ -126,6 +126,13 @@ prompt, so the report rightly shows no avoidable waste. But it shows no figure f
 either, and they are the one thing here a user can change (compact, or start a new session,
 before a long break). Showing what expected misses cost is tracked as a separate change.
 
+**After that change** (the same frozen logs, imported again): the report's expected-misses line reads
+`90 x too long since the previous turn: the cache entry expired (36,080,062 tokens the cache had held
+were sent again, [dollars] more than reading them, 23% of the bill)`. The 90 are the 72 and the 18 in
+the table above, and 23% agrees with their 21% and 1.4% (the table was worked out by hand from the
+raw logs, the line by the importer). The other rows of the table get no figure: after a compaction
+or a model switch, how much could have been read is not known in tokens.
+
 ## Limits
 
 - **One machine, one user, one kind of work.** Rules tuned on it may not hold elsewhere. The

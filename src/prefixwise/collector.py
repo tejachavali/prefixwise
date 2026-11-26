@@ -23,7 +23,7 @@ from .classifier import (UNSEEN_PARENT, Classification, MissCause, RequestSnapsh
                          served_all)
 from .details import Facts, detail_for, last_block_marked, marked_tokens, shared_breakpoint
 from .diagnostics import AgreementScorer
-from .ledger import Ledger, LedgerEntry, avoidable_for_turn, held_for_turn, unread_write
+from .ledger import Ledger, LedgerEntry, avoidable_for_turn, held_for_turn, missed_for_turn, unread_write
 from .lifetime import LEDGER_SQL, LifetimeTracker
 from .pricing import PriceTable, breakdown, cache_reported, completion_tokens_of, normalize_usage, write_reported
 from .prom import Metrics
@@ -508,8 +508,13 @@ class Collector:
         )
         entry.avoidable_cost = self.prices.avoidable_cost(priced_model, entry.avoidable_tokens, prompt_tokens,
                                                           provider, usage)
+        entry.missed_tokens = missed_for_turn(entry.cause, result.legit, prompt_tokens, cached,
+                                              prev.prompt_tokens if prev else None, held)
+        if entry.missed_tokens is not None:  # priced like avoidable tokens: what was paid above a read
+            entry.missed_cost = self.prices.avoidable_cost(priced_model, entry.missed_tokens, prompt_tokens,
+                                                           provider, usage)
         if entry.cost is None:  # no rates, or no usage: nothing about this request has a dollar figure
-            entry.avoidable_cost = None
+            entry.avoidable_cost = entry.missed_cost = None
         # The previous turn's cache write, left unread: only when that turn is this conversation's
         # own: the same opening message, its own interleaved turn, or a compaction (which rewrites
         # the opening) while no other conversation shares the lane. Not another conversation this

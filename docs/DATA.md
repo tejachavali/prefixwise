@@ -55,6 +55,7 @@ Added (observed today, previously dropped):
 | `cache_ttl_seconds` (schema 5) | the request's own cache lifetime: what its write was granted, or asked for (Anthropic 300 or 3,600; the `X-Prefixwise-Cache-Ttl` header; empty when unknown): what the 5-minute vs 1-hour advice reads |
 | `unread_write_tokens`, `unread_write_cost` (schema 6) | a miss of the same conversation that replaced the prefix (or let it expire) and did not read back the previous turn's cache write, in whole or in part: a read that stops inside the stable system+tools prefix leaves the whole write unread. The tokens written and never read, and the surcharge paid to write them above sending them uncached (`prefixwise report`: "cache writes never read"; not part of avoidable cost) |
 | `cache_age_seconds` (schema 9) | the age of the cache entry this request could read: seconds from when the turn it was compared with was sent (not when it ended: a provider counts an entry's lifetime from the request that wrote or read it) to when this request was sent. What a stated TTL is compared with, and what the 5-minute vs 1-hour advice reads (it falls back to `gap_seconds` on older rows). Empty on a first request and on a model switch |
+| `missed_tokens`, `missed_cost` (schema 9) | what an expected miss cost. On a miss with a legitimate cause where the prompt had not changed (`ttl_expired`, `evicted`): the tokens the previous turn had left in the cache that this turn sent again, and what they cost above reading them (USD, priced like `avoidable_cost`). Not waste, so never also in `avoidable_tokens`: nothing in the request was wrong, but it is on the bill, and it is what a longer cache lifetime or more engine memory would buy back. Empty on every other row (after a compaction or a new tool, how much of the prompt before the change could have been read is not known in tokens), when the previous turn's size is not known, and on rows from before 0.12.8. Metrics: `missed_tokens`, `missed_cost_usd` |
 | `lifetime_evidence` (schema 8) | on a provider that states no cache lifetime: 1 when this turn's unchanged prefix was still read after its idle gap, 0 when it came back short (under half, and not explained by a changed cache key); empty otherwise. What the observed cache lifetime per model is learned from (`prefixwise report`) |
 | `cost_cache_read`, `cost_input`, `cost_cache_write`, `cost_output` (schema 7) | the request's cost split by what it paid for: tokens read from the cache, new uncached input, cache writes, output. They sum to `cost`; empty when unpriced, and on rows written before schema 7. The report's "Where the bill went" line, and the share that re-reads context already cached (a floor a better hit rate does not lower) |
 | `detail` (schema 4) | the why behind the cause, where the evidence allows: `ttl_shortened`, `lookback_exceeded`, `markers_ignored`, `sent_before_cache_written`, `shared_prefix_not_reused`, `thinking_stripped`, `cache_key_changed`, `host_restored`, `output_rerendered`, `session_header_dropped` (`prefixwise.details`); a dimension and filter in `/api/v1` |
@@ -134,13 +135,14 @@ CREATE TABLE prefixwise.entries (
     detail Nullable(String), cache_ttl_seconds Nullable(Float64), unread_write_tokens Nullable(Int64),
     unread_write_cost Nullable(Float64), cost_cache_read Nullable(Float64), cost_input Nullable(Float64),
     cost_cache_write Nullable(Float64), cost_output Nullable(Float64), lifetime_evidence Nullable(UInt8),
-    cache_age_seconds Nullable(Float64), schema_version Int64, recorded_at Float64
+    cache_age_seconds Nullable(Float64), missed_tokens Nullable(Int64), missed_cost Nullable(Float64),
+    schema_version Int64, recorded_at Float64
 ) ENGINE = MergeTree ORDER BY (model, recorded_at);
 ```
 
 A table made from an earlier version of this statement needs each newer column added before rows that carry it
 arrive, for example for schema 8: `ALTER TABLE prefixwise.entries ADD COLUMN lifetime_evidence Nullable(UInt8)`,
-and for schema 9: `ALTER TABLE prefixwise.entries ADD COLUMN cache_age_seconds Nullable(Float64)`.
+and for schema 9: `ALTER TABLE prefixwise.entries ADD COLUMN cache_age_seconds Nullable(Float64), ADD COLUMN missed_tokens Nullable(Int64), ADD COLUMN missed_cost Nullable(Float64)`.
 
 `cause` is null on a failure row (`status` >= 400 or `error` set); booleans arrive as 0/1. A sink receives rows
 from the moment it is configured; earlier rows are in the ledger (`prefixwise export`). A ClickHouse error that
