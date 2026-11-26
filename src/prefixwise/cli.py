@@ -890,6 +890,10 @@ def cmd_import(args) -> int:
         return 0
     if stats["unreadable"]:
         print(f"prefixwise: skipped {stats['unreadable']} unreadable log file(s)", file=sys.stderr)
+    if stats.get("older_verdicts"):
+        print(f"prefixwise: {stats['older_verdicts']:,} requests in {path} were classified by an earlier version of "
+              "the rules; their verdicts are kept as they were. To classify them again, import into a new ledger "
+              "(--ledger new.db).", file=sys.stderr)
     if not stats["imported"]:
         if not stats["in_window"]:
             print(f"No requests in the {stats['logs']} logs" + (f" since {args.since}." if args.since else "."))

@@ -37,14 +37,16 @@ each verdict with Anthropic's own cache diagnosis, which Claude Code requests an
 | `model_switch` | 5 | 5 | 0 | |
 | `unknown` | 2 | | 2 | both 5-minute expiries |
 
-1. **A warm shared prefix hid 17 misses.** This session's system prompt and tools are about
-   60,000 tokens that other sessions keep in the cache: they were read on the very first call and
-   after 21 hours idle. The hit test asked whether a request read half of the smaller of the two
-   prompts. After a compaction the prompt is about 100,000 tokens, so reading the 60,000 passed as
-   a hit, though none of the 900,000 tokens of conversation came back (16 of 16 compactions). One
-   model switch right after a compaction passed the same way. The test now asks whether the
-   request read what the previous one left in the cache; if it read less, and the log shows an
-   event that explains it, that event is the cause.
+1. **The front of the prompt, read from the cache whatever the conversation did, hid 17
+   misses.** About 60,000 tokens at the front of this session's prompt (its system prompt and
+   tools, by position) were read on the very first call and after 21 hours idle. What kept them in
+   the cache is not in these logs; other sessions with the same system prompt and tools would. The
+   hit test asked whether a request read half of the smaller of the two prompts. After a
+   compaction the prompt is about 100,000 tokens, so reading the 60,000 passed as a hit, though
+   none of the 900,000 tokens of conversation came back (16 of 16 compactions). One model switch
+   right after a compaction passed the same way. The test now asks whether the request read what
+   the previous request on the same model left in the cache; if it read less, after a compaction,
+   an expiry or a model switch, that is the cause.
 2. **Eight expiries were named "Claude Code was upgraded".** The upgrade check ran before the
    lifetime check. In all eight, more than an hour had passed (3,788 s to 88,446 s), so the cache
    was gone either way. Three other upgrades fell inside the cache lifetime and were full hits:
@@ -52,12 +54,14 @@ each verdict with Anthropic's own cache diagnosis, which Claude Code requests an
    context.
 3. **Two expiries were `unknown`, because the send time was read from the wrong entry.** Claude
    Code writes a `deferred_tools_record` entry when a response arrives (stamped within 50 ms of
-   it, on 2,905 of 2,905), and the importer took the last entry before a response as the time the
-   request was sent. For 40% of requests the "sent" time was therefore the response time. Two
-   subagent calls sent 318 s and 319 s after the previous one, past the 5-minute lifetime, read
-   as 292 s and 153 s. The same reading gave 32 rows a negative gap (a message queued while the
-   previous response streamed is stamped when it was queued). The send time is now the last input
-   that is not such a record, and never before the previous response ended.
+   it, on all 2,905 in the main conversation), and the importer took the last entry before a
+   response as the time the request was sent. For 4,388 of the 10,850 logged requests (40%) the
+   "sent" time was therefore the response time. Two subagent calls sent 318 s and 319 s after the
+   previous one, past the 5-minute lifetime, read as 292 s and 153 s. The same reading gave 32
+   rows a negative gap (a message queued while the previous response streamed is stamped when it
+   was queued). The send time is now the latest input stamped before the response (a user entry,
+   or another entry stamped at least 0.1 s before it), or the end of the previous response if that
+   is later.
 
 With the fixes, on the same frozen logs:
 
@@ -70,11 +74,22 @@ With the fixes, on the same frozen logs:
 | `model_switch` | 6 |
 | `system_edit`, `unknown` | 0 |
 
-Every row now matches the auditor's own reading. No gap is negative.
+Every row now matches the auditor's own reading. No gap is negative. The 10,258 `none` rows are
+10,245 that read all the previous request left, and 13 first calls that read an entry written
+elsewhere.
+
+**The first version of the fix was itself reviewed, and was worse than before in three cases**,
+all corrected before it was merged:
+
+- A system prompt change, an effort change or an upgrade was named even when the read went far
+  past the front of the prompt, where those sit. They are now named only when under half was read.
+- The previous request was taken whatever its model, so switching back to a model whose cache
+  was intact read as a miss. Each request is now compared with the previous one on its own model.
+- One entry stamped after a response made the importer discard that request's real input.
 
 ## Anthropic's own diagnosis, on the same calls
 
-88 calls carry one. It is never set on a hit (0 of 10,245).
+88 calls carry one. It is never set on a hit (0 of 10,245), nor on a first call (0 of 160).
 
 | Anthropic says | Calls | Prefixwise (fixed) | |
 |---|---:|---|---|
@@ -85,9 +100,10 @@ Every row now matches the auditor's own reading. No gap is negative.
 | `messages_changed` | 1 | `compaction_rewrite` | same |
 | `unavailable` | 1 | `compaction_rewrite` | Anthropic gives no cause |
 
-- On this session, 74 of the 88 diagnoses name no cause, and the gap gives it.
-- 24 misses carry no diagnosis at all: 16 subagent expiries on the 5-minute cache, the 2 that
-  were `unknown`, and the 8 earliest compactions.
+- On this session, 75 of the 88 diagnoses name no cause (74 `previous_message_not_found`, 1
+  `unavailable`). For the 74, the gap gives it.
+- 24 misses carry no diagnosis at all: 16 subagent expiries on the 5-minute cache (the 2 that
+  were `unknown` among them) and the 8 earliest compactions.
 - `cache_missed_input_tokens` is not the tokens that were rewritten. On the `tools_changed` rows
   it is nearly the whole prompt, though about 62,000 tokens were read. It looks like the tokens
   after the point where the request differs.
@@ -115,6 +131,13 @@ before a long break). Showing what expected misses cost is tracked as a separate
 - **One machine, one user, one kind of work.** Rules tuned on it may not hold elsewhere. The
   share that counts as a full reuse (95% of what the previous call left) rests on these 10,517
   calls: hits read 100% or more, misses 56% or less, nothing in between.
+- **What the rules still cannot see.** A write with both lifetimes (a 1-hour prefix and a
+  5-minute tail) is taken as 1 hour, so a tail that expired after ten minutes is not named. A
+  first request on a model that reads its whole prompt is a hit, and one that reads less is the
+  switch's, with no way to tell how much was reusable. A response that is the sum of several
+  model calls is judged only by whether half was read.
+- **Rows imported by an earlier version keep their verdicts** (their logs may be gone). The
+  import says how many, and a new ledger classifies them again.
 - **Claude Code does not log every call.** Its own counter reports more cache reads than the logs
   hold: 84% to 87% of reads are in the logs, by model, and 98.5% to 99.9% of writes. Sixteen
   compaction summaries are not logged, and likely one call after each finished turn. An import
