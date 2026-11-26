@@ -48,6 +48,7 @@ from __future__ import annotations
 import collections
 import hashlib
 import hmac
+import http.client
 import json
 import os
 import re
@@ -235,9 +236,20 @@ _MISSING = object()  # a field the client did not send
 _INNER_KEYS = {"prompt_cache_options": ("comparison_response_id",), "diagnostics": ("previous_message_id",),
                "stream_options": ("include_usage",), "vllm_xargs": ("kv_cache_report_mode",)}
 
+def _storable(value: str) -> str:
+    """An id or model name as every store can hold it: a lone surrogate (half of an emoji, from a
+    client that cut a string) cannot be written to SQLite or sent to a collector, and one such id
+    would cost the row, or a whole batch of rows. It is replaced; the request itself is untouched."""
+    try:
+        value.encode("utf-8")
+        return value
+    except UnicodeEncodeError:
+        return value.encode("utf-8", "replace").decode("utf-8")
+
+
 def _short_id(value) -> str | None:
     """A client's own id field, when it is a usable string (not too long to key a session)."""
-    return value if isinstance(value, str) and value and len(value) <= MAX_ID_CHARS else None
+    return _storable(value) if isinstance(value, str) and value and len(value) <= MAX_ID_CHARS else None
 
 
 def _claude_code_session(user_id) -> str | None:
@@ -465,6 +477,16 @@ class StreamAccumulator:
         self.payload: dict = {"usage": {}}
         self.saw_usage = False
         self.done = False  # the stream's terminal event was seen: the client has the whole answer
+        # The model finished its answer (a finish_reason, a stop_reason): the stream is whole even if
+        # the server then closes without its terminal event, as some compatible servers do.
+        self.finished = False
+        self.error: str | None = None  # the upstream ended the answer with an error event: its type
+        self.unreadable = False  # an event of a shape not understood: relayed, but the turn is not classified
+
+    @property
+    def complete(self) -> bool:
+        """The client received the whole answer. False at the end of a stream means it was cut off."""
+        return self.done or self.finished
 
     def feed(self, line: bytes) -> bool:
         """Consume one raw line. Returns False if it must not be forwarded."""
@@ -480,7 +502,11 @@ class StreamAccumulator:
             event = json.loads(data)
         except ValueError:
             return True
-        return self.feed_event(event)
+        try:
+            return self.feed_event(event)
+        except Exception:  # noqa: BLE001 - an event of an unexpected shape is still the client's to receive
+            self.unreadable = True
+            return True
 
     def feed_event(self, event) -> bool:
         """Consume one decoded event (a dict). Returns False if it must not be forwarded."""
@@ -499,10 +525,21 @@ class StreamAccumulator:
         for key in ("prompt_cache_diagnostics", "diagnostics"):
             if isinstance(event.get(key), dict):
                 self.payload[key] = event[key]
+        choices = event.get("choices") if isinstance(event.get("choices"), list) else []
+        reasons = [c.get("finish_reason") for c in choices if isinstance(c, dict) and c.get("finish_reason")]
+        err = event.get("error") if isinstance(event.get("error"), dict) else {}
+        if err or "error" in reasons:
+            # An error event mid-stream (OpenRouter sends finish_reason "error" with it): the answer
+            # ended, and not well. (An empty `error` object on a normal chunk is not one.)
+            self.error = str(err.get("type") or err.get("code") or "upstream_error")[:80]
+        elif reasons:
+            self.finished = True
         if isinstance(event.get("usage"), dict):
             self.payload["usage"] = event["usage"]
             self.saw_usage = True
-            if self.suppress_usage_chunk and not event.get("choices"):
+            if not choices:  # the usage-only chunk comes after the last content chunk (a server that
+                self.finished = True  # reports usage on every chunk says nothing about the end by it)
+            if self.suppress_usage_chunk and not choices:
                 return False
         return True
 
@@ -512,6 +549,11 @@ class StreamAccumulator:
         prompt_cache_diagnostics. No stream_options needed."""
         if event.get("type") in ("response.completed", "response.incomplete", "response.failed"):
             self.done = True
+        if event.get("type") in ("response.failed", "error"):
+            failed = event.get("response") if isinstance(event.get("response"), dict) else event
+            err = failed.get("error") if isinstance(failed.get("error"), dict) else failed  # (or flat on the event)
+            self.error = str(err.get("type") if err.get("type") not in (None, "error", "response.failed")
+                             else err.get("code") or "upstream_error")[:80]
         resp = event.get("response")
         if not isinstance(resp, dict):
             return
@@ -529,8 +571,11 @@ class StreamAccumulator:
         kind = event.get("type")
         if kind == "message_stop":
             self.done = True
+        if kind == "error":  # Anthropic's mid-stream error event (overloaded_error, ...)
+            err = event.get("error") if isinstance(event.get("error"), dict) else {}
+            self.error = str(err.get("type") or "upstream_error")[:80]
         if kind == "message_start":
-            msg = event.get("message") or {}
+            msg = event.get("message") if isinstance(event.get("message"), dict) else {}
             if msg.get("id"):
                 self.payload["id"] = msg["id"]
             if msg.get("model"):
@@ -541,10 +586,13 @@ class StreamAccumulator:
             if isinstance(msg.get("usage"), dict):
                 self.payload["usage"].update(msg["usage"])
                 self.saw_usage = True
-        elif kind == "message_delta" and isinstance(event.get("usage"), dict):
-            # message_delta usage is cumulative; only non-null values overwrite.
-            self.payload["usage"].update({k: v for k, v in event["usage"].items() if v is not None})
-            self.saw_usage = True
+        elif kind == "message_delta":
+            if isinstance(event.get("delta"), dict) and event["delta"].get("stop_reason"):
+                self.finished = True
+            if isinstance(event.get("usage"), dict):
+                # message_delta usage is cumulative; only non-null values overwrite.
+                self.payload["usage"].update({k: v for k, v in event["usage"].items() if v is not None})
+                self.saw_usage = True
 
 
 def _sources_of(events) -> list:
@@ -697,6 +745,7 @@ class PrefixwiseProxy:
             if self.upstream_url and not {"anthropic", "openai"} <= set(self.upstreams):
                 checked_upstream(self.upstream_url, "the upstream (--upstream or PREFIXWISE_UPSTREAM_URL)")
         self.default_session = "default"  # for requests that carry no session id
+        self._unreadable_kinds: set = set()  # exception types prepare_safely has reported (once each)
         # prefixwise check (prefixwise.check): sees every request's blocks (never stored), makes the
         # mock answer a user turn that offers tools with a tool call so an agent's loop runs a second
         # turn, and holds a conversation's first mock response so per-second timestamps move.
@@ -775,6 +824,8 @@ class PrefixwiseProxy:
         """The client has the whole streamed answer; until it is recorded, this conversation's
         next request waits (_await_recording)."""
         ev = threading.Event()
+        if ctx.get("thread_key") is None:  # read by no one: no conversation waits on it
+            return ev
         with self._lock:
             self._recording[ctx["thread_key"]] = ev
         return ev
@@ -783,7 +834,7 @@ class PrefixwiseProxy:
         if ev is None:
             return
         with self._lock:
-            if self._recording.get(ctx["thread_key"]) is ev:
+            if ctx.get("thread_key") is not None and self._recording.get(ctx["thread_key"]) is ev:
                 del self._recording[ctx["thread_key"]]
         ev.set()
 
@@ -972,6 +1023,17 @@ class PrefixwiseProxy:
         Returns a context dict for forward/finalize. body itself is not
         mutated; ctx["forward_body"] is what the upstream receives.
         """
+        issued: list = []  # engine-join tokens taken while preparing: released if preparing fails
+        try:
+            return self._prepare(provider, body, headers, api, issued)
+        except Exception:
+            if self.engine_events is not None:
+                for token in issued:
+                    self.engine_events.discard(token)
+            raise
+
+    def _prepare(self, provider: str, body: dict, headers: dict[str, str] | None, api: str, issued: list) -> dict:
+        t0 = time.perf_counter()  # Prefixwise's own time starts here: reading the request is its work too
         headers = {k.lower(): v for k, v in (headers or {}).items()}
         for h in ("x-prefixwise-session-id", "x-prefixwise-agent-id", "x-prefixwise-task-id"):
             if headers.get(h) and len(headers[h]) > MAX_ID_CHARS:
@@ -994,7 +1056,7 @@ class PrefixwiseProxy:
             (None if _claude_code_session(metadata_user) else _short_id(metadata_user))
             or _short_id(body.get("user")))
         session_is_user = not given and bool(user_id)
-        session_id = str(given or user_id or self.default_session)
+        session_id = _storable(str(given or user_id or self.default_session))
         task_id = headers.get("x-prefixwise-task-id") or body.get("task_id")
         forward_body = {k: v for k, v in body.items() if k not in PREFIXWISE_FIELDS}
         # E1-open retry turns: a harness-only session id, used for the mock provider's cache lane.
@@ -1027,6 +1089,7 @@ class PrefixwiseProxy:
                 and body.get("n") in (None, 1)):  # n > 1: the choices' stores would mix
             if inject("session_id", session_id):
                 engine_token = self.engine_events.request_sent(session_id)
+                issued.append(engine_token)
         if engine == "vllm" and api == "chat" and inject("session_id", session_id):
             xargs = body.get("vllm_xargs")
             if (self.engine_events is not None and (xargs is None or isinstance(xargs, dict))
@@ -1035,6 +1098,7 @@ class PrefixwiseProxy:
                 # blocks of this session's previous request are known (docs/ENGINES.md).
                 inject("vllm_xargs", {**(xargs or {}), "kv_cache_report_mode": "full"})
                 engine_token = self.engine_events.request_sent(session_id)
+                issued.append(engine_token)
         if engine == "sglang" and self.sglang_session_radix and "session_id" not in forward_body \
                 and body.get("session_id"):
             # With --enable-session-radix-cache the body session_id is SGLang's own field: it decides what is
@@ -1071,7 +1135,7 @@ class PrefixwiseProxy:
         identity = _identity(self.fingerprinter.fingerprint_blocks(
             [blk for blk in raw_blocks if blk[0] in ("system", "system_dynamic")]
             + [blk for blk in raw_blocks if blk[0] in _CONVERSATION][:1]))
-        lane = (session_id, str(body.get("model", "unknown")))
+        lane = (session_id, _storable(str(body.get("model", "unknown"))))  # as the collector keys it
         stitched = api == "responses" and bool(body.get("previous_response_id"))
         # The conversation this request continues (a stitched Responses turn sends only its new
         # input: its conversation is its parent response's), and wait for that conversation's
@@ -1087,6 +1151,7 @@ class PrefixwiseProxy:
         # Chain only to an id from the same API: a session can mix Chat Completions
         # (chatcmpl-...) and Responses (resp_...) on one model, and OpenAI rejects a
         # foreign id with a 400 (found by the compatibility check, 2026-11-07).
+        previous_id = str(previous_id) if previous_id else None  # an upstream may answer with a non-string id
         if provider == "anthropic" and "diagnostics" not in body:
             same_api = previous_id if previous_id and previous_id.startswith("msg") else None
             inject("diagnostics", anthropic_diagnostics(same_api)["diagnostics"])
@@ -1164,22 +1229,67 @@ class PrefixwiseProxy:
             "injected": injected,
             "unmarked_body": unmarked,  # the client's request before auto_breakpoints: resent on a 400
             "credential": credential,
-            "agent_id": str(headers.get("x-prefixwise-agent-id") or body.get("agent_id") or "proxy"),
-            "task_id": str(task_id) if task_id else None,
-            "request_id": request_id, "model": str(body.get("model", "unknown")),
+            "agent_id": _storable(str(headers.get("x-prefixwise-agent-id") or body.get("agent_id") or "proxy")),
+            "task_id": _storable(str(task_id)) if task_id else None,
+            "request_id": request_id, "model": _storable(str(body.get("model", "unknown"))),
             # E1-open / hooks: a PreCompact/compaction event fired before
             # this turn, so the classifier can tell COMPACTION_REWRITE from
             # HISTORY_EDIT. Never forwarded.
             "compaction_event": bool(body.get("prefixwise_compaction_event", False))
             or headers.get("x-prefixwise-compaction-event") in ("1", "true"),
             "stream": bool(body.get("stream")),
-            "t0": time.perf_counter(),  # for latency and Prefixwise's own overhead
+            "t0": t0,  # for latency and Prefixwise's own overhead
             "fixes_applied": fixes_applied,
             "fork_of": headers.get("x-prefixwise-fork-of"),
             "thread_key": thread_key,  # (lane, opening): this conversation, for the recording wait
             "session_is_user": session_is_user,  # a user id, not a conversation id (OpenTelemetry)
             "ttl_seconds": cache_ttl_seconds(provider, body, headers),
         }
+
+    def prepare_safely(self, provider: str, body: dict, headers: dict[str, str] | None = None,
+                       api: str = "chat") -> dict:
+        """prepare(), failing open: a request Prefixwise cannot read (a bug here, an input no one
+        thought of) is still the client's request. It is forwarded as it was received, with nothing
+        added (Prefixwise's own body fields removed, as always), and recorded as a failure row
+        (`not_recorded`), never classified. A request that is the client's own mistake
+        (ClientError) is still refused."""
+        t0 = time.perf_counter()
+        try:
+            return self.prepare(provider, body, headers, api=api)
+        except ClientError:
+            raise
+        except Exception as exc:
+            kind = type(exc).__name__
+            with self._lock:
+                first = kind not in self._unreadable_kinds
+                self._unreadable_kinds.add(kind)
+            if first:  # once per kind of failure: a client that sends one such request sends many
+                print(f"prefixwise: could not read a request ({kind}); such requests are forwarded as received "
+                      "and recorded as not_recorded, not classified", file=sys.stderr, flush=True)
+            low = {k.lower(): v for k, v in (headers or {}).items()}
+            forward = {k: v for k, v in body.items() if k not in PREFIXWISE_FIELDS}
+            ids = {}
+            try:  # what a readable request would have kept, and the identity that is plainly there
+                engine = self.engine_for(provider)
+                if "session_id" in body and ((engine is None and self._takes_session_id(provider))
+                                             or (engine == "sglang" and self.sglang_session_radix)):
+                    forward["session_id"] = body["session_id"]
+                ids = {"session_id": _short_id(low.get("x-prefixwise-session-id")) or _short_id(body.get("session_id")),
+                       "agent_id": _short_id(low.get("x-prefixwise-agent-id")) or _short_id(body.get("agent_id")),
+                       "task_id": _short_id(low.get("x-prefixwise-task-id")) or _short_id(body.get("task_id"))}
+            except Exception:  # noqa: BLE001 - whatever broke the reading must not break the fallback
+                pass
+            return {
+                "bare": True, "provider": provider, "api": api, "body": body, "headers": low, "facts": None,
+                "sent_at": time.time(), "session_id": ids.get("session_id") or self.default_session,
+                "upstream_session_id": None, "forward_body": forward,
+                "engine_token": None, "injected": {}, "unmarked_body": None, "credential": "",
+                "agent_id": ids.get("agent_id") or "proxy", "task_id": ids.get("task_id"),
+                "request_id": str(uuid.uuid4()),
+                "model": _storable(str(body.get("model", "unknown"))), "compaction_event": False,
+                "stream": bool(body.get("stream")), "t0": t0, "fixes_applied": [],
+                "fork_of": None, "thread_key": None, "session_is_user": False, "ttl_seconds": None,
+            }
 
     def finalize(self, ctx: dict, status: int, payload: dict) -> tuple[dict, LedgerEntry]:
         """Classify and record one completed request from its (rebuilt) payload: build the turn
@@ -1251,6 +1361,10 @@ class PrefixwiseProxy:
         """finalize(), failing open: the client already paid for this response,
         so a ledger or classifier failure (disk full, locked database, a bug)
         must never cost them it. The response passes through unrecorded."""
+        if ctx.get("bare"):  # prepare_safely: forwarded as received, nothing to classify
+            self.record_failure(ctx, status, error="not_recorded")
+            return {"request_id": ctx["request_id"], "status": status, "cause": None,
+                    "recorded": False, "response": payload}, None
         try:
             return self.finalize(ctx, status, payload)
         except Exception as exc:
@@ -1305,7 +1419,12 @@ class PrefixwiseProxy:
         denominator (docs/DATA.md). Never fails the request."""
         err = (payload or {}).get("error") if isinstance(payload, dict) else None
         kind = error or (err.get("type") if isinstance(err, dict) else None) or f"http_{status}"
-        rec = self._record(ctx, status, [], error=str(kind)[:80])
+        try:
+            rec = self._record(ctx, status, [], error=str(kind)[:80])
+        except Exception as exc:  # the request that could not be read may not be describable either
+            print(f"prefixwise: failure for {ctx['request_id']} not recorded: {type(exc).__name__}",
+                  file=sys.stderr, flush=True)
+            return
         with self._lock:
             self._release_prefix(ctx)
         entry = None
@@ -1335,7 +1454,7 @@ class PrefixwiseProxy:
         unchanged. On an upstream error nothing is classified or
         recorded (no usage to score) and entry is None.
         """
-        ctx = self.prepare(provider, body, headers, api=api)
+        ctx = self.prepare_safely(provider, body, headers, api=api)
         if ctx["stream"]:
             self.response_started(ctx)  # not sent at all: nothing in flight
             return {"request_id": ctx["request_id"], "status": 400, "cause": None,
@@ -1377,12 +1496,16 @@ class PrefixwiseProxy:
             prev = lane.threads[lane.latest][0] if lane is not None and lane.latest is not None else None
         cached = 0
         if prev is not None and body is not None:
-            fps = self.fingerprinter.fingerprint_blocks(extract_blocks(body, provider))
-            before, now = _blocks_by_role(prev.blocks), _blocks_by_role(fps)
-            params = {k: param_fingerprint(body.get(k)) for k in PARAM_KEYS if body.get(k) is not None}
-            if params == prev.params and all(_role_unchanged(r, before.get(r, []), now.get(r, []))
-                                             for r in ("tools", "system", "system_dynamic", "messages", "tool_results")):
-                cached = 2000  # a changed prompt-affecting parameter (a cache salt, tool_choice) renders anew
+            try:
+                fps = self.fingerprinter.fingerprint_blocks(extract_blocks(body, provider))
+                before, now = _blocks_by_role(prev.blocks), _blocks_by_role(fps)
+                params = {k: param_fingerprint(body.get(k)) for k in PARAM_KEYS if body.get(k) is not None}
+                if params == prev.params and all(_role_unchanged(r, before.get(r, []), now.get(r, []))
+                                                 for r in ("tools", "system", "system_dynamic", "messages",
+                                                           "tool_results")):
+                    cached = 2000  # a changed prompt-affecting parameter (a cache salt, tool_choice) renders anew
+            except Exception:  # noqa: BLE001 - a body that cannot be read still gets a mock answer (a miss)
+                cached = 0
         write = 0
         if provider == "anthropic":  # as Anthropic bills: nothing without cache_control; a first write
             if not markers:
@@ -1528,6 +1651,9 @@ class PrefixwiseProxy:
             return exc.code, exc.headers.get("Content-Type", "application/json"), exc.read() or b""
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             return 502, "application/json", json.dumps(_error(502, f"upstream unreachable: {exc}")).encode()
+        except http.client.HTTPException as exc:
+            return 502, "application/json", json.dumps(
+                _error(502, f"upstream broke off its response: {type(exc).__name__}")).encode()
 
     def _undo_rejected(self, ctx: dict, status: int, payload) -> bool:
         """The upstream rejected a field Prefixwise added (a gateway or compatible server
@@ -1620,6 +1746,8 @@ class PrefixwiseProxy:
             return self._http_error(exc)
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             return 502, _error(502, f"upstream unreachable: {exc}")
+        except http.client.HTTPException as exc:  # died mid-body, or answered something that is not HTTP
+            return 502, _error(502, f"upstream broke off its response: {type(exc).__name__}")
         except ValueError:
             return 502, _error(502, "upstream returned a non-JSON body")
 
@@ -1635,8 +1763,11 @@ class PrefixwiseProxy:
         provider, fwd, api = ctx["provider"], ctx["forward_body"], ctx.get("api", "chat")
         injected = False
         if (provider != "anthropic" and api != "responses"  # Responses always report usage
+                and not ctx.get("bare")  # forwarded as received: nothing added
                 and (provider, "stream_options") not in self.rejected_fields):
-            opts = dict(fwd.get("stream_options") or {})
+            given_opts = fwd.get("stream_options")
+            # (a stream_options that is not an object is the client's to have refused: nothing is added)
+            opts = dict(given_opts or {}) if given_opts is None or isinstance(given_opts, dict) else {"include_usage": True}
             if not opts.get("include_usage"):
                 ctx.setdefault("injected", {}).setdefault("stream_options", fwd.get("stream_options", _MISSING))
                 opts["include_usage"] = True
@@ -1666,6 +1797,9 @@ class PrefixwiseProxy:
                 return status, None, acc, payload
             except (urllib.error.URLError, TimeoutError, OSError) as exc:
                 return 502, None, acc, _error(502, f"upstream unreachable: {exc}")
+            except http.client.HTTPException as exc:
+                return 502, None, acc, _error(502, f"upstream broke off its response: {type(exc).__name__}")
+        ctx["upstream_content_type"] = resp.headers.get("Content-Type") or ""
 
         def lines():
             with resp:
@@ -2132,12 +2266,16 @@ def make_handler(proxy: PrefixwiseProxy):
             except OSError:  # client stalled past CLIENT_TIMEOUT or hung up mid-body
                 self.close_connection = True
                 return
+            self._streaming = False
             try:
                 return self._dispatch(body)
             except ClientError as exc:
                 return self._json(400, _error(400, str(exc)))
             except Exception as exc:  # never drop the connection; never echo internals
                 print(f"prefixwise: internal error on {self.path}: {type(exc).__name__}", file=sys.stderr)
+                if self._streaming:  # a stream is under way: a second response would land inside it
+                    self.close_connection = True
+                    return None
                 return self._json(500, _error(500, "internal error in the Prefixwise proxy"))
 
         def _dispatch(self, body: dict):
@@ -2168,11 +2306,12 @@ def make_handler(proxy: PrefixwiseProxy):
             task_id, success = body.get("task_id"), body.get("success")
             if not isinstance(task_id, str) or not task_id or not isinstance(success, bool):
                 return self._json(400, _error(400, 'expected {"task_id": "<id>", "success": true|false}'))
+            task_id = _storable(task_id)  # as a request's row stores it
             proxy.ledger.set_task_outcome(task_id, success)
             return self._json(200, {"ok": True, "task_id": task_id, "success": success})
 
         def _stream(self, provider: str, body: dict, api: str = "chat"):
-            ctx = proxy.prepare(provider, body, self._client_headers(), api=api)
+            ctx = proxy.prepare_safely(provider, body, self._client_headers(), api=api)
             try:
                 return self._stream_ctx(ctx, provider, api)
             finally:  # whatever happened (cut-off upstream, client gone), it is not in flight now
@@ -2190,32 +2329,95 @@ def make_handler(proxy: PrefixwiseProxy):
                 return self._json(status, err, {**relayed, "X-Prefixwise-Request-Id": ctx["request_id"]})
             # Headers go out before usage is known, so the verdict cannot
             # ride in them: fetch it afterwards from GET /requests/<id>.
-            self.send_response(status)
-            self.send_header("Content-Type", "text/event-stream")
-            self.send_header("Cache-Control", "no-cache")
-            self.send_header("X-Prefixwise-Request-Id", ctx["request_id"])
-            for k, v in relayed.items():
-                self.send_header(k, v)
-            self.end_headers()
+            # An upstream may answer a stream request with a plain JSON body (a gateway that does not
+            # stream, an error it reports with 200): it is relayed as what it is, and read as a payload.
+            # A stream goes out at once: its headers are never held back for the body. Only when the
+            # upstream labels the body as JSON is its start read first, since that label can sit on a
+            # real JSON body or on a stream (told by the body, not the label).
+            ctype = ctx.get("upstream_content_type") or "text/event-stream"
+            source = iter(lines)
+            held: list[bytes] = []  # lines read before the headers went out, relayed first
             failure = None
+            plain = False
+            if "json" in ctype.lower() and "event-stream" not in ctype.lower():
+                try:
+                    while not held or not held[-1].strip():  # to the first line that is not blank
+                        held.append(next(source))
+                except StopIteration:
+                    pass
+                except (http.client.HTTPException, OSError):
+                    failure = "upstream_dropped"
+                start = held[-1].lstrip() if held else b""
+                plain = not start.startswith((b"data:", b"event:", b"id:", b"retry:", b":"))
+            body_parts: list[bytes] = []
+            body_size = 0
+            try:
+                self.send_response(status)
+                self.send_header("Content-Type", ctype if plain else "text/event-stream")
+                self.send_header("Cache-Control", "no-cache")
+                self.send_header("X-Prefixwise-Request-Id", ctx["request_id"])
+                for k, v in relayed.items():
+                    self.send_header(k, v)
+                self.end_headers()
+            except OSError:  # the client left before the answer began: a row, and nothing left held
+                self.close_connection = True
+                if proxy.engine_events is not None:
+                    proxy.engine_events.discard(ctx.get("engine_token"))
+                ctx["upstream_ms"] = (time.perf_counter() - sent) * 1000
+                proxy.record_failure(ctx, 499, error="client_disconnected")
+                return None
+            self._streaming = True  # the response has begun: from here nothing else may be written as one
             recording = None  # set once the client has the whole answer, before it is recorded
             try:
-                try:
-                    for line in lines:
+                # Reading (the upstream's side) and writing (the client's side) fail apart: the same
+                # error class means "the upstream dropped" on one and "the client left" on the other.
+                while failure is None:
+                    if held:
+                        line = held.pop(0)
+                    else:
+                        try:
+                            line = next(source)
+                        except StopIteration:
+                            break
+                        except (http.client.HTTPException, OSError):  # reset, timeout, or cut inside a chunk
+                            # After the model finished, an abrupt close cost the client nothing.
+                            failure = None if acc.complete else "upstream_dropped"
+                            break
+                    if plain:
+                        if body_size < MAX_BODY_BYTES:
+                            body_parts.append(line)
+                            body_size += len(line)
+                        keep = True
+                    else:
                         keep = acc.feed(line)
-                        if acc.done and recording is None:
-                            # The terminal event: the client can act on it at once (the OpenAI SDK
-                            # stops at [DONE]), so this conversation's next request must wait for
-                            # this record from here on, before the line goes out.
-                            recording = proxy.begin_recording(ctx)
-                        if keep:
+                    if acc.done and recording is None:
+                        # The terminal event: the client can act on it at once (the OpenAI SDK
+                        # stops at [DONE]), so this conversation's next request must wait for
+                        # this record from here on, before the line goes out.
+                        recording = proxy.begin_recording(ctx)
+                    if keep:
+                        try:
                             self.wfile.write(line)
                             self.wfile.flush()
-                except (BrokenPipeError, ConnectionResetError):
-                    failure = "client_disconnected"  # client went away mid-stream
-                    status = 499  # client closed request (not an upstream error)
-                except (TimeoutError, OSError):
-                    failure = "upstream_dropped"  # upstream stalled or dropped
+                        except OSError:
+                            failure = "client_disconnected"  # client went away mid-stream
+                            status = 499  # client closed request (not an upstream error)
+                            break
+                payload = acc.payload
+                if plain and failure is None:
+                    try:
+                        payload = json.loads(b"".join(body_parts))
+                    except ValueError:
+                        payload = None
+                    if not isinstance(payload, dict):
+                        failure = "upstream_dropped"  # a JSON body that does not parse was cut short
+                elif failure is None and acc.error:
+                    failure = acc.error  # the upstream ended the answer with an error event
+                elif failure is None and not acc.complete:
+                    # The upstream closed before the model finished: the client has part of an answer.
+                    failure = "upstream_dropped"
+                elif failure is None and acc.unreadable:
+                    failure = "not_recorded"  # relayed whole, but an event was of a shape not understood
                 ctx["upstream_ms"] = (time.perf_counter() - sent) * 1000
                 # A cut-off stream has partial usage at best, and a guess is worse than
                 # none: it is recorded as a failure. A stream that completed is a
@@ -2230,7 +2432,7 @@ def make_handler(proxy: PrefixwiseProxy):
                         self.connection.shutdown(socket.SHUT_WR)
                     except OSError:
                         pass
-                    proxy.finalize_safely(ctx, status, acc.payload)
+                    proxy.finalize_safely(ctx, status, payload)
                 else:
                     if proxy.engine_events is not None:
                         proxy.engine_events.discard(ctx.get("engine_token"))

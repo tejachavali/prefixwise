@@ -80,7 +80,7 @@ def cache_key_for(session_id: str, hmac_key: bytes | None = None) -> str:
     PREFIXWISE_HMAC_KEY when one is set, so a guessable id ("alice") cannot be recovered from the key."""
     import hashlib
     import hmac
-    raw = str(session_id).encode()
+    raw = str(session_id).encode("utf-8", "surrogatepass")
     digest = (hmac.new(hmac_key, raw, hashlib.sha256) if hmac_key else hashlib.sha256(raw)).hexdigest()
     return "pw-" + digest[:32]
 
@@ -168,13 +168,82 @@ def _sorted_keys(value: object) -> object:
     return json.loads(json.dumps(value, sort_keys=True))
 
 
+def _marker_of(tool: object):
+    """(where, value) of a tool's cache_control: on the tool itself (Anthropic), or inside its
+    `function` (a shape LiteLLM also reads); (None, None) when it has none."""
+    if not isinstance(tool, dict):
+        return None, None
+    if "cache_control" in tool:
+        return "tool", tool["cache_control"]
+    fn = tool.get("function")
+    if isinstance(fn, dict) and "cache_control" in fn:
+        return "function", fn["cache_control"]
+    return None, None
+
+
+def _tool_without_marker(tool: object) -> object:
+    where, _ = _marker_of(tool)
+    if where == "tool":
+        return {k: v for k, v in tool.items() if k != "cache_control"}
+    if where == "function":
+        return {**tool, "function": {k: v for k, v in tool["function"].items() if k != "cache_control"}}
+    return tool
+
+
+def _tool_with_marker(tool: object, where: str, value) -> object:
+    if not isinstance(tool, dict):
+        return tool
+    if where == "function" and isinstance(tool.get("function"), dict):
+        return {**tool, "function": {**tool["function"], "cache_control": value}}
+    return {**tool, "cache_control": value}
+
+
+def _takes_marker(tool: object) -> bool:
+    """Whether a `cache_control` may be put on this tool. Not on a tool-search tool or a tool whose
+    loading is deferred (they are not part of the prompt's tool prefix; LiteLLM never marks them),
+    nor on something that is not a tool object."""
+    if not isinstance(tool, dict):
+        return False
+    fn = tool.get("function") if isinstance(tool.get("function"), dict) else {}
+    return (not tool.get("defer_loading") and not fn.get("defer_loading")
+            and not str(tool.get("type") or "").startswith("tool_search_tool"))
+
+
 def canonical_tools(tools: list) -> list:
-    """Tools sorted by name (unnamed tools keep their order, at the end),
-    with every tool's keys sorted and its schema's set arrays (`required`, a
-    list `type`) sorted. Same set in, same bytes out."""
-    named = sorted((t for t in tools if _tool_name(t) is not None), key=_tool_name)
-    unnamed = [t for t in tools if _tool_name(t) is None]
-    return [_sorted_keys(schema_sets(t)) for t in named] + [_sorted_keys(schema_sets(t)) for t in unnamed]
+    """Tools sorted by name (unnamed tools keep their order, at the end), with every tool's keys
+    sorted and its schema's set arrays (`required`, a list `type`) sorted. Same set in, same bytes
+    out.
+
+    A `cache_control` marker on a tool is a position, not a property of that tool: it caches the
+    tools up to and including it. So the list is sorted within each stretch that ends at a marker,
+    and the marker goes back at the end of its stretch: it covers the same tools as the client
+    marked, in an order that no longer depends on how the client listed them. (Sorting the whole
+    list moved a marker with its tool, so one on the last tool, which caches every tool, could end
+    up covering one.) The marker may therefore sit on another tool than the client put it on. It is
+    only put on a tool that can carry one: tools that cannot are ordered first in their stretch,
+    and a stretch with no tool that can is left as the client sent it."""
+    def ordered(stretch: list) -> list:
+        named = sorted((t for t in stretch if _tool_name(t) is not None), key=_tool_name)
+        return named + [t for t in stretch if _tool_name(t) is None]
+
+    out: list = []
+    stretch: list = []  # the client's tools since the last marker, marker included, untouched
+    for tool in tools:
+        stretch.append(tool)
+        where, value = _marker_of(tool)
+        if where is None:
+            continue
+        bare = [_tool_without_marker(t) for t in stretch]
+        carriers = ordered([t for t in bare if _takes_marker(t)])
+        if not carriers:
+            out.extend(stretch)  # nothing here may carry the marker: as sent
+        else:
+            done = [_sorted_keys(schema_sets(t)) for t in ordered([t for t in bare if not _takes_marker(t)]) + carriers]
+            done[-1] = _sorted_keys(_tool_with_marker(done[-1], where, value))
+            out.extend(done)
+        stretch = []
+    out.extend(_sorted_keys(schema_sets(t)) for t in ordered(stretch))
+    return out
 
 
 def apply_fixes(body: dict, fixes: tuple[str, ...] | list[str]) -> tuple[dict, list[str]]:
