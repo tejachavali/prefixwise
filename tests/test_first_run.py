@@ -456,3 +456,31 @@ def test_an_import_says_where_its_ledger_is(tmp_path):
     assert "from a gateway log" in out.stdout and "keeps its own ledger" in out.stdout
     assert "prefixwise report --ledger prefixwise-gateway.db --detail" in out.stdout
     assert cli("report", cwd=tmp_path).returncode == 1          # plain `report` reads another file, as the import said
+
+
+# -- help text ---------------------------------------------------------------------------
+
+def test_every_command_and_option_has_help():
+    import argparse
+
+    sub = next(a for a in build_parser()._actions if getattr(a, "choices", None))
+    for name, parser in sub.choices.items():
+        if name == "demo":
+            continue                                  # parses its own flags (prefixwise.demo)
+        assert parser.description, name
+        for action in parser._actions:
+            if isinstance(action, argparse._HelpAction) or action.dest == "agent_command":
+                continue
+            assert action.help, f"{name}: {action.option_strings or action.dest}"
+
+
+def test_environment_variables_in_the_code_are_in_the_docs():
+    import re
+
+    in_code = set()
+    for path in (ROOT / "src" / "prefixwise").glob("*.py"):
+        in_code |= set(re.findall(r'environ(?:\.get)?\(\s*"(PREFIXWISE_[A-Z_]+)"', path.read_text()))
+        in_code |= set(re.findall(r'environ\[\s*"(PREFIXWISE_[A-Z_]+)"', path.read_text()))
+    docs = "".join(p.read_text() for p in [ROOT / "README.md", *sorted((ROOT / "docs").glob("*.md"))])
+    missing = sorted(v for v in in_code if v not in docs)
+    assert not missing, missing
