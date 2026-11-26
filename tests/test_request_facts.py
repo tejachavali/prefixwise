@@ -431,3 +431,53 @@ def test_import_gateway_counts_a_repeat_by_when_its_request_ended(tmp_path):
     long_one = json.dumps({**json.loads(gw_line([U1], t - 10, "chatcmpl-L")), "end_time": t + 50})
     got = gw_import(tmp_path, "straddle", [long_one, long_one], "--since", str(t))
     assert (got["imported"], got["duplicates"]) == (1, 1)
+
+
+def test_every_edge_reads_the_key_not_only_serve(monkeypatch):
+    """`PREFIXWISE_HMAC_KEY` was read by `prefixwise serve` alone: `run`, `prefixwise.wrap`, the
+    LiteLLM callback and the vLLM middleware build the same proxy without it, and sent bare hashes."""
+    from prefixwise import gateway_import
+    from prefixwise.sdk import Recorder
+
+    monkeypatch.delenv("PREFIXWISE_HMAC_KEY", raising=False)
+    assert PrefixwiseProxy(mock=True).fingerprinter.hmac_key is None
+    monkeypatch.setenv("PREFIXWISE_HMAC_KEY", "per-install-key")
+    assert PrefixwiseProxy(mock=True).fingerprinter.hmac_key == b"per-install-key"
+    assert Recorder(":memory:").proxy.fingerprinter.hmac_key == b"per-install-key"
+    assert PrefixwiseProxy(mock=True, hmac_key=b"other").fingerprinter.hmac_key == b"other"   # a given key wins
+    assert PrefixwiseProxy(mock=True, hmac_key=b"").fingerprinter.hmac_key is None            # b"": no key
+    made = []
+    real = gateway_import.__dict__.get("PrefixwiseProxy")
+    import prefixwise.proxy as proxy_module
+
+    class Spy(proxy_module.PrefixwiseProxy):
+        def __init__(self, *a, **kw):
+            super().__init__(*a, **kw)
+            made.append(self.fingerprinter.hmac_key)
+
+    monkeypatch.setattr(proxy_module, "PrefixwiseProxy", Spy)
+    gateway_import.replay([], ":memory:")           # a replay takes no setting from the environment
+    assert made == [None] and real is None
+
+
+def test_with_a_key_set_what_the_proxy_sends_is_keyed_at_every_step(monkeypatch):
+    """The record a collector receives, and the facts recomputed when a fix rewrites the request."""
+    body = {"model": OPUS, "max_tokens": 9, "system": SYS, "tool_choice": {"type": "tool", "name": "lookup"},
+            "tools": [{"name": "lookup", "input_schema": {"type": "object"}}], "messages": [U1]}
+    sent = {}
+    for key in (b"", b"per-install-key"):
+        proxy = scripted([claude(fresh=3000), claude(write=3100)], hmac_key=key, fixes=["auto_breakpoints"])
+        records, build = [], proxy._record
+        monkeypatch.setattr(proxy, "_record", lambda *a, _b=build, _r=records, **kw: _r.append(_b(*a, **kw)) or _r[-1])
+        proxy.handle("anthropic", dict(body), S)
+        second = proxy.handle("anthropic", {**body, "messages": [U1, A1, GO]}, S)[1]
+        assert "auto_breakpoints" in (second.fixes or ""), key      # the fix rewrote the request: facts recomputed
+        sent[key] = records
+    bare, keyed = sent[b""], sent[b"per-install-key"]
+    choice = param_fingerprint(body["tool_choice"])
+    assert [r.params["tool_choice"] for r in bare] == [choice, choice]
+    assert all(r.params["tool_choice"] != choice for r in keyed)
+    for b, k in zip(bare, keyed):
+        assert b.facts.msgs and not set(b.facts.msgs) & set(k.facts.msgs)
+        assert b.facts.prefix_key != k.facts.prefix_key
+        assert not {x.raw for x in b.blocks} & {x.raw for x in k.blocks}

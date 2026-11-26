@@ -724,7 +724,13 @@ class PrefixwiseProxy:
         self.fixes = parse_fixes(fixes if fixes is not None else os.environ.get("PREFIXWISE_FIXES"))
         # Set by serve() from --auth-token / PREFIXWISE_AUTH_TOKEN; None = open.
         self.auth_token: str | None = None
-        self.fingerprinter = Fingerprinter(hmac_key=hmac_key)
+        if hmac_key is None:
+            # Every edge builds this class (serve, run, the vLLM middleware, wrap, the LiteLLM callback),
+            # so the key is read here: read only in `serve`, it did nothing on the others. Pass b"" for
+            # no key whatever the environment says.
+            env_key = os.environ.get("PREFIXWISE_HMAC_KEY")
+            hmac_key = env_key.encode("utf-8", "surrogatepass") if env_key else None
+        self.fingerprinter = Fingerprinter(hmac_key=hmac_key or None)
         self.upstream_url = (upstream_url or os.environ.get("PREFIXWISE_UPSTREAM_URL") or "").strip().rstrip("/")
         # Per-provider upstreams ({"anthropic": url, "openai": url}) override upstream_url, so
         # one proxy can serve an agent that talks to both (prefixwise run).

@@ -254,7 +254,7 @@ def replay(entries: list[dict], ledger_path: str, *, engine: str | None = None, 
         # Every setting explicit (empty, not None), so no PREFIXWISE_* variable of a live deployment
         # (a remote collector, an engine, KV events, fixes) leaks into the replay.
         proxy = PrefixwiseProxy(ledger_path=ledger_path, mock=False, upstream_url="http://gateway-log.invalid",
-                                hmac_key=hmac_key, engine=engine or "", kv_events="", fixes=(), otel="",
+                                hmac_key=hmac_key or b"", engine=engine or "", kv_events="", fixes=(), otel="",
                                 collector_url="", prices=prices)
         ctxs: dict[int, dict] = {}
         try:
