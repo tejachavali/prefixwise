@@ -193,15 +193,15 @@ def _schema_sets(value: object) -> object:
 def canonical_bytes(value: object) -> bytes:
     text = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     text = unicodedata.normalize("NFC", text)
-    return text.encode("utf-8")
+    return text.encode("utf-8", "surrogatepass")
 
 
 def raw_bytes(value: object) -> bytes:
     """Exact bytes as sent: JSON without key sorting, as the caller rendered it."""
     if isinstance(value, (str, bytes)):
-        raw = value if isinstance(value, bytes) else value.encode("utf-8")
+        raw = value if isinstance(value, bytes) else value.encode("utf-8", "surrogatepass")
     else:
-        raw = json.dumps(value, ensure_ascii=False).encode("utf-8")
+        raw = json.dumps(value, ensure_ascii=False).encode("utf-8", "surrogatepass")
     return raw
 
 
@@ -247,7 +247,7 @@ class Fingerprinter:
                 self._masked_cache.move_to_end(canon_hash)
                 return hit
         text, kinds = mask_volatiles_kinds(canon.decode("utf-8", "replace"))
-        entry = (_hash(text.encode("utf-8"), key), kinds)
+        entry = (_hash(text.encode("utf-8", "surrogatepass"), key), kinds)
         with self._cache_lock:
             self._masked_cache[canon_hash] = entry
             if len(self._masked_cache) > MASK_CACHE_ENTRIES:
@@ -282,7 +282,7 @@ class Fingerprinter:
         return [self.fingerprint_block(role, i, value) for i, (role, value) in enumerate(blocks)]
 
     def prefix_hash(self, fingerprints: list[BlockFingerprint]) -> str:
-        joined = "".join(f.canonical for f in fingerprints).encode("utf-8")
+        joined = "".join(f.canonical for f in fingerprints).encode("utf-8", "surrogatepass")
         return _hash(joined, self.hmac_key)
 
 
@@ -296,5 +296,5 @@ def fingerprint_blocks(blocks: list[tuple[str, object]], hmac_key: bytes | None 
 
 
 def prefix_hash(fingerprints: list[BlockFingerprint]) -> str:
-    joined = "".join(f.canonical for f in fingerprints).encode("utf-8")
+    joined = "".join(f.canonical for f in fingerprints).encode("utf-8", "surrogatepass")
     return hashlib.sha256(joined).hexdigest()

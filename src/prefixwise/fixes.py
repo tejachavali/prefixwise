@@ -171,10 +171,24 @@ def _sorted_keys(value: object) -> object:
 def canonical_tools(tools: list) -> list:
     """Tools sorted by name (unnamed tools keep their order, at the end),
     with every tool's keys sorted and its schema's set arrays (`required`, a
-    list `type`) sorted. Same set in, same bytes out."""
-    named = sorted((t for t in tools if _tool_name(t) is not None), key=_tool_name)
-    unnamed = [t for t in tools if _tool_name(t) is None]
-    return [_sorted_keys(schema_sets(t)) for t in named] + [_sorted_keys(schema_sets(t)) for t in unnamed]
+    list `type`) sorted. Same set in, same bytes out.
+
+    A `cache_control` marker on a tool is a position, not a property of that tool: on the last tool
+    it caches the whole list. Sorting must not move what it covers, so a marker on the client's last
+    tool stays on the last tool after sorting. A marker anywhere else covers the tools before it,
+    which sorting would change: such a list is returned as the client sent it."""
+    def marked(t) -> bool:
+        return isinstance(t, dict) and "cache_control" in t
+    if any(marked(t) for t in tools[:-1]):
+        return tools
+    last_marker = tools[-1]["cache_control"] if tools and marked(tools[-1]) else None
+    bare = [{k: v for k, v in t.items() if k != "cache_control"} if marked(t) else t for t in tools]
+    named = sorted((t for t in bare if _tool_name(t) is not None), key=_tool_name)
+    unnamed = [t for t in bare if _tool_name(t) is None]
+    out = [_sorted_keys(schema_sets(t)) for t in named] + [_sorted_keys(schema_sets(t)) for t in unnamed]
+    if last_marker is not None and isinstance(out[-1], dict):
+        out[-1] = _sorted_keys({**out[-1], "cache_control": last_marker})
+    return out
 
 
 def apply_fixes(body: dict, fixes: tuple[str, ...] | list[str]) -> tuple[dict, list[str]]:
