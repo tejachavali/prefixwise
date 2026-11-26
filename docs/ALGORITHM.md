@@ -420,7 +420,8 @@ Anthropic's request shape, and the Anthropic early-breakpoint case (each has han
     conversation's turn. That happens beyond 64 remembered conversations in a session and model
     (the least recently used is dropped; `PREFIXWISE_LANE_THREADS` raises the limit), sooner when
     the remembered turns are long (together they hold at most 16,000 blocks, `PREFIXWISE_LANE_BLOCKS`,
-    about 12 MB; the 8 most recent conversations are kept whatever their size), and when a
+    about 12 MB) or one has been idle for over an hour (the 8 most recent conversations are kept
+    whatever their size or age), and when a
     conversation's earlier turns were never seen: a restart of the collector, traffic that began
     before the proxy, earlier turns sent through another collector.
   - A second conversation that starts with several messages (few-shot examples, a restored

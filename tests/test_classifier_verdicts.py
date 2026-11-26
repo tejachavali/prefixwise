@@ -605,6 +605,30 @@ def test_a_lane_of_long_conversations_is_held_to_a_block_budget_but_never_below_
     assert kept.latest in kept.threads and len(kept.threads) == 12     # the newest are the ones kept
 
 
+def test_conversations_idle_for_over_an_hour_are_let_go_but_never_the_newest_eight():
+    """A lane that went quiet, or a trimming agent's dead conversations, do not stay for ever: one
+    whose last turn ended over an hour before the lane's newest is dropped, down to the 8 always kept."""
+    def lane_with(n, age_of_older):
+        proxy = scripted([gpt(2300, 0)] * (n + 1))
+        ask = lambda i: {"model": "gpt-5.6-terra", "messages": [  # noqa: E731
+            AGENT, {"role": "user", "content": f"document {i} " * 100},
+            {"role": "assistant", "content": "ok"}, {"role": "user", "content": "go"}]}
+        for i in range(n):
+            proxy.handle("openai", ask(i), S)
+        (lane,) = [v for k, v in proxy.lane_threads.items() if k[0] == "s"]
+        for key, (snap, when, facts, rid) in list(lane.threads.items()):
+            lane.threads[key] = (snap, when - age_of_older, facts, rid)   # every remembered turn ended that long ago
+        proxy.handle("openai", ask(n), S)                                 # one more conversation, now
+        return lane
+
+    assert len(lane_with(20, 60).threads) == 21        # a minute old: all remembered
+    assert len(lane_with(20, 3500).threads) == 21      # inside the hour
+    assert len(lane_with(20, 3700).threads) == 8       # past it: the newest eight stay
+    assert len(lane_with(5, 7200).threads) == 6        # eight or fewer are never dropped for age
+    kept = lane_with(20, 3700)
+    assert kept.latest in kept.threads
+
+
 def test_twelve_interleaved_conversations_that_share_an_instruction_are_found_by_their_openings():
     """Unique documents and answers, the same instruction text after each answer: each conversation
     is found by its opening message, so the shared message plays no part. (With 8 remembered, 33 of

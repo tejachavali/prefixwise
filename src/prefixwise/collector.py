@@ -51,6 +51,12 @@ LANE_THREADS = max(1, int(os.environ.get("PREFIXWISE_LANE_THREADS", "64")))
 # never below the 8 conversations a lane kept before it remembered 64, whatever their size.
 LANE_BLOCKS = max(0, int(os.environ.get("PREFIXWISE_LANE_BLOCKS", "16000")))
 LANE_THREADS_FLOOR = 8
+# ... and a remembered conversation whose last turn ended more than an hour before the lane's newest
+# is let go too (again never below 8), so a lane that has gone quiet, or an agent that trims its
+# history and so leaves a dead conversation behind every turn, holds what it held before. An hour is
+# the longest a cache entry is kept by a stated lifetime: a conversation resumed later is an expiry
+# either way, but past the 8 it is then compared with the lane's latest turn, as it always was.
+LANE_IDLE_SECONDS = 3600.0
 _CONVERSATION = ("messages", "tool_results", "user")
 
 
@@ -554,9 +560,12 @@ class Collector:
                 state = _Lane()
             state.threads[identity[0]] = (curr, now, facts, response_id)
             state.threads.move_to_end(identity[0])
-            while len(state.threads) > LANE_THREADS or (
-                    len(state.threads) > min(LANE_THREADS_FLOOR, LANE_THREADS)
-                    and sum(len(t[0].blocks) for t in state.threads.values()) > LANE_BLOCKS):
+            while len(state.threads) > min(LANE_THREADS_FLOOR, LANE_THREADS):
+                oldest = next(iter(state.threads.values()))  # least recently used first
+                if not (len(state.threads) > LANE_THREADS
+                        or sum(len(t[0].blocks) for t in state.threads.values()) > LANE_BLOCKS
+                        or now - oldest[1] > LANE_IDLE_SECONDS):
+                    break
                 state.threads.popitem(last=False)
             state.latest = identity[0]
             self.lane_threads[lane] = state  # (re)assigning refreshes the lane in the LRU
