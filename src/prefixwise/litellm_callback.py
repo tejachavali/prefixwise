@@ -140,11 +140,8 @@ def _eval_agent(labels: dict) -> str | None:
     return labels.get("agent_eval_target")
 
 
-def _user_of(kwargs) -> str | None:
-    """The end user: OpenAI's `user`, else, on a Messages API call, Anthropic's `metadata.user_id`
-    (Claude Code's names its session)."""
-    if kwargs.get("user"):
-        return str(kwargs["user"])
+def _messages_user_id(kwargs) -> str | None:
+    """Anthropic's `metadata.user_id` on a Messages API call, as the client sent it."""
     if kwargs.get("call_type") not in _MESSAGES_CALLS:
         return None
     meta = (kwargs.get("litellm_params") or {}).get("metadata") or {}
@@ -152,11 +149,27 @@ def _user_of(kwargs) -> str | None:
     return user_id if isinstance(user_id, str) and user_id else None
 
 
+def _claude_code_session_of(kwargs) -> str | None:
+    """Claude Code's conversation id, from the JSON it sends as metadata.user_id (its device and
+    account ids are never used: proxy._claude_code_session)."""
+    from .proxy import _claude_code_session
+    return _claude_code_session(_messages_user_id(kwargs))
+
+
+def _user_of(kwargs) -> str | None:
+    """The end user: OpenAI's `user`, else, on a Messages API call, Anthropic's `metadata.user_id`
+    unless it is Claude Code's JSON (a conversation, read by _claude_code_session_of)."""
+    if kwargs.get("user"):
+        return str(kwargs["user"])
+    user_id = _messages_user_id(kwargs)
+    return None if user_id is None or _claude_code_session_of(kwargs) else user_id
+
+
 def _session_of(kwargs) -> str | None:
     params = kwargs.get("litellm_params") or {}
     meta = params.get("metadata") or {}
     return (params.get("litellm_session_id") or meta.get("session_id")
-            or _eval_session(_eval_labels(kwargs)) or _user_of(kwargs))
+            or _eval_session(_eval_labels(kwargs)) or _claude_code_session_of(kwargs) or _user_of(kwargs))
 
 
 def _conversation(model, messages, kwargs) -> tuple | None:
@@ -652,7 +665,7 @@ class PrefixwiseCallback(_Base):
                 pass
             labels = _eval_labels(kwargs)  # an agent_eval run: one attempt at one task, by one target
             session = (params.get("litellm_session_id") or meta.get("session_id")
-                       or _eval_session(labels))  # (_session_of adds user)
+                       or _eval_session(labels) or _claude_code_session_of(kwargs))  # (_session_of adds user)
             common = dict(session_id=session or _user_of(kwargs), session_is_user=not session,
                           task_id=meta.get("task_id") or labels.get("agent_eval_task"),
                           agent_id=meta.get("agent_id") or _eval_agent(labels), latency_ms=latency,

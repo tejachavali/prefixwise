@@ -193,6 +193,24 @@ _MIGRATIONS = {"task_id": "TEXT", "request_id": "TEXT", "completion_tokens": "IN
 _COLUMNS = [f.name for f in fields(LedgerEntry)]
 
 
+def _scrub_claude_code_ids(conn) -> int:
+    """Rows written before 0.12.7 keyed a Claude Code session on its whole metadata.user_id, a JSON
+    string carrying the device and account ids. Rewrite each to its session_id alone. Only Claude
+    Code's shape is touched (device_id, account_uuid and session_id, all text), and a read-only check
+    comes first, so an open with nothing to rewrite never waits for the write lock. Returns the rows
+    rewritten."""
+    where = ("session_id >= '{' AND session_id < '|' AND json_valid(session_id) "
+             "AND json_type(session_id, '$.session_id') = 'text' AND json_extract(session_id, '$.session_id') != '' "
+             "AND json_type(session_id, '$.device_id') = 'text' AND json_type(session_id, '$.account_uuid') = 'text'")
+    try:
+        if not conn.execute(f"SELECT EXISTS (SELECT 1 FROM entries WHERE {where})").fetchone()[0]:
+            return 0
+        cur = conn.execute(f"UPDATE entries SET session_id = json_extract(session_id, '$.session_id') WHERE {where}")
+        return cur.rowcount or 0
+    except Exception:  # noqa: BLE001 - no JSON functions, or a read-only or busy ledger: leave the rows
+        return 0
+
+
 class Ledger:
     def __init__(self, path: str = ":memory:"):
         # check_same_thread=False: the proxy serves on threads; every
@@ -237,6 +255,7 @@ class Ledger:
             self.conn.execute("CREATE INDEX IF NOT EXISTS entries_request ON entries(request_id)")
             self.conn.execute("CREATE INDEX IF NOT EXISTS entries_session ON entries(session_id)")
             self.conn.execute("CREATE INDEX IF NOT EXISTS entries_time ON entries(recorded_at)")
+            _scrub_claude_code_ids(self.conn)
             self.conn.execute(
                 """CREATE TABLE IF NOT EXISTS tasks (
                     task_id TEXT PRIMARY KEY, success INTEGER NOT NULL, recorded_at REAL
