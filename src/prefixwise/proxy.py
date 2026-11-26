@@ -632,6 +632,9 @@ class PrefixwiseProxy:
         self.fixes = parse_fixes(fixes if fixes is not None else os.environ.get("PREFIXWISE_FIXES"))
         # Set by serve() from --auth-token / PREFIXWISE_AUTH_TOKEN; None = open.
         self.auth_token: str | None = None
+        # POST /api/v1/observe also takes this one (PREFIXWISE_OBSERVE_TOKEN), so a gateway plugin can
+        # be given a token that can only post events; None = only auth_token (if any) applies.
+        self.observe_token: str | None = None
         self.fingerprinter = Fingerprinter(hmac_key=hmac_key)
         self.upstream_url = (upstream_url or os.environ.get("PREFIXWISE_UPSTREAM_URL") or "").rstrip("/")
         # Per-provider upstreams ({"anthropic": url, "openai": url}) override upstream_url, so
@@ -682,12 +685,25 @@ class PrefixwiseProxy:
         # Every read and write holds self._lock: the classifier must compare
         # a turn with the turn recorded just before it, never a torn state.
         self._lock = threading.Lock()  # edge state: requests in flight, recordings pending
+        self._observer = None  # POST /api/v1/observe: made on first use (the observer property)
         self._upstream = threading.local()  # last upstream response headers, per thread
         self._recording: dict[tuple, threading.Event] = {}  # streams ended for the client, not yet recorded
 
+    @property
+    def observer(self):
+        """The queue behind POST /api/v1/observe (prefixwise.observe), made on first use."""
+        with self._lock:
+            if self._observer is None:
+                from .observe import Observer
+                self._observer = Observer(self)
+            return self._observer
+
     def close(self, timeout: float = 5.0) -> None:
-        """Flush records still on their way to a remote collector; stop the log consumer and the
-        KV-event reader."""
+        """Record the observed events still waiting; flush records still on their way to a remote
+        collector; stop the log consumer and the KV-event reader."""
+        observer = getattr(self, "_observer", None)
+        if observer is not None:  # first: its records go through the collector below
+            observer.close(timeout)
         if self.log_consumer is not None:
             self.log_consumer.stop(timeout)
         if getattr(self.collector, "remote", False):
@@ -919,11 +935,16 @@ class PrefixwiseProxy:
     # -- shared request path ---------------------------------------------------------
 
     def prepare(self, provider: str, body: dict, headers: dict[str, str] | None = None,
-                api: str = "chat") -> dict:
+                api: str = "chat", at: float | None = None) -> dict:
         """Read identity, strip Prefixwise fields, chain diagnostics.
 
         Returns a context dict for forward/finalize. body itself is not
         mutated; ctx["forward_body"] is what the upstream receives.
+
+        at: when the request was sent, for a request that happened earlier than now (an
+        observed gateway event, POST /api/v1/observe). The TTL and in-flight checks then use it,
+        and the caller sets ctx["span_end"] before finalize; the row is recorded at that time.
+        Default: now (the live proxy).
         """
         headers = {k.lower(): v for k, v in (headers or {}).items()}
         for h in ("x-prefixwise-session-id", "x-prefixwise-agent-id", "x-prefixwise-task-id"):
@@ -1062,7 +1083,7 @@ class PrefixwiseProxy:
         facts = body_facts(provider, forward_body, model=str(body.get("model", "")), credential=credential)
         facts.session_unprotected = unprotected
         facts.no_prefix_cache = self.no_prefix_cache and self.engine_for(provider) == "sglang"
-        sent = time.time()
+        sent = time.time() if at is None else at
         unmarked = None
         # Anthropic's own cache only: a self-hosted engine caches prefixes by itself and may refuse the
         # field (and the in-process middleware has no resend to fall back on).
@@ -1105,7 +1126,7 @@ class PrefixwiseProxy:
                                                   "id" if seen[4] == facts.prefix_key_masked_id else "mixed")
         return {
             "provider": provider, "api": api, "body": body, "headers": headers,
-            "facts": facts, "sent_at": sent,
+            "facts": facts, "sent_at": sent, "event_at": at,
             "forward_body": forward_body, "session_id": session_id,
             "upstream_session_id": upstream_session_id, "engine_token": engine_token,
             "injected": injected,
@@ -1148,7 +1169,8 @@ class PrefixwiseProxy:
             verdict = self.engine_events.request_done(ctx["engine_token"], cached if reported else None,
                                                       prompt_tokens)
         rec = self._record(ctx, status, fps, usage=usage, payload=payload, engine_verdict=verdict)
-        result, entry = self.collector.ingest(rec)
+        at = self._event_at(ctx)  # only for an observed event: live calls stay ingest(rec)
+        result, entry = self.collector.ingest(rec, at=at) if at is not None else self.collector.ingest(rec)
         with self._lock:
             self._release_prefix(ctx, done_session=ctx["session_id"])
         result["response"] = payload
@@ -1208,6 +1230,14 @@ class PrefixwiseProxy:
                     "recorded": False, "response": payload}, None
 
     @staticmethod
+    def _event_at(ctx: dict) -> float | None:
+        """The row's time for a request prepared with an explicit `at` (an observed event): when
+        it ended. None (now) for live traffic."""
+        if ctx.get("event_at") is None:
+            return None
+        return ctx.get("span_end") or ctx["event_at"]
+
+    @staticmethod
     def _overhead_ms(ctx: dict) -> float | None:
         """Prefixwise's own time: everything since the request arrived, minus upstream."""
         if "t0" not in ctx or ctx.get("upstream_ms") is None:
@@ -1227,11 +1257,13 @@ class PrefixwiseProxy:
         # Writes happen only at breakpoints: other sessions can reuse this request's entry for
         # tools+system only if it wrote one ending there.
         inside = [b for b in facts.breakpoints if b < facts.sys_end]
+        # when the response completed: an observed event's own end, not when it was posted
+        done_at = ctx.get("span_end") or time.time()
         if done_session is not None and facts.cache_write > 0 and inside:
-            self.prefix_done[facts.prefix_key] = (time.time(), done_session, max(inside))
+            self.prefix_done[facts.prefix_key] = (done_at, done_session, max(inside))
         if done_session is not None and facts.prefix_key_masked:
             self.prefix_seen[facts.prefix_key_masked] = (
-                time.time(), done_session, facts.prefix_key_canonical, facts.prefix_key_masked_time,
+                done_at, done_session, facts.prefix_key_canonical, facts.prefix_key_masked_time,
                 facts.prefix_key_masked_id, bool(facts.cache_write > 0 and inside))
 
     def response_started(self, ctx: dict) -> None:
@@ -1257,7 +1289,9 @@ class PrefixwiseProxy:
             self._release_prefix(ctx)
         entry = None
         try:
-            entry = self.collector.ingest_failure(rec)
+            at = self._event_at(ctx)
+            entry = (self.collector.ingest_failure(rec, at=at) if at is not None
+                     else self.collector.ingest_failure(rec))
         except Exception as exc:
             print(f"prefixwise: failure for {ctx['request_id']} not recorded: {type(exc).__name__}",
                   file=sys.stderr, flush=True)
@@ -1706,6 +1740,8 @@ class PrefixwiseProxy:
 
 
 MAX_BODY_BYTES = int(os.environ.get("PREFIXWISE_MAX_BODY_BYTES", str(32 * 1024 * 1024)))
+# POST /api/v1/observe: a gateway's events, up to 1,000 per post (each with its request body).
+OBSERVE_MAX_BYTES = int(os.environ.get("PREFIXWISE_OBSERVE_MAX_BYTES", str(MAX_BODY_BYTES)))
 
 
 MAX_ID_CHARS = 256  # session / agent / task ids: labels, not payloads
@@ -1904,6 +1940,43 @@ def make_handler(proxy: PrefixwiseProxy):
             self._json(401, _error(401, "missing or wrong X-Prefixwise-Token"))
             return False
 
+        def _observe_authorized(self) -> bool:
+            """POST /api/v1/observe: the proxy's X-Prefixwise-Token, or the observe token
+            (PREFIXWISE_OBSERVE_TOKEN), each in X-Prefixwise-Token or Authorization: Bearer, which
+            is what gateway plugins can usually set. Open only when neither token is set."""
+            tokens = [t for t in (getattr(proxy, "auth_token", None), getattr(proxy, "observe_token", None)) if t]
+            if not tokens:
+                return True
+            auth = self.headers.get("Authorization") or ""
+            given = [g for g in (self.headers.get("X-Prefixwise-Token") or "",
+                                 auth[7:] if auth[:7].lower() == "bearer " else "") if g]
+            # every pair compared, constant-time each: which token matched is not timed
+            if sum(hmac.compare_digest(g.encode(), t.encode()) for g in given for t in tokens):
+                return True
+            self._json(401, _error(401, "missing or wrong token: send Authorization: Bearer <token> "
+                                        "(PREFIXWISE_OBSERVE_TOKEN or the proxy's auth token)"))
+            return False
+
+        def _observe(self):
+            """POST /api/v1/observe: read, check, hand to the observer; 202 at once."""
+            if not self._observe_authorized():
+                return
+            try:
+                body = json.loads(self._read_body(OBSERVE_MAX_BYTES) or b"null")
+            except ClientError as exc:
+                code = 413 if isinstance(exc, BodyTooLarge) else 400
+                return self._json(code, _error(code, str(exc)))
+            except ValueError as exc:
+                return self._json(400, _error(400, f"invalid JSON body: {exc}"))
+            except OSError:
+                self.close_connection = True
+                return
+            try:
+                return self._json(*api.post(proxy, api.PREFIX + "/observe", body))
+            except Exception as exc:
+                print(f"prefixwise: internal error on /api/v1/observe: {type(exc).__name__}", file=sys.stderr)
+                return self._json(500, _error(500, "internal error in the Prefixwise API"))
+
         def _client_headers(self) -> dict[str, str]:
             # Our internal query carrier can never be set by the client.
             headers = {k.lower(): v for k, v in self.headers.items() if k.lower() != QUERY_KEY}
@@ -1912,26 +1985,27 @@ def make_handler(proxy: PrefixwiseProxy):
                 headers[QUERY_KEY] = query
             return headers
 
-        def _read_body(self) -> bytes:
+        def _read_body(self, limit: int | None = None) -> bytes:
             """The request body, by Content-Length or, when the client sends Transfer-Encoding: chunked
             (Envoy-based gateways do, e.g. Plano), by chunks. Reading only Content-Length there would
             forward an empty body. Raises ClientError on a malformed or oversized body; OSError when
             the client stalls or hangs up."""
+            limit = MAX_BODY_BYTES if limit is None else limit  # read now: settable at runtime
             codings = [t.strip().lower() for v in (self.headers.get_all("Transfer-Encoding") or [])
                        for t in v.split(",") if t.strip()]
             if codings:
                 if codings != ["chunked"]:  # a compressed body would reach the classifier undecoded
                     raise ClientError("unsupported Transfer-Encoding: only chunked is accepted")
                 self.close_connection = True  # the connection's framing is ours to end
-                return _read_chunked(self.rfile, MAX_BODY_BYTES)
+                return _read_chunked(self.rfile, limit)
             try:
                 length = int(self.headers.get("Content-Length", 0) or 0)
             except ValueError:
                 raise ClientError("Content-Length is not a number")
             if length < 0:
                 raise ClientError("Content-Length is negative")
-            if length > MAX_BODY_BYTES:
-                raise BodyTooLarge(f"body larger than {MAX_BODY_BYTES} bytes")
+            if length > limit:
+                raise BodyTooLarge(f"body larger than {limit} bytes")
             return self.rfile.read(length)
 
         def _passthrough(self, method: str):
@@ -1968,6 +2042,8 @@ def make_handler(proxy: PrefixwiseProxy):
                     health["ingest"] = dict(proxy.collector.stats)
                     if proxy.log_consumer is not None:
                         health["log"] = {k: v for k, v in proxy.log_consumer.snapshot().items() if k != "last_error"}
+                if proxy._observer is not None:  # counts only
+                    health["observe"] = proxy._observer.snapshot()
                 return self._json(200, health)
             if path == "/metrics":
                 if not self._authorized(bearer=True):
@@ -2038,6 +2114,8 @@ def make_handler(proxy: PrefixwiseProxy):
 
         def do_POST(self):
             path, _ = route(self.path)
+            if path.rstrip("/") == api.PREFIX + "/observe":  # its own token; served on edges too
+                return self._observe()
             if path.startswith(api.PREFIX + "/"):
                 if not self._authorized():
                     return
@@ -2195,7 +2273,7 @@ def serve(host: str = "127.0.0.1", port: int = 8080, *, ledger_path: str | None 
           engine: str | None = None, kv_events: str | None = None, full_attention: bool | None = None,
           otel: bool | str | None = None, collector_url: str | None = None, collect_only: bool = False,
           ready=None, log_url: str | None = None, log_partitions: str | None = None,
-          sinks: list[str] | None = None):
+          sinks: list[str] | None = None, observe_token: str | None = None):
     """Run the proxy until interrupted. Settings fall back to PREFIXWISE_* env vars.
     collect_only: `prefixwise collect`, a collector with no upstream; with log_url it also reads the
     record log's partitions (log_partitions: '0-7'; default all). ready: called with the bound port
@@ -2224,6 +2302,7 @@ def serve(host: str = "127.0.0.1", port: int = 8080, *, ledger_path: str | None 
         from .otel import install_provider
         otel_where = install_provider()
     proxy.auth_token = auth_token or os.environ.get("PREFIXWISE_AUTH_TOKEN") or None
+    proxy.observe_token = observe_token or os.environ.get("PREFIXWISE_OBSERVE_TOKEN") or None
     exposed = not _is_loopback(host)
     if exposed and collect_only and not proxy.auth_token and not allow_unauthenticated:
         # Anyone who can reach the port could write rows into the fleet's ledger.
@@ -2256,7 +2335,7 @@ def serve(host: str = "127.0.0.1", port: int = 8080, *, ledger_path: str | None 
         else:
             print("  edges:    PREFIXWISE_COLLECTOR=http://<this host>:<port> prefixwise serve ... "
                   "(PREFIXWISE_COLLECTOR_TOKEN for the token)")
-        print("  POST /api/v1/ingest   GET /api/v1/*  GET /metrics  GET /health", flush=True)
+        print("  POST /api/v1/ingest   POST /api/v1/observe   GET /api/v1/*  GET /metrics  GET /health", flush=True)
     elif not quiet:
         target = "MOCK upstream (synthetic usage, no API calls)" if proxy.mock else proxy.upstream_url
         print(f"Prefixwise proxy on http://{host}:{server.server_address[1]}")
@@ -2292,6 +2371,8 @@ def serve(host: str = "127.0.0.1", port: int = 8080, *, ledger_path: str | None 
         if not os.environ.get("PREFIXWISE_HMAC_KEY"):
             print("  note:     set PREFIXWISE_HMAC_KEY so hashes of short prompt blocks cannot be guessed")
         print("  POST /v1/chat/completions  POST /v1/responses  POST /v1/messages  POST /tasks")
+        print("  POST /api/v1/observe (gateway events"
+              + (", Authorization: Bearer $PREFIXWISE_OBSERVE_TOKEN" if proxy.observe_token else "") + ")")
         print("  GET  /ledger  GET /requests/<id>  GET /metrics  GET /health", flush=True)
     # SIGTERM (docker stop, systemd, Kubernetes): stop accepting, let in-flight
     # requests and streams finish, then exit. As PID 1 in a container an

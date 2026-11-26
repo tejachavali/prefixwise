@@ -155,12 +155,13 @@ class Collector:
 
     # -- one record in, one row out -----------------------------------------------------------
 
-    def ingest(self, rec: TurnRecord) -> tuple[dict, LedgerEntry]:
+    def ingest(self, rec: TurnRecord, at: float | None = None) -> tuple[dict, LedgerEntry]:
         """Classify and record one completed turn. Returns (the verdict as the API reports it,
         the ledger row). Raises on a broken record or ledger; the edge decides what that means
-        for the request (the proxy fails open)."""
+        for the request (the proxy fails open). at: the row's time when the turn happened
+        earlier than now (an observed gateway event); default now."""
         with self._lock:
-            return self._ingest_locked(rec)
+            return self._ingest_locked(rec, at=at)
 
     def seed_seen(self, request_ids) -> None:
         """Request ids already in the ledger (after a restart): their redelivery is a duplicate."""
@@ -240,7 +241,7 @@ class Collector:
             self.stats["rejected"] += len(rejected)
         return {"accepted": accepted, "duplicates": duplicates, "rejected": rejected}
 
-    def ingest_failure(self, rec: TurnRecord) -> LedgerEntry:
+    def ingest_failure(self, rec: TurnRecord, at: float | None = None) -> LedgerEntry:
         """A request that produced no verdict (upstream error, cut-off stream, a recording
         failure) is a row too, so error rates exist and every other rate has an honest
         denominator (docs/DATA.md). The ledger write may raise; metrics count it first."""
@@ -251,7 +252,7 @@ class Collector:
             status=rec.status, error=str(rec.error or f"http_{rec.status}")[:80], api=rec.api,
             stream=rec.stream, latency_ms=rec.latency_ms, overhead_ms=rec.overhead_ms)
         with self._lock:
-            self.ledger.record(entry)  # the row first, as for verdicts: a redelivery is then counted once
+            self.ledger.record(entry, at=at)  # the row first, as for verdicts: a redelivery is then counted once
             self.stats["failures"] += 1
         self.metrics.observe(entry)
         return entry
@@ -274,7 +275,8 @@ class Collector:
         carried = prior_system[sum(1 for b in head if b.role == "system"):]
         return head + carried + old_msgs + new_msgs, prior
 
-    def _ingest_locked(self, rec: TurnRecord, write: bool = True) -> tuple[dict, LedgerEntry]:
+    def _ingest_locked(self, rec: TurnRecord, write: bool = True,
+                       at: float | None = None) -> tuple[dict, LedgerEntry]:
         """Classify against the conversation's previous turn, write the row, then commit the new
         state. The row comes first: if the ledger refuses it, nothing has changed here, so the
         record can be delivered again and compared with the same predecessor."""
@@ -444,7 +446,7 @@ class Collector:
         entry.lifetime_evidence = lifetime_evidence
 
         if write:  # the row first: a refused row leaves the state untouched for a redelivery
-            self.ledger.record(entry)
+            self.ledger.record(entry, at=at)
             if lifetime_evidence is not None:  # only once written: a replay or a redelivery is not counted twice
                 self.lifetimes.observe(provider, rec.model, gap_seconds, hit=bool(lifetime_evidence))
             self.metrics.observe(entry)

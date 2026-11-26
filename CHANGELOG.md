@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **`POST /api/v1/observe`: live gateway events, for native gateway plugins (#166).** A gateway plugin in any language can post each request after it finished (the body sent to the provider, the response or a stream's final usage, start and end, headers, status), as one event or a batch, in the shape `prefixwise import gateway` reads. It is answered `202` at once and recorded off the request thread through the same pipeline as the proxy and the import, so it gets the same verdict: checked on generated traffic posted in order, shuffled, and from eight threads at once. Events are held 2 s and recorded in start-time order, so a conversation's turns arriving out of order are still compared turn by turn. A bad event gets `400` with its reason and the rest of the batch still counts; `PREFIXWISE_OBSERVE_TOKEN` gives a plugin a token that opens only this endpoint. Also: `prefixwise import gateway` now reads a response logged as a usage object alone. Step 2 of #165.
+
 ## 0.12.6: 2026-11-25
 
 For anyone running `prefixwise serve` behind an LLM gateway, or on caches whose lifetime is not stated (OpenAI, DeepSeek): request bodies sent in chunks are now read (they were forwarded empty), a partial read on an unchanged prompt is named, cache lifetimes the provider does not state are learned from your own traffic, and an opt-in fix sends OpenAI a cache key per session.
