@@ -18,7 +18,7 @@ TTL_5M, TTL_1H = 300.0, 3600.0
 # One sentence per cause: what happened, in words that do not need the docs.
 CAUSE_PLAIN = {
     "none": "served from cache",
-    "first_write": "first request of a session: nothing to reuse yet",
+    "first_write": "first request of a session or a new conversation: nothing of its own to reuse yet",
     "model_switch": "switched model: each model has its own cache",
     "volatile_system": "the system prompt changed only in a date, time or id",
     "system_edit": "the system prompt was edited",
@@ -186,7 +186,8 @@ def ttl_advice(ledger, since: float | None = None, until: float | None = None,
     """Per Anthropic model: could the 1-hour cache have paid on this ledger?
 
     Each row's own cache lifetime is in `cache_ttl_seconds` (schema 5). Kept by 1 hour: the
-    ttl_expired misses on the 5-minute cache whose gap was within the hour, except ttl_shortened
+    ttl_expired misses on the 5-minute cache whose entry was less than an hour old (counted from when
+    the turn that wrote it was sent; from its end on rows older than schema 9), except ttl_shortened
     (they asked for 1 hour already). Under 1 hour their rewrites would have been reads (saved);
     every other 5-minute write is billed at the 1-hour rate instead (extra). Writes already on
     1 hour cost nothing more; rows without a known lifetime (older ledgers, OpenAI) are left out.
@@ -206,12 +207,15 @@ def ttl_advice(ledger, since: float | None = None, until: float | None = None,
     if until is not None:
         clauses.append("recorded_at < ?")
         args.append(until)
-    sql = (f"SELECT model, prompt_tokens, COALESCE(cache_write_tokens, 0), cause, gap_seconds, "
-           f"cache_ttl_seconds, detail FROM entries WHERE {' AND '.join(clauses)}")
+    # The entry's age (since the turn that wrote it was sent) is what a lifetime is counted against;
+    # rows from before schema 9 have only the idle gap.
+    sql = (f"SELECT model, prompt_tokens, COALESCE(cache_write_tokens, 0), cause, "
+           f"COALESCE(cache_age_seconds, gap_seconds), cache_ttl_seconds, detail FROM entries "
+           f"WHERE {' AND '.join(clauses)}")
     with ledger.reader() as conn:
         rows = conn.execute(sql, args).fetchall()
     acc: dict = {}
-    for model, prompt, writes, cause, gap, ttl, detail in rows:
+    for model, prompt, writes, cause, age, ttl, detail in rows:
         r = prices.rates_for(model)
         if r is None:
             continue
@@ -220,7 +224,7 @@ def ttl_advice(ledger, since: float | None = None, until: float | None = None,
         if not all(isinstance(x, (int, float)) for x in (w5, w1, read)):
             continue
         a = acc.setdefault(model, {"misses": 0, "saved": 0.0, "extra": 0.0})
-        if cause == "ttl_expired" and ttl == TTL_5M and gap is not None and gap <= TTL_1H \
+        if cause == "ttl_expired" and ttl == TTL_5M and age is not None and age <= TTL_1H \
                 and detail != "ttl_shortened":  # asked for 1 hour already: the downgrade is the problem
             a["misses"] += 1
             a["saved"] += writes * (w5 - read) / 1e6

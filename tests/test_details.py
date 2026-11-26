@@ -54,6 +54,8 @@ def idle(p, seconds, session="s", model=MODEL):
     snap, done, facts, rid = lane.threads[lane.latest]
     lane.threads[lane.latest] = (snap, done - seconds, facts, rid)
     facts.done_at -= seconds
+    if snap.sent_at:
+        snap.sent_at -= seconds  # the cache entry's age counts from when the request was sent
     p.last_seen[session] -= seconds
 
 

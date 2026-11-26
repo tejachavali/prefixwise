@@ -629,6 +629,7 @@ def cmd_run(args) -> int:
     proxy.versioned = {"openai"}
     proxy.api_key = None  # the agent's own keys pass through; never replace them here
     proxy.default_session = f"run-{time.strftime('%Y%m%d-%H%M%S')}"
+    proxy.default_session_shared = False  # the run's own session: one agent run, not a pool of conversations
     server = _listen_local(proxy, args.port)
     base = f"http://127.0.0.1:{server.server_address[1]}"
     threading.Thread(target=server.serve_forever, daemon=True).start()

@@ -34,13 +34,29 @@ The conversation is the messages and tool results **in the order they were sent*
 **Each request is compared with one earlier request: its previous turn.** That is the latest request
 of the same conversation, in the same session, on the same model (a *lane*). A conversation is known
 by its opening message, so parallel subagents in one session and an agent's small side calls (titles,
-summaries) each have their own previous turn (the last 8 conversations of a lane are remembered). A
+summaries) each have their own previous turn. A lane remembers the latest turn of its last 64
+conversations (`PREFIXWISE_LANE_THREADS`), each under its opening message; a request whose opening
+is not among them adds one, and the 65th drops the one least recently used. A
 request whose opening matches no remembered conversation is a new conversation when its system prompt
 is not empty and differs beyond dates and ids, and it carries no compaction event; otherwise it is
-compared with the lane's latest turn. A model with no lane yet in the session is compared with the
-session's last turn on any model, which makes it a `model_switch`. The session is named by the client
-(`X-Prefixwise-Session-Id`, a body `session_id`, Codex's session headers, `x-session-id`) or, failing
-those, by an end-user id (`metadata.user_id`, OpenAI `user`).
+compared with the lane's latest turn, which may be another conversation's (2.2 says when that makes
+it a new conversation; section 7 says what it costs when it does not).
+A model with no lane yet in the session is compared with the session's last turn on any model, which
+makes it a `model_switch`. The session is named by the client (`X-Prefixwise-Session-Id`, a body
+`session_id`, Codex's session headers, `x-session-id`) or, failing those, by an end-user id
+(`metadata.user_id`, OpenAI `user`).
+
+**A session that names no conversation** is one whose id did not come from the client as a
+conversation id: an edge's default session (`prefixwise serve`, the middleware, an SDK recorder with
+no session given), or an end-user id. It holds every conversation that named none. The default
+session of `prefixwise run` (one per run) and of `prefixwise check` (one per scenario) is not such a
+session: it names that run or scenario.
+
+**Judged by its own read.** An earlier point of its own conversation (2.4) has no turn of its own to
+be compared with, and no change is claimed in its conversation: the verdict is `none` if at least half
+of its own prompt came from the cache, else `unknown`. Such a row carries no detail, no "first changed"
+block and no evidence of how long the cache lasts, and the provider's own reason is not scored
+against it.
 
 **Each block has three hashes** (SHA-256 over the block as parsed and re-serialized, so whitespace
 and escaping in the original bytes are not seen). With a per-install key set (`PREFIXWISE_HMAC_KEY`),
@@ -118,23 +134,92 @@ the cause:**
 | a message | `history_edit` (`compaction_rewrite` with a compaction event) | yes (no) | an earlier message was rewritten, not appended to |
 | a tool result | `tool_result_mutation` (`compaction_rewrite` with a compaction event) | yes (no) | a tool's output was re-rendered or removed after it was sent |
 
-One exception: when the previous request was a single message, this one replaces it, and no
-compaction event came with it, it is a new conversation on the same tools and system prompt (an
-agent's side call), not an edit. The edit is kept as a secondary cause and the walk goes on to the
-tool results: a changed tool result is still named; otherwise the turn is judged by what the cache
-read.
+One exception: **a new conversation is not an edit of the previous one.** It is decided only when the
+walk reaches the conversation, so a change in the tools or the system prompt is named first, against
+whichever turn of the lane the request was compared with (an earlier point of its conversation
+included, 2.4). When the opening message differs and no compaction event came with the request
+(with one, it is a `compaction_rewrite`, always):
+
+| The request | Is |
+|---|---|
+| The previous request was a single message (an agent's side call, a one-shot classification) | a **new conversation** on the same tools and system prompt. The edit is kept as a secondary cause and the walk goes on to the tool results (a changed tool result is still named) |
+| This request is a single message, in a session that names no conversation (section 1) | a **new conversation**. The previous conversation's tool results are not compared |
+| Anything else: several messages after a request of several, or a single message in a session that names a conversation | `history_edit`: a history rewritten from its first message on. A sliding window that dropped the oldest messages, a summary with or without a kept tail, an edited first message; also another conversation's turn, when that conversation's own previous turn is not remembered (section 7) |
+
+Every request, whatever the table says of it, is filed under its own opening message: a rewrite
+with another opening adds a remembered conversation to the lane.
+
+**A new conversation** is judged by 2.3 up to and including the first-marker rule: a hit is a hit, a
+missing `cache_control` is still named. Below that it shares only the tools and system prompt before
+its opening message with the compared turn, and one case is known to have been in the cache: on
+Anthropic's own API (not behind a self-hosted engine), the previous turn carried `cache_control` on a
+block of tools+system and read or wrote something, this request carries it on that same block (the
+last such block of the previous turn), and nothing was read. That prefix is then judged by the rest
+of 2.3 like any prefix that did not change (`ttl_expired`, `routing_miss`). In every other case the
+size of the shared part, and whether it was cached, is not known: the turn is the conversation's
+`first_write`, with its legitimacy left open (neither expected nor waste), never an inferred
+`routing_miss` or expiry, and it is not evidence of how long the cache lasts.
 
 A change is then weighed against what the cache actually did:
 
 | Condition | Verdict |
 |---|---|
 | This request is below the provider's minimum and nothing was read | `below_min_prefix`: no version of it could have been read; the change cost nothing |
-| The gap since the previous turn exceeds the cache TTL and nothing was read | `ttl_expired`: the entry was gone; the change cost nothing more |
+| The previous turn left nothing in the cache (below), and nothing was read | `below_min_prefix` or `unknown` (below): nothing was there to lose, or to expire; the change cost nothing |
+| The entry's age exceeds the cache TTL and nothing was read | `ttl_expired`: the entry was gone; the change cost nothing more |
 | The cache served all of `R` | `none`: the change came after the reusable prefix or never reached the rendered prompt |
 | Otherwise | the change's cause |
 
-In the first three the change is kept as a secondary cause, and the provider's own reason (if any)
+In the first four the change is kept as a secondary cause, and the provider's own reason (if any)
 is not scored against the verdict, since it answers another question.
+
+**A previous turn that left nothing in the cache.** Claimed only where the provider's own counts say
+so. All of these hold:
+
+- Anthropic's own API, not behind a self-hosted engine;
+- the previous turn's usage carried a cache-write count (`cache_creation_input_tokens`, or the
+  `cache_creation` split): a server that leaves the field out says nothing by its 0;
+- that turn carried `cache_control`, had a prompt, and read 0 and wrote 0 tokens;
+- its last block was not marked. A marker there covers the whole prompt: one below the minimum is
+  the rule of 2.1, and one at or above it that wrote nothing had its markers ignored;
+- this request does not meet the conditions of the `markers_ignored` detail (2.4), which then stands
+  with the cause the other rules give.
+
+After such a turn a request that read nothing lost nothing: with a change it is the row above, and
+with none it is the row of 2.3. So no waste verdict follows such a turn, except for a request that
+carries no `cache_control` at all (2.3, section 5). Why nothing was left is named as far as it is
+known, from an estimate of the tokens that turn's markers covered: everything up to and including
+the block that carries its last marker (tools, then system, then conversation), as a share of the
+request's bytes, times its prompt tokens. The estimate is a pair, at least and at most. The two are
+equal where the bytes are known: a marker on a tool, or on the last block of the system prompt. A
+marker on an earlier system block covers at least the tools and at most the tools and the whole
+system prompt; one inside the conversation at least the tools and system prompt and at most the whole
+request (the system prompt is kept as one size, and a message's content blocks are not sized one by
+one). There is no estimate when the request's bytes are not text's: over 16 bytes a token, which
+means images or documents in base64, whose bytes say nothing about their tokens. Tokens are not
+bytes, so it is an estimate in every case.
+
+| The estimate | Verdict |
+|---|---|
+| At least twice the model's minimum cacheable size | `unknown`: the markers were not honoured (a gateway that strips them, or a server that fills the write count with 0). The evidence gives the estimate and the minimum |
+| At most under twice the minimum | `below_min_prefix`: the marked part was below the minimum, or not clearly above it |
+| No estimate, or one whose two numbers lie on either side of twice the minimum | `below_min_prefix`, in words that claim neither: the marked part "was below the minimum cacheable size, or was not cached" |
+
+Neither is scored against the provider's own reason when a change is kept as a secondary cause, and
+`unknown` never is.
+
+**Age, not idle time.** A stated TTL is compared with the cache entry's age: the time since the
+previous turn was *sent*. A provider counts an entry's lifetime from the request that wrote or read
+it, so that turn's own generation time is part of the age (measured on Anthropic: two 5-minute entries
+read nothing 318 s after the request that wrote them, 153 s and 292 s after its response ended). The
+ledger's `gap_seconds` stays the idle time (from the previous turn's end), which the retry rule and
+the observed lifetimes use; when the two differ, the evidence gives both.
+
+On Anthropic (not behind a self-hosted engine, which caches without markers), when a change is named
+in a prompt that carries no `cache_control`, nothing was read, and the previous turn read 0 and wrote
+0 tokens, the evidence says so and `breakpoint_misplaced` is added as a secondary cause: the change
+is the first thing to fix (a marker on a prefix that changes every turn buys writes nobody reads),
+and nothing is cached until the markers are there too.
 
 ### 2.3 The prompt did not change
 
@@ -143,11 +228,15 @@ is not scored against the verdict, since it answers another question.
 | The cache served all of `R` | `none`, except on Anthropic when the cache served everything the previous turn held and a stable part of that turn, at least the minimum cacheable size, lay after its last breakpoint and was sent uncached again: `breakpoint_misplaced` |
 | A prompt-affecting parameter changed (thinking, tool choice, reasoning, output format, chat-template arguments, LoRA adapter, multimodal processing options, RAG documents) | `param_rendered` |
 | Below the provider's minimum cacheable length | `below_min_prefix` |
-| Anthropic with no `cache_control` anywhere (a breakpoint after a volatile block is a rule of the classifier too, but the proxy never sets that fact today) | `breakpoint_misplaced` |
+| Anthropic with no `cache_control` anywhere, the entry's age past 1 hour (the longest a marker can ask for, whatever lifetime the edge recorded for the request: with no marker that is only the 5-minute default), and nothing read | `ttl_expired`: no marker would have kept it; `breakpoint_misplaced` is kept as a secondary cause |
+| A breakpoint after a volatile block (a fact the classifier has a rule for, but the proxy never sets today), the entry's age past the request's own TTL, and nothing read | `ttl_expired`, likewise |
+| Anthropic with no `cache_control` anywhere, or a breakpoint after a volatile block | `breakpoint_misplaced` |
 | No usage at all | `unknown` |
 | The server reports no cached-token count (Ollama, most llama.cpp builds), and no engine evidence | `unknown` |
 | Half read (section 1) | `none` |
 | Anthropic: this is the first turn carrying a breakpoint and less than half was read | `first_write` |
+| A new conversation (2.2) whose shared tools and system prompt are not known to have been cached and missed | `first_write`, legitimacy left open |
+| The previous turn left nothing in the cache (2.2), and nothing was read | `below_min_prefix`, or `unknown` when its markers covered clearly more than the minimum (2.2): there was nothing for a router to miss, nothing to expire, and nothing a retry could have read |
 | Engine evidence: the block where the read stopped was removed | `evicted`, confirmed |
 | Engine evidence: another cache served this request while the previous one still held the prefix | `routing_miss`, confirmed |
 | An OpenAI-compatible API that is not OpenAI, prompt under 1,024 tokens | `unknown` (its minimum is not known) |
@@ -155,34 +244,49 @@ is not scored against the verdict, since it answers another question.
 | Behind an engine, events show the stop block still resident in the cache that served it | `unknown`: not an eviction (the token prefix changed, e.g. template rendering) |
 | Behind several caches without deciding events | `unknown` |
 | Behind one engine | `evicted`, inferred |
-| The gap exceeds the TTL | `ttl_expired` |
+| The entry's age exceeds the TTL | `ttl_expired` |
 | No TTL known (not Anthropic, not behind an engine), and this ledger has seen the cache on this provider and model still read an unchanged prefix at least 5 times after idle gaps of *A* or longer (each more than a minute): less than half read within *A* | `routing_miss`, inferred, naming the observed lifetime |
 | No TTL known, at least 5 such idle hits seen, and less than half read after a gap at least *C*: the shortest gap, longer than every gap that was read and than 5 minutes, after which at least 5 unchanged prefixes read less than half (a changed cache key excluded) | `ttl_expired`, inferred, naming the observed lifetime |
-| Less than half of the reusable prefix read (nothing, or only part), gap within the TTL (or within the shortest provider TTL when unknown): too soon to have expired. On Anthropic a part read counts only within 5 minutes: a 1-hour breakpoint early in the prompt can still read after a later 5-minute one expired | `routing_miss`, inferred |
+| Less than half of the reusable prefix read (nothing, or only part), the entry's age within the TTL (or within the shortest provider TTL, 5 minutes, when none is known): too soon to have expired. On Anthropic a part read counts only within 5 minutes: a 1-hour breakpoint early in the prompt can still read after a later 5-minute one expired | `routing_miss`, inferred |
 | Otherwise | `unknown` |
 
 ### 2.4 Facts outside the two requests
 
-Two facts the proxy saw in flight replace 2.1 to 2.3 altogether; no detail is attached to them:
+Three facts about the turn at hand are checked before the comparison, in this order. The first and
+the third replace 2.1 to 2.3 altogether. The second replaces only what 2.2 and 2.3 say about the
+conversation: 2.1 and the comparison of tools and system prompt (2.2) come first. No detail is
+attached to their verdicts:
 
 | Fact | Verdict |
 |---|---|
 | `previous_response_id` names a response this proxy never saw | `unknown`: the prefix cannot be reconstructed |
-| The request was sent more than the clock skew (1 s, `PREFIXWISE_CLOCK_SKEW`) before the previous turn of its own conversation finished, it is not a new conversation or a stitched Responses turn, and it read less than half of the shorter of the two prompts | `unknown`: it could not have read that turn's write |
+| **An earlier point of its own conversation.** The request's conversation blocks (messages and tool results, in order) are a proper prefix of the compared turn's: every block it carries opens that turn, which goes on after them. It carries no compaction event, and is not a stitched Responses turn | 2.1 still applies (a compared turn below the minimum is `below_min_prefix`), and so does the comparison of tools and system prompt: a change there is named and weighed as in 2.2, and the request is then subject to the in-flight rule below like any other. With tools and system unchanged, nothing it sent changed, and its predecessor is the turn before that point, not the one at hand: it is judged by its own read (section 1), and is also `none` when the cache served all of `R`, since the turn at hand is its own conversation's and what that turn left is what it could read |
+| The request was sent more than the clock skew (1 s, `PREFIXWISE_CLOCK_SKEW`) before the turn it is compared with finished, it is not a new conversation in the lane (2.1) or a stitched Responses turn, and it read less than half of the shorter of the two prompts | `unknown`: it could not have read that turn's write |
+
+An earlier point is told by the blocks alone, never by the clock. What the clock then decides is only
+what the record leaves behind. Sent more than the clock skew before the compared turn was sent, it is
+the record of an earlier turn delivered late: it does not become the conversation's latest turn (the
+later one stays), though a Responses turn that continues it by `previous_response_id` still finds it.
+Otherwise it is a rewind to, or a replay of, an earlier turn, and becomes the latest turn like any
+other. The evidence says which.
 
 Two details can change the cause 2.1 to 2.3 gave:
 
 | Fact | Effect |
 |---|---|
-| Anthropic, cause `ttl_expired`, `routing_miss` or `unknown`, less than a tenth of the prompt read, the gap over 5 minutes; the previous request asked for a 1-hour cache on every breakpoint, used no server tools, and its write was kept for 5 minutes | `ttl_expired`, detail `ttl_shortened` |
-| Anthropic, cause `routing_miss` or `unknown`, less than a tenth read, the gap at most 5 minutes, the previous turn wrote, the conversation was appended to, and the nearest breakpoint is at least 22 positions past the previous write (Anthropic looks back 20; a run of tool-use or tool-result blocks counts as one position) | `breakpoint_misplaced`, detail `lookback_exceeded` |
+| Anthropic, cause `ttl_expired`, `routing_miss` or `unknown`, less than a tenth of the prompt read, the entry's age (since the previous request was sent) over 5 minutes; the previous request asked for a 1-hour cache on every breakpoint, used no server tools, and its write was kept for 5 minutes | `ttl_expired`, detail `ttl_shortened` |
+| Anthropic, cause `routing_miss` or `unknown`, less than a tenth read, the entry's age at most 5 minutes, the previous turn wrote, the conversation was appended to, and the nearest breakpoint is at least 22 positions past the previous write (Anthropic looks back 20; a run of tool-use or tool-result blocks counts as one position) | `breakpoint_misplaced`, detail `lookback_exceeded` |
 
 Applied last: when the engine keeps no prefix cache (SGLang `--disable-radix-cache`), any miss becomes
 `unknown`, legitimate, with no detail.
 
-Every other **detail** (for example `thinking_stripped`, `sent_before_cache_written`,
+Every other **detail** (for example `markers_ignored`, `thinking_stripped`, `sent_before_cache_written`,
 `volatile_prefix_at_start`, `output_rerendered`, `host_restored`, `session_header_dropped`) explains a
 cause without changing it, and is claimed only from facts in hand. The full list is in the guide.
+`markers_ignored`: Anthropic, `cache_control` on the last block, a prompt of at least 8,192 tokens,
+nothing read and nothing written, on any cause but `none` and `below_min_prefix`. The windows of the
+details that look at another session's request (`shared_prefix_not_reused`, `volatile_prefix_at_start`)
+are counted from when that request was sent.
 
 ## 3. Engine evidence
 
@@ -223,8 +327,13 @@ The tier is in the evidence text; it is not a separate field.
 ## 5. What a miss costs
 
 - **Avoidable tokens** (waste only): `max(0, R - cached_curr)`. Appended content is never counted, a
-  partial hit counts only what was not read, and where the previous turn's cache content is known,
-  nothing beyond it. Legitimate misses and undecided ones count zero. One exception: an Anthropic
+  partial hit counts only what was not read, and where the previous turn's cache content is known and
+  is not zero, nothing beyond it. Legitimate misses and undecided ones count zero. A previous turn
+  known to have left nothing (2.2) needs no cap of zero: a request that read nothing after it gets no
+  waste verdict. Where the previous turn held nothing for any other reason (it carried no
+  `cache_control`, its markers were ignored, the server reports no writes), `R` is not capped: what a
+  marked, stable prompt would have reused stands, whichever of the two turns lacked the marker. One
+  exception: an Anthropic
   breakpoint left early (2.3) counts the stable part it left uncached, `min(prompt_prev, prompt_curr)
   - cached_curr`, since that part is exactly what a later breakpoint would have cached.
 - **Avoidable dollars**: those tokens at the difference between the rate actually paid for them and
@@ -258,9 +367,12 @@ results):
 5. **Where and why agree.** The ledger's "first changed" block lies in the section the cause names, in
    the hosted and the engine prefix order, with one change or two.
 6. **Avoidable is bounded.** `0 <= avoidable <= min(prompt_prev, prompt_curr) - cached`, and no more than
-   the previous turn's known cache content minus what was read; it is positive exactly when the verdict
-   is waste and less than `R` was read. (The early-breakpoint case in section 5 is the one waste that is
-   bounded by the shorter prompt and not by `R`.)
+   the previous turn's known cache content (where it is not zero) minus what was read; it is positive
+   exactly when the verdict is waste and less than `R` was read. So there is no waste verdict with
+   nothing avoidable: after a turn known to have left nothing (2.2), a request that read nothing is
+   never waste, whatever changed. The test computes avoidable tokens with the cap the collector
+   uses. (The early-breakpoint case in section 5 is the one waste that is bounded by the shorter
+   prompt and not by `R`.)
 7. **Engine evidence decides only an unchanged prompt.** An eviction or a routing miss from events
    never replaces a cause named by a changed block.
 8. **Model switch and first turn win** over every rule of 2.1 to 2.3 (2.4's two in-flight facts can
@@ -301,8 +413,47 @@ Anthropic's request shape, and the Anthropic early-breakpoint case (each has han
   usage; the read slack absorbs block rounding. A read between the two is a partial hit.
 - **Inferred causes can be wrong.** `routing_miss` on a hosted API and `evicted` behind one engine
   without events are the best fit, marked inferred; events or diagnostics confirm them.
-- **Lanes need a conversation id.** Without one, one user's conversations share a session, and the
-  first turn of a later conversation with the same system prompt can read as a history edit.
+- **A conversation is known by its opening message, and a lane remembers 64 of them.** A request
+  finds its previous turn by its opening message, per session and model. When it finds none, and its
+  system prompt is the lane's, it is compared with the lane's latest turn:
+  - A request of several messages then reads as `history_edit`, though it may be another
+    conversation's turn. That happens beyond 64 remembered conversations in a session and model
+    (the least recently used is dropped; `PREFIXWISE_LANE_THREADS` raises the limit), sooner when
+    the remembered turns are long (together they hold at most 16,000 blocks, `PREFIXWISE_LANE_BLOCKS`,
+    about 12 MB; the 8 most recent conversations are kept whatever their size), and when a
+    conversation's earlier turns were never seen: a restart of the collector, traffic that began
+    before the proxy, earlier turns sent through another collector.
+  - A second conversation that starts with several messages (few-shot examples, a restored
+    history) reads as a `history_edit` of the first, with or without a session id; one that starts
+    with a single message is a new conversation only in a session that names no conversation.
+  - An agent that trims its history (a sliding window, a summary) adds a remembered conversation
+    with every trimmed turn, since each has a new opening: 64 trimmed turns fill a lane, and other
+    conversations of that session and model are then dropped as above.
+  - Conversations that open with the identical message are treated as one.
+  - In a session that names no conversation, a compaction into a single message, sent with no
+    compaction event, is not reported: it reads as a new conversation. Send the event
+    (`X-Prefixwise-Compaction-Event: 1`) or a session id.
+- **How much a marker covered is an estimate.** After a turn that left nothing in the cache, the
+  choice between `below_min_prefix` and `unknown` rests on the marked blocks' share of the request's
+  bytes. Neither is waste, so the estimate never changes what is counted, only the cause named. A
+  request with a small image among much text (under 16 bytes a token overall) is still estimated.
+- **Judged by its own read means half of its own prompt.** An earlier point of its conversation
+  (2.4) is a hit when at least half of its prompt came from the cache, or all the compared turn
+  left. One that read only a large system prompt is then a hit though its own history was not read;
+  a rewind that read part of what was cached is `unknown`, where main counted the rest as waste.
+- **A new conversation's shared prefix is sized in one case only** (2.2: Anthropic, the same marked
+  block of tools+system in both requests, the previous turn read or wrote something). Elsewhere a new
+  conversation that read less than half of the shorter of the two prompts is a `first_write` with its
+  legitimacy left open, even if the tools and system prompt it shares with the previous conversation
+  were cached and were not read: on OpenAI and other automatic caches that miss is never claimed. In
+  the one case, the marked part is taken to have been cached because the previous turn read or wrote
+  something; if that part was itself below the model's minimum and the write came from a later
+  marker, a `routing_miss` or `ttl_expired` (neither is waste) is named for an entry that never was.
+- **An Anthropic request with no `cache_control` is `breakpoint_misplaced` even when it is a one-shot.**
+  Independent requests that share only a short system prompt (a classifier with a different document
+  each time) are each waste, with the shorter of the two prompts counted as avoidable, though a
+  marker would have cached only the shared part. The rule is older than the new-conversation rule
+  and comes before it.
 - **Not measured at scale yet.** Accuracy is measured on injected causes (120 of 120 on vLLM, LMCache
   and SGLang), against Anthropic's own reasons (32 of 32) and by realised savings, not yet on large
   volumes of real agent traffic.
