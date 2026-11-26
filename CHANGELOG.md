@@ -17,6 +17,11 @@
   - **Each request is compared with the previous one on its own model**, so a small side call on another model in between is not taken for the conversation, and switching back to a model whose cache is intact is a hit.
   - A compaction no longer counts the previous write as left unread (the summary call that read it is not logged).
   - Rows imported by an earlier version keep their verdicts. The import says how many there are; to classify them again, import into a new ledger (`--ledger new.db`).
+- **Prices and model tables.**
+  - **Fable 5.2 and Mythos 5.2 have their own rates** ($8 input, $10 and $16 writes, $0.20 reads, $40 output per million tokens; Anthropic's pricing page, read 2026-11-26). 0.12.7 priced 5.2 at 5.1's rate, 25% high, and said so. Requests recorded then keep that cost, and the report says how many there are.
+  - **An OpenAI dated snapshot id** (`gpt-5.6-terra-2026-10-15`, the id OpenAI answers an alias with) is priced at its alias's rate and named as approximate. It had no cost before.
+  - **A response that reports no usage has no cost.** It was priced at $0.00 and counted as priced. The report now says how many requests reported no usage.
+  - **Minimum cacheable sizes follow Anthropic's table** (read 2026-11-26). Sonnet 4.5, Opus 4.1, Opus 4, Sonnet 4 and the Claude 3 models were treated as 512 tokens; they are 1,024 (2,048 for the Claude 3 Haiku models). A short prompt on them was called `routing_miss` or `retry_replay` and is now `below_min_prefix`, and `--fix auto_breakpoints` no longer places a marker there that could not cache.
 
 ## 0.12.7: 2026-11-26
 
