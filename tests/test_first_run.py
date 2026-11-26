@@ -350,8 +350,13 @@ def test_explain_refuses_what_is_not_a_request(tmp_path):
         out = cli("explain", str(fa), str(fb))
         no_traceback(out, 1, "not a request Prefixwise can read")
         assert "NONE" not in out.stdout
-    ok.write_text(json.dumps({"model": "m", "input": "hi", "prompt": {"id": "pmpt_1"}}))   # a Responses prompt template
-    assert cli("explain", str(ok)).returncode == 0
+    for body in ({"model": "m", "input": "hi", "prompt": {"id": "pmpt_1"}},            # a Responses prompt template
+                 {"model": "m", "instructions": "Be brief.", "prompt": {"id": "pmpt_1"}}):
+        ok.write_text(json.dumps(body))
+        assert cli("explain", str(ok)).returncode == 0, body
+    fa.write_text(json.dumps({"model": "c", "instructions": "s", "prompt": "one"}))          # a text prompt is not read
+    fb.write_text(json.dumps({"model": "c", "instructions": "s", "prompt": "another"}))
+    no_traceback(cli("explain", str(fa), str(fb)), 1, "not a request Prefixwise can read")
 
 
 def test_check_bodies_with_no_request_is_nothing_checked_not_an_error(tmp_path):
@@ -456,3 +461,31 @@ def test_an_import_says_where_its_ledger_is(tmp_path):
     assert "from a gateway log" in out.stdout and "keeps its own ledger" in out.stdout
     assert "prefixwise report --ledger prefixwise-gateway.db --detail" in out.stdout
     assert cli("report", cwd=tmp_path).returncode == 1          # plain `report` reads another file, as the import said
+
+
+# -- help text ---------------------------------------------------------------------------
+
+def test_every_command_and_option_has_help():
+    import argparse
+
+    sub = next(a for a in build_parser()._actions if getattr(a, "choices", None))
+    for name, parser in sub.choices.items():
+        if name == "demo":
+            continue                                  # parses its own flags (prefixwise.demo)
+        assert parser.description, name
+        for action in parser._actions:
+            if isinstance(action, argparse._HelpAction) or action.dest == "agent_command":
+                continue
+            assert action.help, f"{name}: {action.option_strings or action.dest}"
+
+
+def test_environment_variables_in_the_code_are_in_the_docs():
+    import re
+
+    in_code = set()
+    for path in (ROOT / "src" / "prefixwise").glob("*.py"):
+        # every quoted PREFIXWISE_ name, however it is read (environ, getenv, a helper that takes names)
+        in_code |= set(re.findall(r"""["'](PREFIXWISE_[A-Z0-9_]+)["']""", path.read_text()))
+    docs = "".join(p.read_text() for p in [ROOT / "README.md", *sorted((ROOT / "docs").glob("*.md"))])
+    missing = sorted(v for v in in_code if v not in docs)
+    assert not missing, missing
