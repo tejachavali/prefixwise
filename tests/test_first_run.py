@@ -65,13 +65,33 @@ def test_demo_runs_in_process_and_leaves_nothing_behind(tmp_path, monkeypatch, c
 def test_demo_takes_nothing_from_the_shell(tmp_path):
     """A collector, fixes or an engine set in the shell must not reach it: "no network" has to be true,
     and the broken run has to break."""
+    plain = cli("demo", "--pause", "0")
     env = {**ENV, "PREFIXWISE_COLLECTOR": "http://127.0.0.1:9", "PREFIXWISE_FIXES": "optimize",
-           "PREFIXWISE_HMAC_KEY": "k", "PREFIXWISE_ENGINE": "vllm", "PREFIXWISE_LEDGER_PATH": str(tmp_path / "x.db")}
+           "PREFIXWISE_HMAC_KEY": "k", "PREFIXWISE_ENGINE": "vllm", "PREFIXWISE_LEDGER_PATH": str(tmp_path / "x.db"),
+           "PREFIXWISE_PRICES": str(tmp_path / "missing.json"),
+           # urllib would send even 127.0.0.1 through a proxy set here: the demo's prompts must not go there
+           "http_proxy": "http://127.0.0.1:9", "HTTP_PROXY": "http://127.0.0.1:9", "no_proxy": "", "NO_PROXY": ""}
     out = cli("demo", "--pause", "0", env=env)
     assert out.returncode == 0, out.stderr
     before = out.stdout.split("act 5: the fix")[0]
     assert before.count("tool_reserialize") >= 2 and "volatile_system" in before and "history_edit" in before
     assert not (tmp_path / "x.db").exists()
+    strip = lambda text: [ln for ln in text.splitlines() if "turn " in ln or "$" in ln]  # noqa: E731
+    assert strip(out.stdout) == strip(plain.stdout)      # same turns, same dollars: nothing from the shell
+    rates = tmp_path / "rates.json"                      # ... a valid price file included
+    rates.write_text(json.dumps({"models": {"claude-haiku-5-5": {"input": 9000, "output": 9000, "cache_read": 9000,
+                                                                 "cache_write_5m": 9000, "cache_write_1h": 9000}}}))
+    priced = cli("demo", "--pause", "0", env={**ENV, "PREFIXWISE_PRICES": str(rates)})
+    assert priced.returncode == 0 and strip(priced.stdout) == strip(plain.stdout)
+
+
+def test_demo_sums_agree_with_what_it_prints():
+    import re
+
+    out = cli("demo", "--pause", "0").stdout
+    before, after = map(float, re.search(r"cost of the run\s+\$([\d.]+)\s+\$([\d.]+)", out).groups())
+    saved, called = map(float, re.search(r"saved \$([\d.]+), .*called \$([\d.]+) avoidable", out).groups())
+    assert abs((before - after) - saved) < 5e-6 and abs(saved - called) < 5e-6
 
 
 def test_demo_keep_never_overwrites_a_ledger(tmp_path):
@@ -246,6 +266,20 @@ def test_export_errors_are_one_line(ledger, tmp_path):
     assert ok.returncode == 0 and len(ok.stdout.splitlines()) == 1
 
 
+def test_since_on_an_empty_ledger_and_on_one_with_only_failures(tmp_path):
+    empty = str(tmp_path / "empty.db")
+    assert cli("run", "--mock", "--ledger", empty, "--", sys.executable, "-c", "pass").returncode == 0
+    for extra in ((), ("--share",)):
+        out = cli("report", "--ledger", empty, "--since", "1d", *extra)
+        assert out.returncode == 0 and "Traceback" not in out.stderr, out.stderr
+        assert "no requests recorded yet" in out.stdout.lower()
+    failed = str(tmp_path / "failed.db")
+    cli("run", "--ledger", failed, "--", sys.executable, "-c", POST, "/chat/completions",
+        env={**ENV, "OPENAI_BASE_URL": "http://127.0.0.1:9/v1", "ANTHROPIC_BASE_URL": "http://127.0.0.1:9"})
+    out = cli("report", "--ledger", failed, "--since", "0s")
+    assert out.returncode == 0 and "No requests since 0s" in out.stdout and "1 older request:" in out.stdout
+
+
 def test_a_filter_that_empties_the_report_says_so(ledger):
     assert cli("report", "--ledger", ledger).stdout.startswith("1 request")
     out = cli("report", "--ledger", ledger, "--since", "0s")
@@ -310,6 +344,14 @@ def test_explain_refuses_what_is_not_a_request(tmp_path):
         out = cli("explain", str(fa), str(fb))
         no_traceback(out, 1, "not a request Prefixwise can read")
         assert "NONE" not in out.stdout
+        # ... also beside a field that is read: a Gemini body with tools, a prompt with a system field
+        fa.write_text(json.dumps({**a, "tools": tools, "system": "s"}))
+        fb.write_text(json.dumps({**b, "tools": tools, "system": "s"}))
+        out = cli("explain", str(fa), str(fb))
+        no_traceback(out, 1, "not a request Prefixwise can read")
+        assert "NONE" not in out.stdout
+    ok.write_text(json.dumps({"model": "m", "input": "hi", "prompt": {"id": "pmpt_1"}}))   # a Responses prompt template
+    assert cli("explain", str(ok)).returncode == 0
 
 
 def test_check_bodies_with_no_request_is_nothing_checked_not_an_error(tmp_path):
@@ -377,14 +419,19 @@ def test_client_url_is_one_a_client_can_use():
 
 
 def test_serve_prints_what_a_client_sets(tmp_path):
+    import threading
+    import time
+
     proc = subprocess.Popen([sys.executable, "-m", "prefixwise", "serve", "--mock", "--port", "0", "--ledger",
                              str(tmp_path / "l.db")], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=ENV)
+    lines: list = []
+    threading.Thread(target=lambda: lines.extend(iter(proc.stdout.readline, "")), daemon=True).start()
     try:
-        seen = ""
-        for line in proc.stdout:
-            seen += line
-            if "clients:" in line:
-                break
+        deadline = time.monotonic() + 30          # never wait for ever on a line that is not printed
+        while time.monotonic() < deadline and not any("GET  /ledger" in ln for ln in lines):
+            time.sleep(0.05)
+        time.sleep(0.3)                           # the lines after it are printed in the same breath
+        seen = "".join(lines)
         assert "OPENAI_BASE_URL=http://127.0.0.1:" in seen and "/v1  ANTHROPIC_BASE_URL=http://127.0.0.1:" in seen
         assert "GET /api/v1" in seen
     finally:

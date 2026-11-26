@@ -325,7 +325,7 @@ def cmd_report(args) -> int:
         return 0
     if since is not None and not (found["summary"]["requests"] or found["summary"]["requests_failed"]):
         everything = findings(led, prices=table)["summary"]
-        older = everything["requests"] + everything["requests_failed"]
+        older = (everything["requests"] or 0) + (everything["requests_failed"] or 0)  # both None on an empty ledger
         if older:  # the filter emptied it: "nothing recorded yet" would be wrong
             print(f"No requests since {args.since}. The ledger holds {older:,} older "
                   f"request{'' if older == 1 else 's'}: widen or drop --since to see them.")

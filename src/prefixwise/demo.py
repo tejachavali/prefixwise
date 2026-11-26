@@ -60,6 +60,17 @@ def pause(args, prompt: str) -> None:
         pass
 
 
+# The agent talks to the demo's own proxy on this machine: never through an http_proxy set in the
+# shell (urllib would send even 127.0.0.1 there, prompts and all).
+_DIRECT = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
+def _own_env() -> dict:
+    """The environment for the `prefixwise report` the demo runs on its own ledgers: no PREFIXWISE_*
+    setting of the shell (a price file, a ledger path) changes what it prints."""
+    return {k: v for k, v in os.environ.items() if not k.startswith("PREFIXWISE_")}
+
+
 class DemoError(Exception):
     """A request failed: the demo stops with the provider's own words, not a traceback."""
 
@@ -151,7 +162,7 @@ class Agent:
         )
         req = urllib.request.Request(url, json.dumps(body).encode(), headers)
         try:
-            with urllib.request.urlopen(req, timeout=120) as resp:
+            with _DIRECT.open(req, timeout=120) as resp:
                 resp.read()
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", "replace")[:300]
@@ -273,6 +284,7 @@ def session_turns(ledger: str, session: str) -> list[dict]:
             "--json",
         ],
         capture_output=True,
+        env=_own_env(),
         text=True,
         check=False,
     )
@@ -333,6 +345,7 @@ def start_proxy(ledger: str, provider: str, live: bool, optimize: bool):
         kv_events="",
         otel="",
         collector_url="",
+        prices="",
     )
     proxy.api_key = None  # the agent's own key passes through; the demo never holds one
     server = PrefixwiseHTTPServer(("127.0.0.1", 0), make_handler(proxy))
@@ -380,7 +393,7 @@ def main(argv: list[str] | None = None, prog: str = "prefixwise demo") -> int:
         and sys.stdout.isatty()
     )
     if not 0 <= args.pause <= 3600:  # also refuses nan
-        ap.error("--pause takes a number of seconds, 0 or more")
+        ap.error("--pause takes a number of seconds from 0 to 3600")
 
     provider = args.provider or (
         "anthropic"
@@ -460,6 +473,7 @@ def _play(args, provider: str, key: str, workdir: str, sessions: tuple) -> None:
     out = subprocess.run(
         [sys.executable, "-m", "prefixwise", "report", "--ledger", before],
         capture_output=True,
+        env=_own_env(),
         text=True,
         check=False,
     )

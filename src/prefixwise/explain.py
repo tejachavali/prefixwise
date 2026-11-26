@@ -162,8 +162,13 @@ def _turn_from_record(rec: dict) -> Turn:
     if not isinstance(rec, dict):
         raise ValueError("each record must be a JSON object")
     body = rec.get("request") or rec.get("body")
-    if not isinstance(body if body is not None else rec, dict) or not any(
-            k in (body if body is not None else rec) for k in _PROMPT_KEYS):
+    sent = body if body is not None else rec
+    readable = isinstance(sent, dict) and any(k in sent for k in _PROMPT_KEYS)
+    # ... and not one whose prompt is in a field that is not read, even beside one that is (a Gemini
+    # body with tools, a completions-style prompt with a system field).
+    unread = isinstance(sent, dict) and ("contents" in sent or ("prompt" in sent and not ("messages" in sent
+                                                                                       or "input" in sent)))
+    if not readable or unread:
         raise ValueError('not a request Prefixwise can read: expected the body of an Anthropic Messages, OpenAI Chat '
                          'Completions or Responses request (an object with "messages", "input", "instructions", '
                          '"system" or "tools"), or {"request": <body>, "usage": ...}')
