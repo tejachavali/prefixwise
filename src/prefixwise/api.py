@@ -17,6 +17,10 @@ the proxy. Responses are JSON; errors are {"error": {"message": ...}} with a 4xx
     POST /api/v1/tasks                         {"task_id", "success"}: record an outcome
     POST /api/v1/ingest                        {"records": [...]}: turn records from an edge (prefixwise.transport)
     POST /api/v1/explain                       {"previous", "current"}: why would it miss?
+    POST /api/v1/observe                       a gateway event, or {"events": [...]}: request body, response
+                                               (or a stream's final usage), start/end, headers, status; 202,
+                                               recorded off the request thread in turn order (prefixwise.observe).
+                                               Takes Authorization: Bearer $PREFIXWISE_OBSERVE_TOKEN too.
 
 Common query parameters: `metrics=a,b` (default: a standard set), `since`/`until`
 (unix seconds, or a duration back from now such as 24h or 7d), and equality
@@ -171,6 +175,8 @@ def post(proxy, path: str, body) -> tuple[int, dict]:
             return 200, collector.ingest_many(body.get("records"))
         except RecordError as exc:
             return 400, _err(str(exc))
+    if sub == "/observe":  # also on an edge: the records it makes go to the edge's collector
+        return proxy.observer.post(body)
     if sub == "/check/scenario":  # prefixwise check: name the scenario requests without a session id join
         if not getattr(proxy, "check_mode", False):
             return 404, _err("scenarios are named only under prefixwise check")

@@ -186,3 +186,120 @@ def test_the_proxy_records_what_is_waiting_when_it_closes(tmp_path):
     assert proxy.observer.post({"events": [_event(e) for e in traffic]})[0] == 202
     proxy.close()
     assert len(_rows(str(tmp_path / "o.db"))) == len(traffic)
+
+
+# -- over HTTP: POST /api/v1/observe ----------------------------------------------------------
+
+def _serve(proxy):
+    from prefixwise.proxy import PrefixwiseHTTPServer, make_handler
+    srv = PrefixwiseHTTPServer(("127.0.0.1", 0), make_handler(proxy))
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv, f"http://127.0.0.1:{srv.server_address[1]}"
+
+
+def _post(url, payload, headers=None, raw=None):
+    import urllib.error
+    import urllib.request
+    data = raw if raw is not None else json.dumps(payload).encode()
+    req = urllib.request.Request(url + "/api/v1/observe", data=data, method="POST",
+                                 headers={"Content-Type": "application/json", **(headers or {})})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return r.status, json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        return e.code, json.loads(e.read())
+
+
+def test_posting_over_http_gives_the_imported_verdicts(tmp_path):
+    traffic = _traffic(3, n_turns=10)
+    proxy = _proxy(str(tmp_path / "o.db"))
+    proxy.observer.hold = HOLD
+    srv, url = _serve(proxy)
+    try:
+        posts = [_event(e) for e in traffic]
+        random.Random(3).shuffle(posts)
+        for p in posts:
+            assert _post(url, p) == (202, {"accepted": 1})
+        assert proxy.observer.flush(10)
+        import urllib.request
+        with urllib.request.urlopen(url + "/health", timeout=5) as r:
+            health = json.loads(r.read())
+        assert health["observe"]["recorded"] == len(traffic) and health["observe"]["pending"] == 0
+    finally:
+        srv.shutdown()
+        proxy.close()
+    assert _rows(str(tmp_path / "o.db")) == _imported(traffic, tmp_path)
+
+
+def test_the_token_is_checked_when_set():
+    import urllib.error
+    import urllib.request
+    ev = _event(_traffic(0, n_turns=1)[0])
+    proxy = _proxy(":memory:")
+    proxy.observer.hold = 0
+    srv, url = _serve(proxy)
+    try:
+        assert _post(url, ev)[0] == 202  # no token set: open, like the rest of the API
+        proxy.observe_token = "gateway-secret"
+        assert _post(url, ev)[0] == 401
+        assert _post(url, ev, {"Authorization": "Bearer wrong"})[0] == 401
+        assert _post(url, ev, {"Authorization": "Bearer gateway-secret"})[0] == 202
+        assert _post(url, ev, {"X-Prefixwise-Token": "gateway-secret"})[0] == 202
+        proxy.auth_token = "admin-secret"  # the proxy's own token is accepted here too
+        assert _post(url, ev, {"Authorization": "Bearer admin-secret"})[0] == 202
+        assert _post(url, ev, {"Authorization": "Bearer gateway-secret"})[0] == 202
+        assert _post(url, ev)[0] == 401
+        # the observe token opens only /observe, not the rest of the API
+        req = urllib.request.Request(url + "/api/v1/summary", headers={"X-Prefixwise-Token": "gateway-secret"})
+        try:
+            urllib.request.urlopen(req, timeout=5)
+            raise AssertionError("the observe token opened /api/v1/summary")
+        except urllib.error.HTTPError as e:
+            assert e.code == 401
+        assert proxy.observer.flush(5) and proxy.observer.snapshot()["recorded"] == 5
+    finally:
+        srv.shutdown()
+        proxy.close()
+
+
+def test_malformed_and_oversized_bodies_are_refused_with_a_reason(monkeypatch):
+    from prefixwise import proxy as proxy_mod
+    proxy = _proxy(":memory:")
+    proxy.observer.hold = 0
+    srv, url = _serve(proxy)
+    try:
+        code, reply = _post(url, None, raw=b"{not json")
+        assert code == 400 and "invalid JSON" in reply["error"]["message"]
+        code, reply = _post(url, [1, 2])
+        assert code == 400 and "object" in reply["error"]["message"]
+        code, reply = _post(url, {"events": [{"request": {}, "response": {}}]})
+        assert code == 400 and "start time" in reply["rejected"][0]["reason"]
+        monkeypatch.setattr(proxy_mod, "OBSERVE_MAX_BYTES", 100)
+        code, reply = _post(url, _event(_traffic(0, n_turns=1)[0]))
+        assert code == 413 and "100 bytes" in reply["error"]["message"]
+        assert proxy.observer.snapshot()["accepted"] == 0
+    finally:
+        srv.shutdown()
+        proxy.close()
+
+
+def test_an_edge_observes_and_its_collector_records(tmp_path):
+    """An edge (prefixwise serve --collector) serves /observe too: its records go to the collector."""
+    traffic = _traffic(6, n_turns=6)
+    coll = PrefixwiseProxy(ledger_path=str(tmp_path / "c.db"), mock=True, collector_url="")
+    coll.collect_only = True
+    csrv, curl = _serve(coll)
+    edge = PrefixwiseProxy(mock=True, collector_url=curl, engine="", kv_events="", fixes=(), otel="")
+    edge.observer.hold = 0
+    esrv, eurl = _serve(edge)
+    try:
+        assert _post(eurl, {"events": [_event(e) for e in traffic]})[0] == 202
+        assert edge.observer.flush(10)
+        edge.close()  # sends what the edge still holds
+        imported = _imported(traffic, tmp_path)
+        # The same verdicts; the collector stamps a row when the record arrives (recorded_at).
+        assert [r[:7] for r in _rows(str(tmp_path / "c.db"))] == [r[:7] for r in imported]
+    finally:
+        esrv.shutdown()
+        csrv.shutdown()
+        coll.close()
