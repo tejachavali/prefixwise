@@ -145,6 +145,54 @@ def _provider(entry: dict, body: dict, response: dict) -> str:
     return "openai"
 
 
+class EntryError(ValueError):
+    """A logged or posted event that cannot be used; the message says why."""
+
+
+def parse_entry(raw, where: str = "") -> dict:
+    """One logged (or posted) event as an entry: start, end, first, provider, body, response,
+    headers, status, timed, line. Raises EntryError with the reason when it cannot be used.
+    Shared by `prefixwise import gateway` (read_log) and POST /api/v1/observe."""
+    if not isinstance(raw, dict):
+        raise EntryError("an event must be a JSON object")
+    body = _json(_get(raw, REQUEST_KEYS))
+    if not isinstance(body, dict):
+        raise EntryError("no request body: expected an object (or JSON text) under one of "
+                         + ", ".join(REQUEST_KEYS))
+    response = _json(_get(raw, RESPONSE_KEYS))
+    if not isinstance(response, dict):
+        raise EntryError("no response: expected an object (or JSON text) under one of "
+                         + ", ".join(RESPONSE_KEYS))
+    start = parse_time(_get(raw, START_KEYS))
+    if start is None:
+        raise EntryError("no start time: expected unix seconds/ms or ISO 8601 under one of "
+                         + ", ".join(START_KEYS))
+    end = parse_time(_get(raw, END_KEYS))
+    if end is None:
+        ms = _get(raw, LATENCY_MS_KEYS)
+        s = _get(raw, LATENCY_S_KEYS)
+        end = start + (float(ms) / 1000.0 if isinstance(ms, (int, float)) and not isinstance(ms, bool) else
+                       float(s) if isinstance(s, (int, float)) and not isinstance(s, bool) else 0.0)
+    headers = _get(raw, HEADER_KEYS)
+    status = _status(_get(raw, STATUS_KEYS))
+    ttft = _get(raw, TTFT_MS_KEYS)
+    first = parse_time(_get(raw, FIRST_BYTE_KEYS))
+    if first is None and isinstance(ttft, (int, float)) and not isinstance(ttft, bool):
+        first = start + float(ttft) / 1000.0
+    timed = _get(raw, END_KEYS + LATENCY_MS_KEYS + LATENCY_S_KEYS) is not None
+    return {"start": start, "end": max(start, end), "body": body, "response": response,
+            "provider": _provider(raw, body, response),
+            "headers": {str(k).lower(): str(v) for k, v in headers.items()}
+            if isinstance(headers, dict) else {},
+            "status": status,
+            # When the answer began: the cache entry existed from then on.
+            "first": min(max(first, start), max(start, end)) if first is not None else max(start, end),
+            # A log without durations says nothing about overlap: its requests are
+            # replayed one after another, never as in flight together.
+            "timed": timed,
+            "line": where}
+
+
 def read_log(path: str | os.PathLike) -> tuple[list[dict], int]:
     """(entries, lines that could not be used). Each entry: start, end, provider, body, response,
     headers, status, line. A directory reads every *.jsonl / *.json file in it, in name order."""
@@ -158,40 +206,9 @@ def read_log(path: str | os.PathLike) -> tuple[list[dict], int]:
                 if not line:
                     continue
                 try:
-                    raw = json.loads(line)
-                except ValueError:
+                    entries.append(parse_entry(json.loads(line), f"{f.name}:{n}"))
+                except ValueError:  # not JSON (json's own ValueError), or EntryError
                     bad += 1
-                    continue
-                body = _json(_get(raw, REQUEST_KEYS)) if isinstance(raw, dict) else None
-                response = _json(_get(raw, RESPONSE_KEYS)) if isinstance(raw, dict) else None
-                start = parse_time(_get(raw, START_KEYS)) if isinstance(raw, dict) else None
-                if not isinstance(body, dict) or not isinstance(response, dict) or start is None:
-                    bad += 1
-                    continue
-                end = parse_time(_get(raw, END_KEYS))
-                if end is None:
-                    ms = _get(raw, LATENCY_MS_KEYS)
-                    s = _get(raw, LATENCY_S_KEYS)
-                    end = start + (float(ms) / 1000.0 if isinstance(ms, (int, float)) else
-                                   float(s) if isinstance(s, (int, float)) else 0.0)
-                headers = _get(raw, HEADER_KEYS)
-                status = _status(_get(raw, STATUS_KEYS))
-                ttft = _get(raw, TTFT_MS_KEYS)
-                first = parse_time(_get(raw, FIRST_BYTE_KEYS))
-                if first is None and isinstance(ttft, (int, float)) and not isinstance(ttft, bool):
-                    first = start + float(ttft) / 1000.0
-                timed = _get(raw, END_KEYS + LATENCY_MS_KEYS + LATENCY_S_KEYS) is not None
-                entries.append({"start": start, "end": max(start, end), "body": body, "response": response,
-                                "provider": _provider(raw, body, response),
-                                "headers": {str(k).lower(): str(v) for k, v in headers.items()}
-                                if isinstance(headers, dict) else {},
-                                "status": status,
-                                # When the answer began: the cache entry existed from then on.
-                                "first": min(max(first, start), max(start, end)) if first is not None else max(start, end),
-                                # A log without durations says nothing about overlap: its requests are
-                                # replayed one after another, never as in flight together.
-                                "timed": timed,
-                                "line": f"{f.name}:{n}"})
     return entries, bad
 
 

@@ -329,7 +329,9 @@ class RemoteCollector:
             # opening, or a compaction; a different one is a new conversation (no parent).
             return latest_id if compaction or not system or system == latest_system else None
 
-    def ingest(self, rec: TurnRecord) -> tuple[dict, LedgerEntry]:
+    def ingest(self, rec: TurnRecord, at: float | None = None) -> tuple[dict, LedgerEntry]:
+        """at: accepted for the collector's interface and unused: the collector writes the row
+        when the record arrives, and classifies by the record's own sent_at and done_at."""
         from .collector import _identity
 
         opening, system = _identity(rec.blocks)
@@ -357,7 +359,7 @@ class RemoteCollector:
                 "cost": None, "avoidable_cost": None, "evidence": None,
                 "queued": queued, "collector": self.sender.url}, entry
 
-    def ingest_failure(self, rec: TurnRecord) -> LedgerEntry:
+    def ingest_failure(self, rec: TurnRecord, at: float | None = None) -> LedgerEntry:
         entry = LedgerEntry(session_id=rec.session_id, agent_id=rec.agent_id, provider=rec.provider,
                             model=rec.model, cause=None, prompt_tokens=0, cached_tokens=0, avoidable_tokens=0,
                             avoidable_cost=None, task_id=rec.task_id, request_id=rec.request_id,

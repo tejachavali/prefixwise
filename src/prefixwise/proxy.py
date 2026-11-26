@@ -919,11 +919,16 @@ class PrefixwiseProxy:
     # -- shared request path ---------------------------------------------------------
 
     def prepare(self, provider: str, body: dict, headers: dict[str, str] | None = None,
-                api: str = "chat") -> dict:
+                api: str = "chat", at: float | None = None) -> dict:
         """Read identity, strip Prefixwise fields, chain diagnostics.
 
         Returns a context dict for forward/finalize. body itself is not
         mutated; ctx["forward_body"] is what the upstream receives.
+
+        at: when the request was sent, for a request that happened earlier than now (an
+        observed gateway event, POST /api/v1/observe). The TTL and in-flight checks then use it,
+        and the caller sets ctx["span_end"] before finalize; the row is recorded at that time.
+        Default: now (the live proxy).
         """
         headers = {k.lower(): v for k, v in (headers or {}).items()}
         for h in ("x-prefixwise-session-id", "x-prefixwise-agent-id", "x-prefixwise-task-id"):
@@ -1062,7 +1067,7 @@ class PrefixwiseProxy:
         facts = body_facts(provider, forward_body, model=str(body.get("model", "")), credential=credential)
         facts.session_unprotected = unprotected
         facts.no_prefix_cache = self.no_prefix_cache and self.engine_for(provider) == "sglang"
-        sent = time.time()
+        sent = time.time() if at is None else at
         unmarked = None
         # Anthropic's own cache only: a self-hosted engine caches prefixes by itself and may refuse the
         # field (and the in-process middleware has no resend to fall back on).
@@ -1105,7 +1110,7 @@ class PrefixwiseProxy:
                                                   "id" if seen[4] == facts.prefix_key_masked_id else "mixed")
         return {
             "provider": provider, "api": api, "body": body, "headers": headers,
-            "facts": facts, "sent_at": sent,
+            "facts": facts, "sent_at": sent, "event_at": at,
             "forward_body": forward_body, "session_id": session_id,
             "upstream_session_id": upstream_session_id, "engine_token": engine_token,
             "injected": injected,
@@ -1148,7 +1153,8 @@ class PrefixwiseProxy:
             verdict = self.engine_events.request_done(ctx["engine_token"], cached if reported else None,
                                                       prompt_tokens)
         rec = self._record(ctx, status, fps, usage=usage, payload=payload, engine_verdict=verdict)
-        result, entry = self.collector.ingest(rec)
+        at = self._event_at(ctx)  # only for an observed event: live calls stay ingest(rec)
+        result, entry = self.collector.ingest(rec, at=at) if at is not None else self.collector.ingest(rec)
         with self._lock:
             self._release_prefix(ctx, done_session=ctx["session_id"])
         result["response"] = payload
@@ -1208,6 +1214,14 @@ class PrefixwiseProxy:
                     "recorded": False, "response": payload}, None
 
     @staticmethod
+    def _event_at(ctx: dict) -> float | None:
+        """The row's time for a request prepared with an explicit `at` (an observed event): when
+        it ended. None (now) for live traffic."""
+        if ctx.get("event_at") is None:
+            return None
+        return ctx.get("span_end") or ctx["event_at"]
+
+    @staticmethod
     def _overhead_ms(ctx: dict) -> float | None:
         """Prefixwise's own time: everything since the request arrived, minus upstream."""
         if "t0" not in ctx or ctx.get("upstream_ms") is None:
@@ -1227,11 +1241,13 @@ class PrefixwiseProxy:
         # Writes happen only at breakpoints: other sessions can reuse this request's entry for
         # tools+system only if it wrote one ending there.
         inside = [b for b in facts.breakpoints if b < facts.sys_end]
+        # when the response completed: an observed event's own end, not when it was posted
+        done_at = ctx.get("span_end") or time.time()
         if done_session is not None and facts.cache_write > 0 and inside:
-            self.prefix_done[facts.prefix_key] = (time.time(), done_session, max(inside))
+            self.prefix_done[facts.prefix_key] = (done_at, done_session, max(inside))
         if done_session is not None and facts.prefix_key_masked:
             self.prefix_seen[facts.prefix_key_masked] = (
-                time.time(), done_session, facts.prefix_key_canonical, facts.prefix_key_masked_time,
+                done_at, done_session, facts.prefix_key_canonical, facts.prefix_key_masked_time,
                 facts.prefix_key_masked_id, bool(facts.cache_write > 0 and inside))
 
     def response_started(self, ctx: dict) -> None:
@@ -1257,7 +1273,9 @@ class PrefixwiseProxy:
             self._release_prefix(ctx)
         entry = None
         try:
-            entry = self.collector.ingest_failure(rec)
+            at = self._event_at(ctx)
+            entry = (self.collector.ingest_failure(rec, at=at) if at is not None
+                     else self.collector.ingest_failure(rec))
         except Exception as exc:
             print(f"prefixwise: failure for {ctx['request_id']} not recorded: {type(exc).__name__}",
                   file=sys.stderr, flush=True)
