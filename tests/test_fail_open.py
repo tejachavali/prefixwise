@@ -107,6 +107,7 @@ class CuttingUpstream:
 
     def __init__(self):
         self.mode = None
+        self.first = FIRST
         outer = self
 
         class H(BaseHTTPRequestHandler):
@@ -121,7 +122,7 @@ class CuttingUpstream:
                 self.send_header("Content-Type", "text/event-stream")
                 self.send_header("Transfer-Encoding", "chunked")
                 self.end_headers()
-                self.wfile.write(b"%x\r\n%s\r\n" % (len(FIRST), FIRST))
+                self.wfile.write(b"%x\r\n%s\r\n" % (len(outer.first), outer.first))
                 self.wfile.flush()
                 time.sleep(0.2)
                 if outer.mode == "dies inside a chunk":
@@ -217,11 +218,225 @@ def test_canonical_tools_keeps_the_clients_marker_where_it_caches_the_whole_list
     assert tools[2]["cache_control"] == MARK and "cache_control" not in tools[0]   # the client's body is not touched
 
 
-def test_canonical_tools_leaves_a_list_with_a_marker_in_the_middle_alone():
-    """Such a marker covers the tools before it. Sorting would change which ones."""
-    tools = [_tool("web_search"), _tool("read_file", cache_control=MARK), _tool("bash")]
-    assert _fixed(tools) == ([("web_search", None), ("read_file", MARK), ("bash", None)], [])
+def test_canonical_tools_sorts_within_what_each_marker_covers():
+    """A marker in the middle covers the tools before it. They are sorted among themselves and the
+    marker stays at their end, so it covers the same tools whatever order the client listed them in."""
+    tools = [_tool("web_search"), _tool("read_file", cache_control=MARK), _tool("zip"), _tool("bash")]
+    want = [("read_file", None), ("web_search", MARK), ("bash", None), ("zip", None)]
+    assert _fixed(tools) == (want, ["canonical_tools"])
+    again = [_tool("read_file"), _tool("web_search", cache_control=MARK), _tool("bash"), _tool("zip")]
+    assert _fixed(again)[0] == want
     assert _fixed([_tool("b"), _tool("a")]) == ([("a", None), ("b", None)], ["canonical_tools"])   # no marker: as before
+    # the marker moving between turns no longer flips the fix on and off: every turn is sorted
+    last = [_tool("web_search"), _tool("read_file"), _tool("zip"), _tool("bash", cache_control=MARK)]
+    assert [n for n, _ in _fixed(last)[0]] == ["bash", "read_file", "web_search", "zip"]
+
+
+def test_canonical_tools_keeps_a_marker_inside_function_where_it_was():
+    """LiteLLM also reads a marker written inside an OpenAI-shaped tool's `function`."""
+    def fn(name, mark=False):
+        return {"type": "function", "function": {"name": name, "parameters": {"type": "object"},
+                                                 **({"cache_control": MARK} if mark else {})}}
+
+    def sent(tools):
+        out, _ = apply_fixes({"model": "m", "tools": tools, "messages": []}, ("canonical_tools",))
+        return json.dumps(out["tools"])
+    one, two = sent([fn("web"), fn("read"), fn("bash", mark=True)]), sent([fn("bash"), fn("web"), fn("read", mark=True)])
+    assert one == two
+    tools = json.loads(one)
+    assert [t["function"]["name"] for t in tools] == ["bash", "read", "web"]
+    assert [("cache_control" in t["function"], "cache_control" in t) for t in tools] == [(False, False)] * 2 + [(True, False)]
+
+
+def stream_rows(lines, body=None, content_type=None, path="/v1/chat/completions"):
+    """Relay one scripted stream through a proxy; (what the client got, the ledger rows)."""
+    up = FakeUpstream(stream_lines=lines)
+    proxy, server, port = run_proxy(upstream_url=up.url)
+    try:
+        raw = raw_post(port, path, json.dumps(body or {**BODY, "stream": True}).encode())
+        time.sleep(0.3)
+        return raw.partition(b"\r\n\r\n")[2], rows(proxy)
+    finally:
+        server.shutdown(); up.server.shutdown()
+
+
+CONTENT = b'data: {"id":"c1","model":"m","choices":[{"index":0,"delta":{"content":"hi"}}]}\n\n'
+FINISH = b'data: {"id":"c1","model":"m","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n'
+DONE = b"data: [DONE]\n\n"
+
+
+def test_an_event_of_an_unexpected_shape_is_relayed_not_fatal():
+    """A chunk the accumulator could not read used to end the relay. The client gets every line; the
+    turn is not classified."""
+    odd = b'data: {"id":"c1","choices":1}\n\n'
+    got, recorded = stream_rows([CONTENT, odd, CONTENT, FINISH, DONE])
+    assert got.count(b"data: ") == 5 and got.rstrip().endswith(b"[DONE]")
+    assert [r[:2] for r in recorded] == [(200, None)]            # `choices` that is not a list is simply not read
+    weird = b'data: {"type":"message_start","message":"oops"}\n\n'
+    stop = b'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}\n\n'
+    got, recorded = stream_rows([weird, stop, b'data: {"type":"message_stop"}\n\n'], path="/v1/messages",
+                                body={"model": "claude-opus-5-5", "max_tokens": 9, "stream": True,
+                                      "messages": [{"role": "user", "content": "hi"}]})
+    assert got.count(b"data: ") == 3 and len(recorded) == 1
+
+
+def test_an_error_event_mid_stream_is_a_failure_with_its_type():
+    openrouter = (b'data: {"id":"c1","error":{"code":"server_error","message":"x"},'
+                  b'"choices":[{"index":0,"delta":{},"finish_reason":"error"}]}\n\n')
+    assert stream_rows([CONTENT, openrouter, DONE])[1] == [(200, "server_error", None)]
+    overloaded = b'event: error\ndata: {"type":"error","error":{"type":"overloaded_error","message":"x"}}\n\n'
+    start = b'data: {"type":"message_start","message":{"id":"msg_1","usage":{"input_tokens":5}}}\n\n'
+    got = stream_rows([start, overloaded], path="/v1/messages",
+                      body={"model": "claude-opus-5-5", "max_tokens": 9, "stream": True,
+                            "messages": [{"role": "user", "content": "hi"}]})[1]
+    assert got == [(200, "overloaded_error", None)]
+
+
+def test_usage_on_every_chunk_does_not_hide_a_cut():
+    """vLLM and SGLang can report usage on each chunk: that says nothing about the end."""
+    with_usage = b'data: {"id":"c1","choices":[{"index":0,"delta":{"content":"hi"}}],"usage":{"prompt_tokens":5,"completion_tokens":1}}\n\n'
+    assert stream_rows([with_usage, with_usage])[1] == [(200, "upstream_dropped", None)]
+    assert [r[:2] for r in stream_rows([with_usage, FINISH])[1]] == [(200, None)]
+
+
+def test_a_json_body_answering_a_stream_request_is_a_response():
+    class JsonUpstream(FakeUpstream):
+        pass
+    up = FakeUpstream(payload=OPENAI_OK)   # answers application/json whatever was asked
+    proxy, server, port = run_proxy(upstream_url=up.url)
+    try:
+        raw = raw_post(port, "/v1/chat/completions", json.dumps({**BODY, "stream": True}).encode())
+        head, _, body = raw.partition(b"\r\n\r\n")
+        assert b"application/json" in head and json.loads(body) == OPENAI_OK
+        time.sleep(0.3)
+        assert [r[:2] for r in rows(proxy)] == [(200, None)] and rows(proxy, "prompt_tokens")[0][0] == 2000
+    finally:
+        server.shutdown(); up.server.shutdown()
+
+
+def test_a_complete_answer_then_an_abrupt_close_is_still_a_response():
+    up = CuttingUpstream()
+    up.mode = "connection reset"
+    up.first = FINISH        # the model finished, then the connection was reset before [DONE]
+    proxy, server, port = run_proxy(upstream_url=up.url)
+    try:
+        raw_post(port, "/v1/chat/completions", json.dumps({**BODY, "stream": True}).encode())
+        time.sleep(0.3)
+        assert [r[:2] for r in rows(proxy)] == [(200, None)]
+    finally:
+        server.shutdown(); up.server.shutdown()
+
+
+class BrokenUpstream:
+    """Answers every request with `raw` bytes, then closes."""
+
+    def __init__(self, raw: bytes):
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_POST(self):
+                self.rfile.read(int(self.headers["Content-Length"]))
+                self.wfile.write(raw)
+                self.wfile.flush()
+                self.connection.close()
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.server.daemon_threads = True
+        self.url = f"http://127.0.0.1:{start(self.server)}"
+
+
+@pytest.mark.parametrize("raw", [
+    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 500\r\n\r\n" + b'{"id": "chatcmpl-1", ',
+    b"this is not HTTP\r\n\r\n"])
+@pytest.mark.parametrize("stream", [False, True])
+def test_an_upstream_that_breaks_off_is_a_502_with_a_row(raw, stream):
+    up = BrokenUpstream(raw)
+    proxy, server, port = run_proxy(upstream_url=up.url)
+    try:
+        if stream and raw.startswith(b"HTTP"):   # headers arrived, so the relay began: the cut is in the row
+            got = raw_post(port, "/v1/chat/completions", json.dumps({**BODY, "stream": True}).encode())
+            assert b"internal error" not in got
+            time.sleep(0.3)
+            assert rows(proxy) == [(200, "upstream_dropped", None)]
+        else:
+            status, resp, _ = post(port, "/v1/chat/completions", {**BODY, "stream": stream})
+            assert status == 502 and resp["error"]["type"] == "prefixwise_proxy_error"
+            assert len(rows(proxy)) == 1
+    finally:
+        server.shutdown(); up.server.shutdown()
+
+
+def test_ids_no_store_can_hold_do_not_cost_the_row():
+    up = FakeUpstream(payload=OPENAI_OK)
+    proxy, server, port = run_proxy(upstream_url=up.url)
+    try:
+        body = json.dumps(BODY).replace('"s1"', '"s\\ud83d"').replace('"a1"', '"a\\ud83d"').encode()
+        assert post(port, "/v1/chat/completions", body)[0] == 200
+        got = rows(proxy, "session_id, agent_id, cause")
+        assert len(got) == 1 and got[0][2] == "first_write" and got[0][0].startswith("s") and got[0][1].startswith("a")
+    finally:
+        server.shutdown(); up.server.shutdown()
+
+
+def test_the_fallback_keeps_what_was_plainly_readable(monkeypatch):
+    up = FakeUpstream(payload=OPENAI_OK)
+    proxy, server, port = run_proxy(upstream_url=up.url)
+    monkeypatch.setattr(proxy, "_prepare", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("bug")))
+    monkeypatch.setenv("PREFIXWISE_FORWARD_SESSION_ID", "1")
+    try:
+        headers = {"X-Prefixwise-Session-Id": "hdr", "X-Prefixwise-Agent-Id": "ag"}
+        assert post(port, "/v1/chat/completions", {**BODY, "task_id": "T1"}, headers)[0] == 200
+        assert rows(proxy, "session_id, agent_id, task_id, error") == [("hdr", "ag", "T1", "not_recorded")]
+        assert up.requests[0]["body"].get("session_id") == "s1"   # an upstream that takes it still gets it
+        assert "task_id" not in up.requests[0]["body"] and "agent_id" not in up.requests[0]["body"]
+    finally:
+        server.shutdown(); up.server.shutdown()
+
+
+def test_the_mock_answers_a_request_it_cannot_read(monkeypatch):
+    proxy, server, port = run_proxy(mock=True)
+    try:
+        assert post(port, "/v1/chat/completions", BODY)[0] == 200
+        monkeypatch.setattr(proxy, "_prepare", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("bug")))
+        monkeypatch.setattr(proxy.fingerprinter, "fingerprint_blocks", lambda *a: (_ for _ in ()).throw(RecursionError()))
+        status, _, headers = post(port, "/v1/chat/completions", BODY)
+        assert status == 200 and headers["X-Prefixwise-Error"].startswith("not recorded")
+    finally:
+        server.shutdown()
+
+
+def test_a_failed_prepare_releases_its_engine_token():
+    """Preparing takes a token from the engine join before it can still fail. A token never released
+    marked the session's requests as overlapping for the life of the process."""
+    class Events:
+        def __init__(self):
+            self.open: set = set()
+
+        def request_sent(self, session_id):
+            self.open.add(session_id)
+            return session_id
+
+        def discard(self, token):
+            self.open.discard(token)
+
+    up = FakeUpstream(payload=OPENAI_OK)
+    proxy, server, port = run_proxy(upstream_url=up.url, engine="vllm")
+    try:
+        proxy.engine_events = events = Events()
+        proxy.collector.chain_parent = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("bug"))
+        assert post(port, "/v1/chat/completions", BODY, {"X-Prefixwise-Session-Id": "conv-1"})[0] == 200
+        assert events.open == set()
+    finally:
+        server.shutdown(); up.server.shutdown()
+
+
+def test_check_says_when_it_could_not_read_a_request():
+    from prefixwise.check import DEFAULT_FAIL_ON, judge
+
+    report = judge([{"session_id": "s", "status": 200, "cause": None, "error": "not_recorded"},
+                    {"session_id": "s", "status": 200, "cause": "none"}], DEFAULT_FAIL_ON)
+    assert any("1 request could not be read" in w for w in report.warnings)
 
 
 def test_overhead_counts_the_time_spent_reading_the_request():

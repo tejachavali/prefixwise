@@ -182,7 +182,7 @@ def _conversation(model, messages, kwargs) -> tuple | None:
         return None
     opening = next((m.get("content") for m in messages or [] if isinstance(m, dict)
                     and m.get("role") not in ("system", "developer")), None)
-    digest = hashlib.sha256(_text(opening).encode()).hexdigest()
+    digest = hashlib.sha256(_text(opening).encode("utf-8", "surrogatepass")).hexdigest()
     return session, str(model), digest
 
 

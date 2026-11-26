@@ -80,7 +80,7 @@ def cache_key_for(session_id: str, hmac_key: bytes | None = None) -> str:
     PREFIXWISE_HMAC_KEY when one is set, so a guessable id ("alice") cannot be recovered from the key."""
     import hashlib
     import hmac
-    raw = str(session_id).encode()
+    raw = str(session_id).encode("utf-8", "surrogatepass")
     digest = (hmac.new(hmac_key, raw, hashlib.sha256) if hmac_key else hashlib.sha256(raw)).hexdigest()
     return "pw-" + digest[:32]
 
@@ -168,26 +168,62 @@ def _sorted_keys(value: object) -> object:
     return json.loads(json.dumps(value, sort_keys=True))
 
 
-def canonical_tools(tools: list) -> list:
-    """Tools sorted by name (unnamed tools keep their order, at the end),
-    with every tool's keys sorted and its schema's set arrays (`required`, a
-    list `type`) sorted. Same set in, same bytes out.
+def _marker_of(tool: object):
+    """(where, value) of a tool's cache_control: on the tool itself (Anthropic), or inside its
+    `function` (a shape LiteLLM also reads); (None, None) when it has none."""
+    if not isinstance(tool, dict):
+        return None, None
+    if "cache_control" in tool:
+        return "tool", tool["cache_control"]
+    fn = tool.get("function")
+    if isinstance(fn, dict) and "cache_control" in fn:
+        return "function", fn["cache_control"]
+    return None, None
 
-    A `cache_control` marker on a tool is a position, not a property of that tool: on the last tool
-    it caches the whole list. Sorting must not move what it covers, so a marker on the client's last
-    tool stays on the last tool after sorting. A marker anywhere else covers the tools before it,
-    which sorting would change: such a list is returned as the client sent it."""
-    def marked(t) -> bool:
-        return isinstance(t, dict) and "cache_control" in t
-    if any(marked(t) for t in tools[:-1]):
-        return tools
-    last_marker = tools[-1]["cache_control"] if tools and marked(tools[-1]) else None
-    bare = [{k: v for k, v in t.items() if k != "cache_control"} if marked(t) else t for t in tools]
-    named = sorted((t for t in bare if _tool_name(t) is not None), key=_tool_name)
-    unnamed = [t for t in bare if _tool_name(t) is None]
-    out = [_sorted_keys(schema_sets(t)) for t in named] + [_sorted_keys(schema_sets(t)) for t in unnamed]
-    if last_marker is not None and isinstance(out[-1], dict):
-        out[-1] = _sorted_keys({**out[-1], "cache_control": last_marker})
+
+def _tool_without_marker(tool: object) -> object:
+    where, _ = _marker_of(tool)
+    if where == "tool":
+        return {k: v for k, v in tool.items() if k != "cache_control"}
+    if where == "function":
+        return {**tool, "function": {k: v for k, v in tool["function"].items() if k != "cache_control"}}
+    return tool
+
+
+def _tool_with_marker(tool: object, where: str, value) -> object:
+    if not isinstance(tool, dict):
+        return tool
+    if where == "function" and isinstance(tool.get("function"), dict):
+        return {**tool, "function": {**tool["function"], "cache_control": value}}
+    return {**tool, "cache_control": value}
+
+
+def canonical_tools(tools: list) -> list:
+    """Tools sorted by name (unnamed tools keep their order, at the end), with every tool's keys
+    sorted and its schema's set arrays (`required`, a list `type`) sorted. Same set in, same bytes
+    out.
+
+    A `cache_control` marker on a tool is a position, not a property of that tool: it caches the
+    tools up to and including it. So the list is sorted within each stretch that ends at a marker,
+    and the marker goes back on the last tool of its stretch: it covers the same tools as the
+    client marked, in an order that no longer depends on how the client listed them. (Sorting the
+    whole list moved a marker with its tool, so one on the last tool, which caches every tool,
+    could end up covering one.)"""
+    def ordered(stretch: list) -> list:
+        named = sorted((t for t in stretch if _tool_name(t) is not None), key=_tool_name)
+        return named + [t for t in stretch if _tool_name(t) is None]
+
+    out: list = []
+    stretch: list = []
+    for tool in tools:
+        where, value = _marker_of(tool)
+        stretch.append(_tool_without_marker(tool))
+        if where is not None:
+            done = [_sorted_keys(schema_sets(t)) for t in ordered(stretch)]
+            done[-1] = _sorted_keys(_tool_with_marker(done[-1], where, value))
+            out.extend(done)
+            stretch = []
+    out.extend(_sorted_keys(schema_sets(t)) for t in ordered(stretch))
     return out
 
 

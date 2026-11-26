@@ -219,13 +219,13 @@ def body_facts(provider: str, body: dict, model: str = "", credential: str = "")
                        if isinstance(m, dict) and m.get("role") in ("system", "developer")), None)
     salt = body.get("cache_salt")
     if salt:  # vLLM and SGLang isolate caches by it: another salt could never have shared the prefix
-        credential = f"{credential}:{hashlib.sha256(str(salt).encode()).hexdigest()[:12]}"
+        credential = f"{credential}:{hashlib.sha256(str(salt).encode("utf-8", "surrogatepass")).hexdigest()[:12]}"
     if tools or system:
         f.prefix_key = _h([provider, f.model, credential, _strip_markers(tools), _strip_markers(system)])
         (f.prefix_key_canonical, f.prefix_key_masked, f.prefix_key_masked_time,
          f.prefix_key_masked_id) = _prefix_keys(f.prefix_key, provider, f.model, credential, tools, system)
     key = body.get("prompt_cache_key")  # only ever compared for equality: carried as a digest
-    f.cache_key = hashlib.sha256(str(key).encode()).hexdigest()[:32] if key else None
+    f.cache_key = hashlib.sha256(str(key).encode("utf-8", "surrogatepass")).hexdigest()[:32] if key else None
     controls: list = []
     _cache_controls(body, controls)
     f.all_1h = bool(controls) and all(c.get("ttl") == "1h" for c in controls)

@@ -201,6 +201,12 @@ def judge(rows: list[dict], fail_on: tuple, allow: list[dict] | None = None, moc
                         reusable_tokens=int(r.get("avoidable_tokens") or 0))
             f.allowed = allowed(f, allow or [])
             rep.findings.append(f)
+    unread = sum(1 for r in rows if r.get("error") == "not_recorded")
+    if unread:
+        rep.warnings.append(
+            f"{unread} request{'' if unread == 1 else 's'} could not be read by Prefixwise and "
+            f"{'was' if unread == 1 else 'were'} not judged (recorded as not_recorded): this gate says nothing "
+            "about them. Please report the request shape.")
     rep.scenarios = len(turns)
     if rep.requests and not rep.eligible:
         rep.warnings.append(

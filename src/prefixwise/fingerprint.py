@@ -246,7 +246,7 @@ class Fingerprinter:
             if hit is not None:
                 self._masked_cache.move_to_end(canon_hash)
                 return hit
-        text, kinds = mask_volatiles_kinds(canon.decode("utf-8", "replace"))
+        text, kinds = mask_volatiles_kinds(canon.decode("utf-8", "surrogatepass"))
         entry = (_hash(text.encode("utf-8", "surrogatepass"), key), kinds)
         with self._cache_lock:
             self._masked_cache[canon_hash] = entry

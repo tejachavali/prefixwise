@@ -11,9 +11,12 @@ Design note, 2026-11-07.
    tokens) are kept only as "as computed then", with the price-table date.
 2. **Record every request, failures included.** A ledger of successful requests only
    biases every rate (survivorship). Failed requests get a row with their status and no
-   verdict: an upstream error, an unreachable upstream, a stream cut off by the upstream, or
-   by the client (status 499). A response that arrived without usage is not a failure: it is a
-   verdict row (`unknown`), streamed or not.
+   verdict: an upstream error (`error` holds its type, or `http_<status>`), an unreachable or
+   broken-off upstream (502), a stream cut off by the upstream before the model finished
+   (`upstream_dropped`) or ended by its error event (the event's type), a stream the client left
+   (`client_disconnected`, status 499), and a request or response Prefixwise itself could not
+   read or record (`not_recorded`: the client still got its answer). A response that arrived
+   without usage is not a failure: it is a verdict row (`unknown`), streamed or not.
 3. **One definition per metric.** Each metric has a name, formula, unit, valid groupings
    and caveats, in one module (`prefixwise.metrics`). The CLI, the HTTP API, exports and
    any future UI call it; none computes its own. The catalog is served by the API, so the
