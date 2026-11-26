@@ -21,7 +21,7 @@ from collections import OrderedDict
 
 from .classifier import (UNSEEN_PARENT, Classification, MissCause, RequestSnapshot, classify, first_divergence,
                          served_all)
-from .details import Facts, detail_for, last_block_marked, marked_tokens, shared_breakpoint
+from .details import Facts, detail_for, last_block_marked, last_marker_shared, marked_tokens, shared_breakpoint
 from .diagnostics import AgreementScorer
 from .ledger import Ledger, LedgerEntry, avoidable_for_turn, held_for_turn, missed_for_turn, unread_write
 from .lifetime import LEDGER_SQL, LifetimeTracker
@@ -512,14 +512,16 @@ class Collector:
         )
         entry.avoidable_cost = self.prices.avoidable_cost(priced_model, entry.avoidable_tokens, prompt_tokens,
                                                           provider, usage)
-        # What an expiry sent again: only for a prompt the classifier judged unchanged, and a
-        # previous turn whose usage reports what it wrote (so what it left is known, zero included).
+        # What an expiry sent again: only for a prompt the classifier judged unchanged, a previous
+        # turn whose usage reports what it wrote (so what it left is known, zero included), and a
+        # request whose own usage does too (so what its markers cover is known).
         left = prev.cached_tokens + prev.cache_written if prev is not None and prev.write_reported else None
         entry.missed_tokens = missed_for_turn(entry.cause, result.legit, prompt_tokens, cached,
                                               prev.prompt_tokens if prev else None, left,
                                               unchanged=unchanged_prompt,
                                               covered_tokens=cached + entry.cache_write_tokens
-                                              if write_reported(provider, usage) else None)
+                                              if write_reported(provider, usage) else None,
+                                              marker_shared=last_marker_shared(prev_facts, rec.facts))
         if entry.missed_tokens is not None:
             entry.missed_cost = self.prices.missed_cost(priced_model, entry.missed_tokens, prompt_tokens,
                                                         provider, usage)

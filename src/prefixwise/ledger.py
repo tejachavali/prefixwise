@@ -183,7 +183,8 @@ EXPECTED_MISS_CAUSES = frozenset({"ttl_expired"})
 
 def missed_for_turn(cause: str | None, legit: bool | None, prompt_tokens: int, cached_tokens: int,
                     prev_prompt_tokens: int | None, prev_left_tokens: int | None, *,
-                    unchanged: bool = True, covered_tokens: int | None = None) -> int | None:
+                    unchanged: bool = True, covered_tokens: int | None = None,
+                    marker_shared: bool = False) -> int | None:
     """Tokens an expiry sent again that the previous turn had left in the cache, less what was read
     all the same. A figure is given only where it is true:
 
@@ -194,17 +195,23 @@ def missed_for_turn(cause: str | None, legit: bool | None, prompt_tokens: int, c
       read plus what it wrote). A turn that left nothing had nothing to expire, and where a provider
       does not report writes, what was held is a guess.
 
-    No more is counted than this request's own markers cover (`covered_tokens`: what it read plus
-    what it wrote, where its usage reports a write count). A read stops at a breakpoint, so a live
-    cache could not have served a request past its last one, whatever the previous turn had left.
+    - what this request's own markers cover is known (`covered_tokens`: what it read plus what it
+      wrote, where its usage reports a write count). A read stops at a breakpoint, so a live cache
+      could not have served a request past its last one, whatever the previous turn had left;
+    - where its markers cover less than the previous turn left, its last marker is on a block the
+      previous turn had marked too (`marker_shared`). A live cache is read only at a place that was
+      written: with the last marker somewhere the previous turn had not marked, how much would
+      have been served is not known, and may be nothing.
 
     None otherwise."""
     if (legit is False or cause not in EXPECTED_MISS_CAUSES or not unchanged
-            or not prev_prompt_tokens or not prev_left_tokens):
+            or not prev_prompt_tokens or not prev_left_tokens or covered_tokens is None):
         return None
     reach = min(prev_prompt_tokens, prompt_tokens, prev_left_tokens)
-    if covered_tokens is not None:
-        reach = min(reach, covered_tokens)
+    if covered_tokens < reach:
+        if not marker_shared:
+            return None
+        reach = covered_tokens
     return max(0, reach - cached_tokens)
 
 

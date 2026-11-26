@@ -21,20 +21,28 @@ RATES = PriceTable.load("").rates_for(OPUS)   # USD per million tokens
 
 def test_missed_tokens_are_what_the_cache_had_held_and_was_not_read():
     assert EXPECTED_MISS_CAUSES == {"ttl_expired"}
-    assert missed_for_turn("ttl_expired", True, 3200, 0, 3000, 3000) == 3000    # the previous prompt, not the new tail
-    assert missed_for_turn("ttl_expired", True, 3200, 500, 3000, 3000) == 2500  # less what was read all the same
-    assert missed_for_turn("ttl_expired", True, 3200, 0, 3000, 2000) == 2000    # no more than was left in the cache
-    assert missed_for_turn("ttl_expired", True, 2500, 0, 3000, 3000) == 2500    # a shorter prompt could reuse only itself
-    assert missed_for_turn("ttl_expired", True, 3200, 3000, 3000, 3000) == 0
+    far = {"covered_tokens": 3200}  # this request's own markers reach the whole of what was left
+    assert missed_for_turn("ttl_expired", True, 3200, 0, 3000, 3000, **far) == 3000    # the previous prompt, not the new tail
+    assert missed_for_turn("ttl_expired", True, 3200, 500, 3000, 3000, **far) == 2500  # less what was read all the same
+    assert missed_for_turn("ttl_expired", True, 3200, 0, 3000, 2000, **far) == 2000    # no more than was left in the cache
+    assert missed_for_turn("ttl_expired", True, 2500, 0, 3000, 3000, **far) == 2500    # a shorter prompt could reuse only itself
+    assert missed_for_turn("ttl_expired", True, 3200, 3000, 3000, 3000, **far) == 0
     # no figure where it would not be true
-    assert missed_for_turn("ttl_expired", True, 3200, 0, None, 3000) is None    # previous size unknown
-    assert missed_for_turn("ttl_expired", True, 3200, 0, 3000, None) is None    # what was left is not known
-    assert missed_for_turn("ttl_expired", True, 3200, 0, 3000, 0) is None       # it left nothing: nothing expired
-    assert missed_for_turn("ttl_expired", True, 3200, 0, 3000, 3000, unchanged=False) is None
-    assert missed_for_turn("ttl_expired", False, 3200, 0, 3000, 3000) is None   # waste is in avoidable_tokens, never both
+    assert missed_for_turn("ttl_expired", True, 3200, 0, None, 3000, **far) is None    # previous size unknown
+    assert missed_for_turn("ttl_expired", True, 3200, 0, 3000, None, **far) is None    # what was left is not known
+    assert missed_for_turn("ttl_expired", True, 3200, 0, 3000, 0, **far) is None       # it left nothing: nothing expired
+    assert missed_for_turn("ttl_expired", True, 3200, 0, 3000, 3000, unchanged=False, **far) is None
+    assert missed_for_turn("ttl_expired", False, 3200, 0, 3000, 3000, **far) is None   # waste is in avoidable_tokens, never both
+    assert missed_for_turn("ttl_expired", True, 3200, 0, 3000, 3000) is None           # what its markers cover is not known
     for cause in ("none", "first_write", "model_switch", "compaction_rewrite", "tool_catalog_change", "evicted",
                   "volatile_system", "routing_miss", "unknown", None):
-        assert missed_for_turn(cause, True, 3200, 0, 3000, 3000) is None, cause
+        assert missed_for_turn(cause, True, 3200, 0, 3000, 3000, **far) is None, cause
+    # its markers cover less than was left: a figure only when its last marker is where the previous
+    # turn had one too, and then no more than they cover
+    assert missed_for_turn("ttl_expired", True, 30300, 0, 30300, 30000, covered_tokens=3000) is None
+    assert missed_for_turn("ttl_expired", True, 30300, 0, 30300, 30000, covered_tokens=3000, marker_shared=True) == 3000
+    assert missed_for_turn("ttl_expired", True, 30300, 1000, 30300, 30000, covered_tokens=3000, marker_shared=True) == 2000
+    assert missed_for_turn("ttl_expired", True, 30300, 0, 30300, 30000, covered_tokens=30000) == 30000
 
 
 def two(first, second, u1, u2, seconds):
@@ -380,14 +388,65 @@ def test_no_more_is_counted_than_this_requests_own_markers_cover(tmp_path):
     e = p.handle("anthropic", {**b, "messages": [U1, A1, GO, A1, GO]}, S)[1]
     assert (e.cause, e.missed_tokens) == ("ttl_expired", 3000), (e.cause, e.missed_tokens, e.evidence)
     assert e.missed_cost == pytest.approx(3000 * (RATES["cache_write_5m"] - RATES["cache_read"]) / 1e6)
-    # the import: 100,000 left, 20,000 written again under this request's markers
+    # the same, but the previous turn had marked the last message only: nothing was written where
+    # this request's one marker is, so a live cache may have served nothing. No figure.
+    p = scripted([claude(write=30000), claude(write=3000, fresh=27300)])
+    plain = {"model": OPUS, "max_tokens": 9, "system": [{"type": "text", "text": SYS}]}
+    p.handle("anthropic", {**plain, "messages": last_marked([U1, A1, GO])}, S)
+    idle(p, 600)
+    e = p.handle("anthropic", {**b, "messages": [U1, A1, GO, A1, GO]}, S)[1]
+    assert (e.cause, e.missed_tokens, e.missed_cost) == ("ttl_expired", None, None), (e.cause, e.evidence)
+    # the previous turn marked the system prompt and the last message; this one marks the system
+    # prompt and then the first message, which that turn had not marked: its last marker decides
+    p = scripted([claude(write=30000), claude(write=3100, fresh=27200)])
+    p.handle("anthropic", {**b, "messages": last_marked([U1, A1, GO])}, S)
+    idle(p, 600)
+    e = p.handle("anthropic", {**b, "messages": last_marked([U1]) + [A1, GO, A1, GO]}, S)[1]
+    assert (e.cause, e.missed_tokens) == ("ttl_expired", None), (e.cause, e.missed_tokens, e.evidence)
+    # the import: 100,000 left, 20,000 written again. The log does not say where the markers are.
     log = Log()
     log.user(1); log.reply(5, usage(w1h=100000))
     log.user(86400); log.reply(86405, usage(w1h=20000, fresh=80500))
+    rows = import_rows(tmp_path / "less", log)
+    assert (rows[1][0], rows[1][1], rows[1][2]) == ("ttl_expired", None, None), rows[1]
+
+
+def test_a_partial_read_counts_what_was_not_read_live_and_in_the_import(tmp_path):
+    """The front of the prompt was still in the cache (another conversation keeps it warm): only the
+    rest was sent again."""
+    b = {"model": OPUS, "max_tokens": 9, "system": marked()}
+    p = scripted([claude(write=30000), claude(read=3000, write=27300)])
+    p.handle("anthropic", {**b, "messages": last_marked([U1, A1, GO])}, S)
+    idle(p, 600)
+    e = p.handle("anthropic", {**b, "messages": last_marked([U1, A1, GO, A1, GO])}, S)[1]
+    assert (e.cause, e.missed_tokens) == ("ttl_expired", 27000), (e.cause, e.missed_tokens, e.evidence)
+    log = Log()
+    log.user(1); log.reply(5, usage(w1h=100000))
+    log.user(86400); log.reply(86405, usage(read=60000, w1h=40500))
     rows = import_rows(tmp_path, log)
-    assert (rows[1][0], rows[1][1]) == ("ttl_expired", 20000), rows[1]
-    assert missed_for_turn("ttl_expired", True, 30300, 1000, 30300, 30000, covered_tokens=3000) == 2000
-    assert missed_for_turn("ttl_expired", True, 30300, 0, 30300, 30000, covered_tokens=None) == 30000
+    assert (rows[1][0], rows[1][1]) == ("ttl_expired", 40000), rows[1]
+    assert rows[1][2] == pytest.approx(40000 * (RATES["cache_write_1h"] - RATES["cache_read"]) / 1e6)
+
+
+def test_no_figure_when_this_requests_usage_reports_no_write_count(tmp_path):
+    """What its markers cover is then not known."""
+    b = {"model": OPUS, "max_tokens": 9, "system": marked()}
+    p = scripted([claude(write=30000), {"input_tokens": 30300, "output_tokens": 5, "cache_read_input_tokens": 0}])
+    p.handle("anthropic", {**b, "messages": last_marked([U1, A1, GO])}, S)
+    idle(p, 600)
+    e = p.handle("anthropic", {**b, "messages": last_marked([U1, A1, GO, A1, GO])}, S)[1]
+    assert e.cause == "ttl_expired" and e.missed_tokens is None, (e.cause, e.missed_tokens, e.evidence)
+    # also where its last marker is one the previous turn had: no count is not a count of zero
+    p = scripted([claude(write=30000), {"input_tokens": 30300, "output_tokens": 5, "cache_read_input_tokens": 0}])
+    p.handle("anthropic", {**b, "messages": last_marked([U1, A1, GO])}, S)
+    idle(p, 600)
+    e = p.handle("anthropic", {**b, "messages": [U1, A1, GO, A1, GO]}, S)[1]
+    assert e.cause == "ttl_expired" and e.missed_tokens is None, (e.cause, e.missed_tokens, e.evidence)
+    log = Log()
+    log.user(1); log.reply(5, usage(w1h=100000))
+    log.user(86400); log.reply(86405, {"input_tokens": 100500, "output_tokens": 20, "cache_read_input_tokens": 0})
+    rows = import_rows(tmp_path, log)
+    assert (rows[1][0], rows[1][1]) == ("ttl_expired", None), rows[1]
 
 
 def test_a_price_file_with_a_read_rate_above_the_write_rate_gives_no_negative_figure():

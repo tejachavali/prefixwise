@@ -414,6 +414,9 @@ def import_claude_code(root: str | os.PathLike | None = None, ledger: Ledger | N
                                 and not _names_a_change(r.native))
                 missed = missed_for_turn(cause, legit, prompt, read, prev_prompt_before,
                                          same.held if same is not None else None, unchanged=only_expired,
+                                         # (where this request's markers cover less than was left, a
+                                         # line with no write count included, the log does not say
+                                         # where they are: no figure)
                                          covered_tokens=read + write)
                 several = isinstance(u.get("iterations"), list) and len(u["iterations"]) > 1
                 if read + write > 0 or same is None or same.held == 0:
