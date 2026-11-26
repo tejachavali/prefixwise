@@ -300,7 +300,7 @@ def test_anthropic_stream_usage_from_start_and_delta():
         _, raw, h = stream(port, "/v1/messages", body)
         assert b"stream_options" not in json.dumps(up.requests[0]["body"]).encode()
         assert raw.count(b"event: ") == 4  # every event relayed
-        row = proxy.ledger.get_request(h["X-Prefixwise-Request-Id"])
+        row = recorded(port, h["X-Prefixwise-Request-Id"])[1]  # written just after the stream ends
         assert (row["prompt_tokens"], row["cached_tokens"], row["completion_tokens"]) == (2000, 1900, 7)
         stream(port, "/v1/messages", body)  # second turn chains diagnostics from the stream id
         assert up.requests[1]["body"]["diagnostics"] == {"previous_message_id": "msg_9"}
@@ -481,7 +481,7 @@ def test_responses_stream_usage_from_completed_event():
         _, raw, h = stream(port, "/v1/responses", {"model": "gpt-5.6", "input": "hi", "stream": True})
         assert "stream_options" not in up.requests[0]["body"]  # Responses streams always carry usage
         assert raw.count(b"event: ") == 3
-        row = proxy.ledger.get_request(h["X-Prefixwise-Request-Id"])
+        row = recorded(port, h["X-Prefixwise-Request-Id"])[1]  # written just after the stream ends
         assert (row["prompt_tokens"], row["cached_tokens"], row["completion_tokens"]) == (2000, 1500, 3)
     finally:
         server.shutdown()

@@ -114,23 +114,30 @@ class Report:
     volatile_scenarios: set = field(default_factory=set)  # scenarios where volatile_system was seen, gated or not
     mock: bool = True
     agent_exit: int | None = None
+    reached: int = 0             # rows of this run, failed requests included
+    allow_empty: bool = False    # --allow-empty: a run that judged no request passes
 
     @property
     def failing(self) -> list[Finding]:
         return [f for f in self.findings if not f.allowed]
 
     @property
+    def nothing_checked(self) -> bool:
+        """No request got a verdict, so the gate looked at nothing: not a pass."""
+        return not self.requests and not self.allow_empty
+
+    @property
     def exit_code(self) -> int:
         if self.failing:
             return 2
-        return 1 if self.agent_exit else 0
+        return 1 if self.agent_exit or self.nothing_checked else 0
 
     def to_dict(self) -> dict:
         return {"version": 1, "fail_on": list(self.fail_on), "exit_code": self.exit_code,
                 "summary": {"requests": self.requests, "scenarios": self.scenarios, "eligible_turns": self.eligible,
                             "eligible_turns_by_model": self.eligible_by_model, "findings": len(self.findings),
                             "allowed": sum(f.allowed for f in self.findings), "agent_exit": self.agent_exit,
-                            "mock": self.mock},
+                            "mock": self.mock, "nothing_checked": self.nothing_checked},
                 "findings": [asdict(f) for f in self.findings], "warnings": list(self.warnings),
                 "projections": [asdict(p) for p in self.projections]}
 
@@ -139,13 +146,19 @@ class Report:
 
 def load_allow(path: str | Path) -> list[dict]:
     """JSON array or JSONL of {"scenario", "cause", "divergence_role"}; a missing key or "*" matches any."""
-    text = Path(path).read_text()
+    try:
+        text = Path(path).read_text()
+    except OSError as exc:
+        raise ValueError(f"cannot read the allow-list {path}: {exc.strerror or exc}") from None
     if not text.strip():
         return []
     try:
         data = json.loads(text)
     except ValueError:
-        data = [json.loads(line) for line in text.splitlines() if line.strip()]
+        try:
+            data = [json.loads(line) for line in text.splitlines() if line.strip()]
+        except ValueError as exc:
+            raise ValueError(f"{path} is not JSON or JSON Lines ({exc})") from None
     items = data if isinstance(data, list) else [data]
     for it in items:
         if not isinstance(it, dict) or not isinstance(it.get("cause", "*"), str):
@@ -177,10 +190,11 @@ def rows_since(ledger, since: float) -> list[dict]:
         return [dict(zip(ROW_COLUMNS, r)) for r in cur]
 
 
-def judge(rows: list[dict], fail_on: tuple, allow: list[dict] | None = None, mock: bool = True) -> Report:
+def judge(rows: list[dict], fail_on: tuple, allow: list[dict] | None = None, mock: bool = True,
+          allow_empty: bool = False) -> Report:
     """Rows of one run (the ledger's columns), in order, to a report: findings for the gated causes,
     eligible turns per model (a turn with a previous turn to reuse), scenarios and requests."""
-    rep = Report(fail_on=fail_on, mock=mock)
+    rep = Report(fail_on=fail_on, mock=mock, reached=len(rows), allow_empty=allow_empty)
     turns: dict[str, int] = {}
     for r in rows:
         scenario = str(r.get("session_id") or "default")
@@ -209,6 +223,20 @@ def judge(rows: list[dict], fail_on: tuple, allow: list[dict] | None = None, moc
             f"{'was' if unread == 1 else 'were'} not judged (recorded as not_recorded): this gate says nothing "
             "about them. Please report the request shape.")
     rep.scenarios = len(turns)
+    if not rep.requests:
+        if rep.reached:
+            what = (f"{rep.reached} request{'' if rep.reached == 1 else 's'} reached Prefixwise and none got a "
+                    "verdict (each failed or could not be read)")
+        elif mock:
+            what = ("no request reached the mock. The command gets the mock's address in ANTHROPIC_BASE_URL and "
+                    "OPENAI_BASE_URL: an agent with its base URL written into the code, or one that never made a "
+                    "model call, is not checked")
+        else:
+            what = "the files hold no request"
+        rep.warnings.append(
+            f"{what}, so this gate checked nothing"
+            + (" (allowed by --allow-empty)." if allow_empty else
+               ". That is not a pass: exit 1. If a run with no requests is expected, pass --allow-empty."))
     if rep.requests and not rep.eligible:
         rep.warnings.append(
             "0 cache-eligible multi-turn sequences observed: every conversation had one turn, so "
@@ -372,7 +400,7 @@ def render(rep: Report) -> str:
             f"{rep.requests} requests{mock}")
     if rep.agent_exit:
         tail += f"; the command exited {rep.agent_exit}"
-    verdict = {0: "PASS", 1: "RUN FAILED", 2: "FAIL"}[rep.exit_code]
+    verdict = {0: "PASS", 1: "RUN FAILED" if rep.agent_exit else "NOTHING CHECKED", 2: "FAIL"}[rep.exit_code]
     lines.append(f"{verdict}: {tail}")
     return "\n".join(lines)
 

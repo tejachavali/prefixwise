@@ -160,9 +160,14 @@ class PriceTable:
         table = cls(models=dict(base["models"]), as_of=base.get("as_of"), sources=["built-in prices.json"])
         path = extra_path or os.environ.get("PREFIXWISE_PRICES")
         if path:
-            with open(path) as f:
-                user = json.load(f)
-            models = user.get("models", user)
+            try:
+                with open(path) as f:
+                    user = json.load(f)
+            except OSError as exc:
+                raise ValueError(f"cannot read the price file {path}: {exc.strerror or exc}") from None
+            except ValueError as exc:
+                raise ValueError(f"{path} is not JSON ({exc})") from None
+            models = user.get("models", user) if isinstance(user, dict) else None
             if not isinstance(models, dict):
                 raise ValueError(f"{path}: expected {{'models': {{model_id: rates}}}}")
             for name, rates in models.items():

@@ -149,11 +149,19 @@ def explain_pair(prev: Turn | None, curr: Turn, provider: str | None = None,
                        secondary=[c.value for c in result.secondary], diff=text)
 
 
+# What makes a JSON object a request: the field its prompt is in, on any of the APIs read here.
+_PROMPT_KEYS = ("messages", "input", "prompt", "contents")
+
+
 def _turn_from_record(rec: dict) -> Turn:
     """A record is a bare request body, or {"request"|"body": ..., "usage": ..., ...}."""
     if not isinstance(rec, dict):
         raise ValueError("each record must be a JSON object")
     body = rec.get("request") or rec.get("body")
+    if not isinstance(body if body is not None else rec, dict) or not any(
+            k in (body if body is not None else rec) for k in _PROMPT_KEYS):
+        raise ValueError('not a request: expected a request body (an object with "messages", "input", "prompt" or '
+                         '"contents"), or {"request": <body>, "usage": ...}')
     if body is None:
         return Turn(body=rec, session_id=str(rec.get("session_id") or "default"))
     usage = rec.get("usage") or (rec.get("response") or {}).get("usage")
@@ -168,13 +176,25 @@ def load_turns(path: str | Path) -> list[Turn]:
     text = Path(path).read_text()
     stripped = text.strip()
     if not stripped:
-        return []
+        raise ValueError(f"{path} is empty: no request to explain")
     try:
         data = json.loads(stripped)
     except ValueError:
-        data = [json.loads(line) for line in text.splitlines() if line.strip()]
+        try:
+            data = [json.loads(line) for line in text.splitlines() if line.strip()]
+        except ValueError as exc:
+            raise ValueError(f"{path} is not JSON or JSON Lines ({exc})") from None
     records = data if isinstance(data, list) else [data]
-    return [_turn_from_record(r) for r in records]
+    if not records:
+        raise ValueError(f"{path} holds no request")
+    turns = []
+    for i, r in enumerate(records, 1):
+        try:
+            turns.append(_turn_from_record(r))
+        except ValueError as exc:
+            where = f"{path}, record {i}" if len(records) > 1 else str(path)
+            raise ValueError(f"{where}: {exc}") from None
+    return turns
 
 
 def explain_session(turns: list[Turn], provider: str | None = None, diff: bool = False) -> list[Explanation]:

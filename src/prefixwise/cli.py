@@ -34,7 +34,12 @@ def _open_existing_ledger(args):
     if path != ":memory:" and not Path(path).exists():
         sys.exit(f"prefixwise: no ledger at {path} yet. Run an agent through Prefixwise first: "
                  f"`prefixwise run -- <your agent>` (or `prefixwise serve`), or pass --ledger")
-    return Ledger(path)
+    import sqlite3
+    try:
+        return Ledger(path)
+    except sqlite3.Error as exc:  # a text file, a directory, a file from some other program
+        sys.exit(f"prefixwise: {path} is not a ledger Prefixwise can open ({exc}). Pass the SQLite file a "
+                 "Prefixwise proxy or import wrote, with --ledger.")
 
 
 def _fmt_int(n) -> str:
@@ -318,6 +323,12 @@ def cmd_report(args) -> int:
     if args.json:
         print(json.dumps({"findings": found, "summary": summary, "by": args.by, "rows": rows}, indent=2))
         return 0
+    if since is not None and not (found["summary"]["requests"] or found["summary"]["requests_failed"]):
+        older = led.summary()["requests"]
+        if older:  # the filter emptied it: "nothing recorded yet" would be wrong
+            print(f"No requests since {args.since}. The ledger holds {older:,} older "
+                  f"request{'' if older == 1 else 's'}: widen or drop --since to see them.")
+            return 0
     if args.share:
         print(render_share(found, args.since))
         return 0
@@ -481,9 +492,8 @@ def _rate(v) -> str:
 
 
 def cmd_task(args) -> int:
-    from .ledger import Ledger
-
-    Ledger(_ledger_path(args)).set_task_outcome(args.task_id, args.outcome == "success")
+    led = _open_existing_ledger(args)  # an outcome is for a task the ledger holds: never make a ledger for it
+    led.set_task_outcome(args.task_id, args.outcome == "success")
     print(f"task {args.task_id}: {args.outcome}")
     return 0
 
@@ -497,15 +507,13 @@ def _duration_seconds(text: str) -> float:
 
 
 def cmd_prune(args) -> int:
-    from .ledger import Ledger
-
     try:
         seconds = _duration_seconds(args.older_than)
     except ValueError:
         print(f"prefixwise: --older-than takes a duration like 30d, 12h or 90 (days), not {args.older_than!r}",
               file=sys.stderr)
         return 2
-    n = Ledger(_ledger_path(args)).prune(seconds, undated=args.include_undated)
+    n = _open_existing_ledger(args).prune(seconds, undated=args.include_undated)
     print(f"deleted {n} ledger entries older than {args.older_than}")
     return 0
 
@@ -674,8 +682,15 @@ def cmd_run(args) -> int:
     found = findings(proxy.ledger, since=start, prices=proxy.prices)
     print("\n-- prefixwise: this run --", file=sys.stderr)
     if not (found["summary"]["requests"] or found["summary"]["requests_failed"]):
-        print(f"No requests reached Prefixwise. Does {cmd[0]} read ANTHROPIC_BASE_URL or OPENAI_BASE_URL? "
-              "If not, set its base URL to the proxy by hand (see the README).", file=sys.stderr)
+        if child is None:
+            print("No requests reached Prefixwise: the command did not start.", file=sys.stderr)
+        elif code:
+            print(f"No requests reached Prefixwise: {cmd[0]} exited {code} before it made a model call. Its own "
+                  "output above says why.", file=sys.stderr)
+        else:
+            print(f"No requests reached Prefixwise. {cmd[0]} was started with ANTHROPIC_BASE_URL={base} and "
+                  f"OPENAI_BASE_URL={base}/v1; an agent that does not read those needs its base URL set to one of "
+                  "them in its own settings.", file=sys.stderr)
     else:
         if mock:
             print("(mock: synthetic responses and usage, so the numbers below are illustrative)", file=sys.stderr)
@@ -708,7 +723,7 @@ def cmd_check(args) -> int:
     cmd = args.agent_command[1:] if args.agent_command[:1] == ["--"] else args.agent_command
     if bool(cmd) == bool(args.bodies):
         print("usage: prefixwise check [options] -- <command that runs the agent's scenarios>\n"
-              "       prefixwise check [options] --bodies FILE...   (saved request bodies, explain's format)",
+              "       prefixwise check [options] --bodies FILE...   (saved request bodies; each file is one scenario)",
               file=sys.stderr)
         return 2
 
@@ -718,7 +733,7 @@ def cmd_check(args) -> int:
         except (OSError, ValueError) as exc:
             print(f"prefixwise: {exc}", file=sys.stderr)
             return 2
-        rep = check.judge(rows, fail_on, allow, mock=False)
+        rep = check.judge(rows, fail_on, allow, mock=False, allow_empty=args.allow_empty)
         check.project(rep, baseline, prices)
         return _emit_check(rep, args)
 
@@ -773,7 +788,7 @@ def cmd_check(args) -> int:
         server.server_close()
         code = 128 - code if code < 0 else code
         rows = check.rows_since(proxy.ledger, start)
-        rep = check.judge(rows, fail_on, allow, mock=True)
+        rep = check.judge(rows, fail_on, allow, mock=True, allow_empty=args.allow_empty)
         rep.agent_exit = code
         rep.warnings = watch.warnings(rep) + rep.warnings
         check.project(rep, baseline, prices)
@@ -816,22 +831,33 @@ def cmd_export(args) -> int:
             return 2
         base = baseline_from_ledger(led, since)
         out = args.output or BASELINE_FILE
-        with open(out, "w") as fh:
-            json.dump(base, fh, indent=2)
-            fh.write("\n")
+        try:
+            with open(out, "w") as fh:
+                json.dump(base, fh, indent=2)
+                fh.write("\n")
+        except OSError as exc:
+            print(f"prefixwise: cannot write {out}: {exc.strerror or exc}", file=sys.stderr)
+            return 2
         models = ", ".join(f"{m} ({v['eligible_turns_per_month']:,.0f} eligible turns/month)"
                            for m, v in base["models"].items()) or "no turns"
         print(f"wrote {out}: {base['window_days']:g} days of ledger scaled to a month; {models}", file=sys.stderr)
         return 0
     try:
         since = api._time(args.since, "--since")
+        bad = [f for f in args.where if "=" not in f]
+        if bad:
+            raise ValueError(f"--where takes FIELD=VALUE (for example --where cause=ttl_expired), not {bad[0]!r}")
         filters = dict(f.split("=", 1) for f in args.where)
         where, params = metrics._where(filters, since, None)
     except (ValueError, api.ApiError) as exc:
         print(f"prefixwise: {exc}", file=sys.stderr)
         return 2
     if args.output:  # owner-only, like the ledger itself
-        out = os.fdopen(os.open(args.output, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w", newline="")
+        try:
+            out = os.fdopen(os.open(args.output, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w", newline="")
+        except OSError as exc:
+            print(f"prefixwise: cannot write {args.output}: {exc.strerror or exc}", file=sys.stderr)
+            return 2
     else:
         out = sys.stdout
     with led.reader() as conn:
@@ -874,9 +900,13 @@ def cmd_import(args) -> int:
     # (the proxy cannot know the log's response ids, so one request would count twice).
     path = args.ledger or f"prefixwise-{args.source}.db"
     if gateway:
-        if not args.path or not os.path.exists(os.path.expanduser(args.path)):
+        if not args.path:
             print("prefixwise: import gateway needs --path: a JSON Lines request log, or a folder of them "
                   "(one request per line: its body, the response with usage, and when it started)", file=sys.stderr)
+            return 1
+        if not os.path.exists(os.path.expanduser(args.path)):
+            print(f"prefixwise: no file or folder at {args.path} (--path takes a JSON Lines request log, or a "
+                  "folder of them)", file=sys.stderr)
             return 1
         stats = _import_gateway(os.path.expanduser(args.path), path, args, since)
         if stats is None:
@@ -907,7 +937,10 @@ def cmd_import(args) -> int:
     day = lambda t: time.strftime("%Y-%m-%d", time.localtime(t))  # noqa: E731
     span = day(stats["first"]) if day(stats["first"]) == day(stats["last"]) else \
         f"{day(stats['first'])} to {day(stats['last'])}"
-    print(f"Imported {stats['imported']:,} requests from {stats['logs']} {name} log{'' if gateway else 's'} ({span})"
+    logs = stats["logs"]
+    source = (("a gateway log" if logs == 1 else f"{logs:,} gateway logs") if gateway
+              else f"{logs:,} {name} log{'' if logs == 1 else 's'}")
+    print(f"Imported {stats['imported']:,} requests from {source} ({span})"
           + (f"; {stats['skipped_known']:,} were already in {path}" if stats["skipped_known"] else "")
           + (f"; {stats['duplicates']:,} logged twice were counted once" if stats["duplicates"] else "") + ".\n")
     window = {"since": stats["first"], "until": stats["last"] + 1}
@@ -940,7 +973,9 @@ def cmd_import(args) -> int:
               "between requests, not the prompt itself, so causes are inferred and a miss the log cannot explain is "
               "`unknown`. Dollars are API prices: on a subscription (Claude Pro/Max, ChatGPT plans) they show what the "
               "usage is worth, not what you paid.")
-    print(f"\nLedger: {path}  (prefixwise report --ledger {path} --detail, or prefixwise serve to browse /api/v1)")
+    print(f"\nLedger: {path}. The import keeps its own ledger, so read it with --ledger:\n"
+          f"  prefixwise report --ledger {path} --detail\n"
+          f"  prefixwise report --ledger {path} --session latest")
     return 0
 
 
@@ -1056,7 +1091,12 @@ def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog="prefixwise",
                                  description="Name why prompt caches miss, and price the miss.")
     ap.add_argument("--version", action="version", version=f"prefixwise {__version__}")
-    sub = ap.add_subparsers(dest="command")
+    sub = ap.add_subparsers(dest="command", title="commands", metavar="<command>")
+
+    # `prefixwise demo` parses its own flags (prefixwise.demo); this entry puts it in the list.
+    sub.add_parser("demo", add_help=False,
+                   help="start here: break the cache three ways and fix it, on a built-in mock (no key, no "
+                        "network; about five seconds)")
 
     def ledger_opt(p):
         p.add_argument("--ledger", help=f"SQLite ledger file (default: $PREFIXWISE_LEDGER_PATH or ./{DEFAULT_LEDGER})")
@@ -1217,10 +1257,13 @@ def build_parser() -> argparse.ArgumentParser:
                    help=f"production baseline from `prefixwise export --baseline`, for the monthly projection "
                         f"(default: ./{BASELINE_FILE} when present; else tokens only)")
     p.add_argument("--bodies", nargs="+", metavar="FILE",
-                   help="judge saved request bodies instead of running a command (prefixwise explain's format)")
+                   help="judge saved request bodies instead of running a command. Each file is one scenario: a "
+                        "JSON Lines file of its turns, in the record format prefixwise explain reads")
     p.add_argument("--first-turn-delay", type=float, default=DEFAULT_FIRST_TURN_DELAY, metavar="SECONDS",
                    help="hold each conversation's first mock response, so a per-second timestamp in the prompt "
                         f"changes before the second turn (default {DEFAULT_FIRST_TURN_DELAY}; 0 = off)")
+    p.add_argument("--allow-empty", action="store_true",
+                   help="pass a run in which no request got a verdict (default: exit 1, since nothing was checked)")
     p.add_argument("--port", type=int, default=0, help="mock proxy port (default: any free port)")
     p.add_argument("--prices", metavar="FILE", help="price table for the projection (default: built in)")
     p.add_argument("--json", action="store_true", help="the report as JSON on stdout")
@@ -1286,10 +1329,27 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--fail-on-waste", action="store_true",
                    help="exit 2 if any turn is classified as waste (for CI gates on prompt changes)")
     p.set_defaults(func=cmd_explain)
+    _order_commands(sub)
     return ap
 
 
+# The order `prefixwise --help` lists the commands in: what a new user reaches for first, the
+# collector (for a fleet) last. A command missing from here keeps its place after these.
+COMMAND_ORDER = ("demo", "run", "import", "serve", "report", "fixes", "check", "explain", "prices", "request",
+                 "export", "task", "prune", "collect")
+
+
+def _order_commands(sub) -> None:
+    rows = getattr(sub, "_choices_actions", None)   # argparse keeps the help rows here; no public way to sort
+    if not isinstance(rows, list):
+        return
+    rank = {name: i for i, name in enumerate(COMMAND_ORDER)}
+    rows.sort(key=lambda row: rank.get(getattr(row, "dest", ""), len(rank)))
+
+
 GETTING_STARTED = """Prefixwise names why each LLM request missed the prompt cache, and what it cost.
+
+  prefixwise demo                       see it work: no key, no network, about five seconds
 
   prefixwise run -- <your agent>        run an agent through it, get a report when it exits
   prefixwise report --session latest    that session, turn by turn
@@ -1302,7 +1362,13 @@ All commands: prefixwise --help"""
 
 
 def main(argv: list[str] | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv[:1] == ["demo"]:
+        from prefixwise import demo
+        return demo.run(argv[1:])
     parser = build_parser()
+    if argv == ["help"]:
+        argv = ["--help"]
     args = parser.parse_args(argv)
     if getattr(args, "func", None) is None:
         print(GETTING_STARTED)

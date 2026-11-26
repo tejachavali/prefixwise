@@ -27,7 +27,7 @@ def run_task(task_id: str, question: str) -> bool:
     messages = [{"role": "system", "content": "You are a helpful assistant."},
                 {"role": "user", "content": question}]
     for _ in range(3):  # a tiny agent loop: the conversation grows each turn
-        raw = client.chat.completions.with_raw_response.create(model="gpt-5.6", messages=messages)
+        raw = client.chat.completions.with_raw_response.create(model="gpt-5.6-luna", messages=messages)
         reply = raw.parse().choices[0].message.content
         print(f"{task_id}: cause={raw.headers['x-prefixwise-cause']} "
               f"avoidable={raw.headers['x-prefixwise-avoidable-tokens']}")

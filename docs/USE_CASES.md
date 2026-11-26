@@ -1,6 +1,6 @@
 # Prefixwise use cases
 
-Eight situations where Prefixwise answers a question your provider dashboard cannot. Every command here runs as written; the `examples/` files are in this repository.
+Eight situations where Prefixwise answers a question your provider dashboard cannot. Every command here runs as written; the `examples/` files are in this repository (clone it: they are not in the pip package).
 
 Setup for all of them:
 
