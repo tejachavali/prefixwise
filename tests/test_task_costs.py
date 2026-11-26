@@ -198,19 +198,64 @@ def test_avoidable_dollars_are_not_given_when_a_priced_request_has_none():
     assert "0%" not in line and "$" not in line
 
 
-def test_with_a_window_the_lines_say_only_requests_in_it_are_counted():
+def test_with_a_window_the_lines_say_when_a_counted_task_has_requests_outside_it():
     led = Ledger()
     now = time.time()
     add(led, "t1", 1.00, at=now - 7200)
     add(led, "t1", 0.10, at=now - 60)
-    led.set_task_outcome("t1", True)
-    assert task_costs(led)["window_only"] is False
-    assert "window" not in "\n".join(_tasks(task_costs(led)))
+    add(led, "t2", 0.30, at=now - 60)
+    add(led, "open", 0.50, at=now - 7200)  # no outcome: straddles the window too, and is not one of "these tasks"
+    add(led, "open", 0.50, at=now - 60)
+    for task in ("t1", "t2"):
+        led.set_task_outcome(task, True)
+    whole = task_costs(led)
+    assert (whole["window_only"], whole["tasks_cut"]) == (False, 0)
+    assert "window" not in "\n".join(_tasks(whole))
     t = task_costs(led, since=now - 3600)
-    assert t["window_only"] is True and t["cost_per_successful_usd"] == pytest.approx(0.10)
+    assert (t["window_only"], t["tasks_cut"]) == (True, 1) and t["cost_per_successful_usd"] == pytest.approx(0.20)
     lines = _tasks(t)
-    assert lines[0] == "Tasks: 1 with an outcome, 1 succeeded. Each success cost $0.1000 (1,010 tokens) in this window."
-    assert "Only requests in this window are counted: a task that began before it cost more than this." in lines[1]
+    assert lines[0] == "Tasks: 2 with an outcome, 2 succeeded. Each success cost $0.2000 (1,010 tokens) in this window."
+    assert lines[1] == ("  1 of these tasks also has requests outside this window, which are not counted: "
+                        "it cost more than this.")
+    # a window that holds every request of its tasks says nothing about windows
+    t = task_costs(led, since=now - 9000)
+    assert (t["window_only"], t["tasks_cut"]) == (True, 0) and "window" not in "\n".join(_tasks(t))
+    # the other end: requests after the window
+    t = task_costs(led, until=now - 3600)
+    assert (t["window_only"], t["resolved"], t["tasks_cut"]) == (True, 1, 1)
+    assert "1 of these tasks also has requests outside this window" in "\n".join(_tasks(t))
+    # `prefixwise run` prints the same findings for its own run, and says "run"
+    text = render(findings(led, since=now - 3600), command="run")
+    assert "Each success cost $0.2000 (1,010 tokens) in this run." in text
+    assert "also has requests outside this run" in text and "window" not in text.split("Tasks:")[1]
+    assert "this run" not in render(findings(led, since=now - 9000), command="run").split("Tasks:")[1]
+
+
+def test_exactly_half_is_not_most_and_a_tie_goes_to_the_cause_with_more_tokens():
+    led = Ledger()
+    add(led, "t1", 0.10, "volatile_system", 300, 0.02)
+    add(led, "t1", 0.10, "tool_reserialize", 500, 0.02)
+    led.set_task_outcome("t1", True)
+    t = task_costs(led)
+    assert t["top_waste"]["cause"] == "tool_reserialize" and t["top_waste"]["share"] == pytest.approx(0.5)
+    assert "The largest part (50%): the same tools" in _tasks(t)[1]
+
+
+def test_a_model_priced_at_zero_and_an_odd_price_file():
+    # everything costs $0.00: the avoidable tokens are given, with no claim that a rate is missing
+    led = Ledger()
+    add(led, "t1", 0.0, "volatile_system", 800, 0.0)
+    led.set_task_outcome("t1", True)
+    line = _tasks(task_costs(led))[1]
+    assert line.startswith("  Avoidable on these tasks: 800 tokens.") and "not known" not in line
+    # a read rate above the input rate gives a negative avoidable cost on a row: counted as zero
+    led = Ledger()
+    add(led, "t1", 0.20, "volatile_system", 800, -0.04)
+    add(led, "t1", 0.20, "tool_reserialize", 100, 0.01)
+    led.set_task_outcome("t1", True)
+    t = task_costs(led)
+    assert t["avoidable_cost_usd"] == pytest.approx(0.01) and t["top_waste"]["cause"] == "tool_reserialize"
+    assert "-" not in _tasks(t)[1]
 
 
 def test_a_task_whose_every_request_failed_cost_nothing_as_the_metric_says():

@@ -357,8 +357,9 @@ def task_costs(ledger, since: float | None = None, until: float | None = None) -
     decides by. None when no task with requests in the window has an outcome.
 
     A task's tokens and dollars are those of its requests that got a verdict (as in
-    prefixwise.metrics), and with a window only of its requests inside it (`window_only`): a task
-    that began before the window cost more than is counted here. The cost of a success includes
+    prefixwise.metrics), and with a window only of its requests inside it (`window_only`).
+    `tasks_cut` counts the tasks that also have requests outside the window: they cost more than
+    is counted here. The cost of a success includes
     the failed tasks: they were paid for too. Dollars are given only when every such request is
     priced; a partial sum would understate them. The avoidable dollars need more: a request can be
     priced and its avoidable part not (a price file with no cache-read rate), and then they are not
@@ -388,6 +389,12 @@ def task_costs(ledger, since: float | None = None, until: float | None = None) -
         unresolved = conn.execute(
             f"""SELECT COUNT(DISTINCT task_id) FROM entries{where}{' AND' if where else ' WHERE'} task_id IS NOT NULL
                 AND task_id != '' AND task_id NOT IN (SELECT task_id FROM tasks)""", args).fetchone()[0]
+        cut = 0
+        if where:  # resolved tasks counted here that also have requests outside the window
+            cut = conn.execute(
+                f"""SELECT COUNT(DISTINCT task_id) FROM entries
+                    WHERE NOT ({' AND '.join(clauses)}) AND task_id IN (SELECT task_id FROM tasks)
+                    AND task_id IN (SELECT task_id FROM entries{where})""", args + args).fetchone()[0]
     got = {bool(r[0]): r for r in by_outcome}
     zero = (None, 0, 0, 0, None, None)
     ok, bad = got.get(True, zero), got.get(False, zero)
@@ -397,9 +404,10 @@ def task_costs(ledger, since: float | None = None, until: float | None = None) -
     # The avoidable dollars are known when the requests are priced and every avoidable row has its own.
     avoidable_known = all_priced and not any(c[3] for c in causes)
     avoidable_tokens = sum(c[1] for c in causes)
-    avoidable_cost = sum(c[2] or 0 for c in causes) if avoidable_known else None
+    causes = [(c[0], c[1], max(0.0, c[2] or 0.0), c[3]) for c in causes]  # (an odd price file: never negative)
+    avoidable_cost = sum(c[2] for c in causes) if avoidable_known else None
     out = {"resolved": ok[1] + bad[1], "successful": successful, "failed": bad[1], "unresolved": unresolved,
-           "window_only": since is not None or until is not None,
+           "window_only": since is not None or until is not None, "tasks_cut": cut,
            "tokens": tokens, "tokens_failed": bad[5] or 0,
            "tokens_per_successful": tokens / successful if successful else None,
            "avoidable_tokens": avoidable_tokens,
@@ -411,7 +419,7 @@ def task_costs(ledger, since: float | None = None, until: float | None = None) -
     if causes:
         # The cause that wasted most: by dollars where they are known, else by tokens. `share` is
         # its part of the avoidable total in that same unit.
-        size = (lambda c: c[2] or 0) if avoidable_known else (lambda c: c[1])
+        size = (lambda c: c[2]) if avoidable_known else (lambda c: c[1])
         total = avoidable_cost if avoidable_known else avoidable_tokens
         top = max(causes, key=lambda c: (size(c), c[1], c[0]))
         out["top_waste"] = {"cause": top[0], "what": CAUSE_PLAIN.get(top[0], top[0]), "avoidable_tokens": top[1],
@@ -425,14 +433,15 @@ def _small(x: float) -> str:
     return "under $0.0001" if 0 < x < 0.00005 else _usd(x)
 
 
-def _tasks(t: dict | None) -> list[str]:
-    """The report's lines on what a finished task cost."""
+def _tasks(t: dict | None, span: str = "window") -> list[str]:
+    """The report's lines on what a finished task cost. `span` names what a time window is to the
+    reader: "window" for `report --since`, "run" for the summary `prefixwise run` prints."""
     if not t:
         return []
     n, ok, bad = t["resolved"], t["successful"], t["failed"]
     dollars = t["cost_usd"] is not None
     spent = _small(t["cost_usd"]) if dollars else f"{_n(t['tokens'])} tokens"
-    here = " in this window" if t["window_only"] else ""
+    here = f" in this {span}" if t["tasks_cut"] else ""
     head = f"Tasks: {n:,} with an outcome, {ok:,} succeeded."
     if not ok:
         head = f"Tasks: {n:,} with an outcome, none succeeded: {spent} spent on {'it' if n == 1 else 'them'}{here}."
@@ -451,20 +460,22 @@ def _tasks(t: dict | None) -> list[str]:
     lines = [head]
     w = t["top_waste"]
     if w and t["avoidable_tokens"]:
-        known = t["avoidable_cost_usd"] is not None and dollars and t["cost_usd"]
-        if known:
+        if t["avoidable_cost_usd"] is not None and t["cost_usd"]:
             per = f"{_small(t['avoidable_cost_usd'] / ok)} a success, " if ok else ""
             amount = f"{per}{share_pct(t['avoidable_cost_usd'] / t['cost_usd'])} of what they cost"
-        else:
+        else:  # no dollars for them, or tasks that cost nothing (a model priced at zero)
             amount = f"{_n(t['avoidable_tokens'])} tokens" + (
-                " (their dollars are not known: a rate is missing for them)" if dollars else "")
+                " (their dollars are not known: a rate is missing for them)"
+                if dollars and t["avoidable_cost_usd"] is None else "")
         part = ("" if w["share"] is None else "Most of it: " if w["share"] > 0.5
                 else f"The largest part ({share_pct(w['share'])}): ")
         lines.append(f"  Avoidable on these tasks: {amount}." + (f" {part}{w['what']}." if part else ""))
     if not dollars:
         lines.append("  No dollars: not every request of these tasks is priced.")
-    if t["window_only"]:
-        lines.append("  Only requests in this window are counted: a task that began before it cost more than this.")
+    if t["tasks_cut"]:
+        m = t["tasks_cut"]
+        lines.append(f"  {m:,} of these tasks also {'have' if m != 1 else 'has'} requests outside this {span}, which are "
+                     f"not counted: {'they' if m != 1 else 'it'} cost more than this.")
     if t["unresolved"]:
         m = t["unresolved"]
         lines.append(f"  {m:,} more task{'s have' if m != 1 else ' has'} requests and no outcome yet, and "
@@ -689,7 +700,7 @@ f"{n:,} request{'' if n == 1 else 's'} on {m} (recorded before the table of {sin
         lines.append("The provider rejected the credentials (401/403). Prefixwise passes your agent's own API key "
                      "through; an agent signed in with a subscription instead of an API key (for example Codex "
                      "with a ChatGPT login) cannot be routed through a proxy.")
-    lines.extend(_tasks(f.get("tasks")))
+    lines.extend(_tasks(f.get("tasks"), span="run" if command == "run" else "window"))
     return "\n".join(lines)
 
 

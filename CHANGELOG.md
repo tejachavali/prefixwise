@@ -6,8 +6,8 @@
   - Dollars are given only when every request of those tasks is priced; otherwise the lines give tokens and say why. The avoidable part is given in tokens when a request is priced and its avoidable part is not (a price file with no cache-read rate).
   - Tasks that have requests and no outcome yet are counted, and are in none of the sums.
   - The cause named is the one that wasted most in dollars (in tokens where the dollars are not known), called "most of it" only above half; otherwise the line gives its share.
-  - With `--since`, only a task's requests inside the window are counted, and the lines say so.
-  - In `report --json` and the API's findings: `tasks`, with `resolved`, `successful`, `failed`, `unresolved`, `cost_usd`, `cost_failed_usd`, `cost_per_successful_usd`, `tokens`, `tokens_failed`, `tokens_per_successful`, `avoidable_tokens`, `avoidable_cost_usd`, `top_waste` (with its `share`) and `window_only`; `null` when no task has an outcome. `cost_per_successful_usd` and `tokens_per_successful` are the existing metrics `cost_per_successful_task_usd` and `tokens_per_successful_task`.
+  - With `--since`, and in the summary `prefixwise run` prints, only a task's requests inside the window or the run are counted. When a counted task also has requests outside it, the lines say so and how many.
+  - In `report --json` and the API's findings: `tasks`, with `resolved`, `successful`, `failed`, `unresolved`, `cost_usd`, `cost_failed_usd`, `cost_per_successful_usd`, `tokens`, `tokens_failed`, `tokens_per_successful`, `avoidable_tokens`, `avoidable_cost_usd`, `top_waste` (with its `share`), `window_only` and `tasks_cut`; `null` when no task has an outcome. `cost_per_successful_usd` and `tokens_per_successful` are the existing metrics `cost_per_successful_task_usd` and `tokens_per_successful_task`.
 
 ## 0.12.8: 2026-11-26
 
