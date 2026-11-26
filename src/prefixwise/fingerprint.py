@@ -107,10 +107,24 @@ _MASKS = ((_DATE_RE, "<DATE>", "date"), (_TIME_RE, "<TIME>", "time"), (_UUID_RE,
           (_TOKEN_WITH_DIGIT_RE, "<ID>", "id"))  # abc123 / session-42 are ids, not stable words
 
 
+# The text handed to the masks is JSON: a line break in the prompt is the two characters `\n`, which
+# put the letter n right before a value at the start of a line, and every pattern here begins at a
+# word boundary. So `\nNow: ...` was masked and `\n2026-11-26` was not, and a timestamp at the start of
+# a line read as an edit of the wording. Escaped line breaks and tabs become a space first. (An escaped
+# backslash followed by n, a literal backslash-n in the prompt, is left alone.) The result is only
+# hashed, never shown.
+_ESCAPED_SPACE_RE = re.compile(r"(?<!\\)((?:\\\\)*)\\[nrt]")
+
+
+def _unescape_space(text: str) -> str:
+    return _ESCAPED_SPACE_RE.sub(r"\1 ", text) if "\\" in text else text
+
+
 def mask_volatiles_kinds(text: str) -> tuple[str, tuple[str, ...]]:
     """(the text with volatile values replaced by placeholders, the kinds of value found, in order:
     date, time, id, path, number). The kinds are the only thing kept about the values; `path` is
     noted but not masked."""
+    text = _unescape_space(text)
     kinds: list[str] = []
     for pattern, token, kind in _MASKS:
         if pattern is _DATE_RE and not _DATE_HINT_RE.search(text):
@@ -140,6 +154,7 @@ def mask_only(text: str, kinds: frozenset) -> str:
     """The text with only the given kinds of volatile value masked (e.g. {"date", "time"}), so two
     texts can be compared with one kind of difference allowed. For "id" a bare number is not an id
     (the full masking turns numbers into <N> first; here they must stay apart)."""
+    text = _unescape_space(text)
     for kind in ("date", "time", "id", "number"):
         if kind not in kinds:
             continue
@@ -148,6 +163,45 @@ def mask_only(text: str, kinds: frozenset) -> str:
                 continue
             text = pattern.sub(token, text)
     return text
+
+
+# A `cache_control` key is a cache marker where the APIs define one: on the request, a tool (or its
+# `function`), a system block, a message, a content block. Inside a payload it is the user's data: a
+# tool's schema can have a property of that name, and a tool call's input a field. Text that merely
+# contains the word is neither.
+_PAYLOAD_KEYS = frozenset(("input_schema", "parameters", "arguments", "json_schema", "schema"))
+
+
+def _is_payload(holder: dict, key: str) -> bool:
+    return key in _PAYLOAD_KEYS or (key == "input" and str(holder.get("type") or "").endswith("tool_use"))
+
+
+def cache_markers(value: object, out: list | None = None) -> list:
+    """Every cache marker in a request (or a part of one), in order: the dict values of the
+    `cache_control` keys that sit where a marker can."""
+    out = [] if out is None else out
+    if isinstance(value, dict):
+        if isinstance(value.get("cache_control"), dict):
+            out.append(value["cache_control"])
+        for k, v in value.items():
+            if k != "cache_control" and not _is_payload(value, k):
+                cache_markers(v, out)
+    elif isinstance(value, list):
+        for v in value:
+            cache_markers(v, out)
+    return out
+
+
+def without_cache_markers(value: object) -> object:
+    """The value with its cache markers removed, for hashing: a marker says where to cache, not what
+    the prompt is, and the usual pattern moves it to the newest message every turn. A `cache_control`
+    inside a payload is content and stays."""
+    if isinstance(value, dict):
+        return {k: (v if _is_payload(value, k) else without_cache_markers(v))
+                for k, v in value.items() if k != "cache_control"}
+    if isinstance(value, list):
+        return [without_cache_markers(v) for v in value]
+    return value
 
 
 # JSON Schema arrays that are sets: their order means nothing, and a client that builds them from a
@@ -238,16 +292,17 @@ class Fingerprinter:
     _masked_cache: OrderedDict = field(default_factory=OrderedDict, repr=False, compare=False)
     _cache_lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
 
-    def _masked_hash(self, canon: bytes, canon_hash: str, key: bytes | None) -> tuple[str, tuple[str, ...]]:
+    def _masked_hash(self, canon: bytes, canon_hash: str) -> tuple[str, tuple[str, ...]]:
         """(masked hash, kinds of volatile value found)."""
-        # canon_hash already depends on key, so it is a safe cache key for either mode.
+        # canon_hash already depends on the key, so it is a safe cache key for either mode.
         with self._cache_lock:
             hit = self._masked_cache.get(canon_hash)
             if hit is not None:
                 self._masked_cache.move_to_end(canon_hash)
                 return hit
         text, kinds = mask_volatiles_kinds(canon.decode("utf-8", "surrogatepass"))
-        entry = (_hash(text.encode("utf-8", "surrogatepass"), key), kinds)
+        masked = text.encode("utf-8", "surrogatepass")
+        entry = (_hash(masked, self._key_for(masked)), kinds)
         with self._cache_lock:
             self._masked_cache[canon_hash] = entry
             if len(self._masked_cache) > MASK_CACHE_ENTRIES:
@@ -256,6 +311,15 @@ class Fingerprinter:
 
     def _is_short(self, raw: bytes) -> bool:
         return len(raw) <= self.short_block_chars
+
+    def _key_for(self, data: bytes) -> bytes | None:
+        """The key for one hash: the per-install key when what is hashed is short, else none. Each of
+        a block's three hashes decides by its own text, because each is only ever compared with the
+        same kind of hash of another block: two blocks that are equal once masked have masked text of
+        the same length, whatever their raw lengths. (Deciding all three by the raw length keyed two
+        such blocks differently when a timestamp moved one of them across the limit, so a volatile
+        value read as an edit.)"""
+        return self.hmac_key if self._is_short(data) else None
 
     def fingerprint_block(self, role: str, index: int, value: object) -> BlockFingerprint:
         if role == "soft_tokens":
@@ -269,9 +333,9 @@ class Fingerprinter:
         # A tool's schema sets (`required`, a `type` list) in another order are the same tool.
         canon = canonical_bytes(schema_sets(value) if role == "tools" else value)
         # HMAC replaces bare hashing for short/predictable blocks entirely.
-        key = self.hmac_key if self._is_short(raw) else None
-        canon_hash = _hash(canon, key)
-        masked, kinds = self._masked_hash(canon, canon_hash, key)
+        key = self._key_for(raw)
+        canon_hash = _hash(canon, self._key_for(canon))
+        masked, kinds = self._masked_hash(canon, canon_hash)
         return BlockFingerprint(
             role=role, index=index,
             raw=_hash(raw, key), canonical=canon_hash, masked=masked,

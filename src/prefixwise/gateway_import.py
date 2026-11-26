@@ -146,11 +146,21 @@ def _provider(entry: dict, body: dict, response: dict) -> str:
 
 
 def read_log(path: str | os.PathLike) -> tuple[list[dict], int]:
-    """(entries, lines that could not be used). Each entry: start, end, provider, body, response,
-    headers, status, line. A directory reads every *.jsonl / *.json file in it, in name order."""
+    """(entries, lines that could not be used). See read_log_counts."""
+    entries, bad, _ = read_log_counts(path)
+    return entries, bad
+
+
+def read_log_counts(path: str | os.PathLike) -> tuple[list[dict], int, int]:
+    """(entries, lines that could not be used, lines that repeat a request already read). Each entry:
+    start, end, provider, body, response, headers, status, line. A directory reads every *.jsonl /
+    *.json file in it, in name order. A request logged twice (a shipper that retried, two files that
+    overlap) is counted once: the second line with the same response id is left out. A response with
+    no id cannot be told from another, so it is always kept."""
     p = Path(path)
     files = sorted(f for f in p.iterdir() if f.suffix in (".jsonl", ".json")) if p.is_dir() else [p]
-    entries, bad = [], 0
+    entries, bad, repeated = [], 0, 0
+    seen_ids: set = set()
     for f in files:
         with open(f, encoding="utf-8") as fh:
             for n, line in enumerate(fh, 1):
@@ -168,6 +178,12 @@ def read_log(path: str | os.PathLike) -> tuple[list[dict], int]:
                 if not isinstance(body, dict) or not isinstance(response, dict) or start is None:
                     bad += 1
                     continue
+                rid = response.get("id")
+                if isinstance(rid, str) and rid:
+                    if rid in seen_ids:
+                        repeated += 1
+                        continue
+                    seen_ids.add(rid)
                 end = parse_time(_get(raw, END_KEYS))
                 if end is None:
                     ms = _get(raw, LATENCY_MS_KEYS)
@@ -192,7 +208,7 @@ def read_log(path: str | os.PathLike) -> tuple[list[dict], int]:
                                 # replayed one after another, never as in flight together.
                                 "timed": timed,
                                 "line": f"{f.name}:{n}"})
-    return entries, bad
+    return entries, bad, repeated
 
 
 def ended(e: dict) -> float:

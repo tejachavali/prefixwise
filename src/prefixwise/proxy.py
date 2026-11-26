@@ -66,7 +66,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from .classifier import MIN_PROVIDER_TTL_SECONDS, _blocks_by_role, _role_unchanged, anthropic_min_prefix, openai_model
 from .details import Facts, body_facts, keeps_thinking, usage_facts
 from .diagnostics import anthropic_diagnostics
-from .fingerprint import Fingerprinter
+from .fingerprint import Fingerprinter, cache_markers, without_cache_markers
 from .fixes import apply_fixes, auto_breakpoints, cache_key_for, parse_fixes
 from . import api
 from .pricing import PriceTable, breakdown, cache_reported, completion_tokens_of, normalize_usage  # noqa: F401 (re-exported)
@@ -119,13 +119,11 @@ def _strip_cache_markers(value: object) -> object:
     is. The standard Anthropic pattern moves the breakpoint to the newest
     message every turn; fingerprinting the marker made every ordinary turn
     look like HISTORY_EDIT. Breakpoint presence is checked separately
-    (has_cache_breakpoint) on the untouched body.
+    (has_cache_breakpoint) on the untouched body. Only markers are dropped:
+    a `cache_control` inside a tool's schema or a tool call's input is the
+    prompt's own content (fingerprint.without_cache_markers).
     """
-    if isinstance(value, dict):
-        return {k: _strip_cache_markers(v) for k, v in value.items() if k != "cache_control"}
-    if isinstance(value, list):
-        return [_strip_cache_markers(v) for v in value]
-    return value
+    return without_cache_markers(value)
 
 
 _SYSTEM_ROLES = ("system", "developer")
@@ -193,7 +191,11 @@ def cache_ttl_seconds(provider: str, body: dict, headers: dict | None = None) ->
         except ValueError:
             pass
     if provider == "anthropic":
-        return 3600.0 if '"ttl": "1h"' in json.dumps(body) else 300.0
+        # From the markers themselves: a tool call whose argument happens to be {"ttl": "1h"} asks
+        # nothing of the cache.
+        top = body.get("cache_control") if isinstance(body.get("cache_control"), dict) else None
+        markers = ([top] if top else []) + [m for k in ("tools", "system", "messages") for m in cache_markers(body.get(k))]
+        return 3600.0 if any(m.get("ttl") == "1h" for m in markers) else 300.0
     if provider == "openai" and body.get("prompt_cache_retention") == "24h":
         return 86400.0
     return None
@@ -329,8 +331,9 @@ def has_cache_breakpoint(body: dict) -> bool:
     """Anthropic: cache_control anywhere (top level, tools, system, messages)."""
     if body.get("cache_control"):
         return True
-    return any("cache_control" in json.dumps(body.get(k) or [])
-               for k in ("tools", "system", "messages"))
+    # A marker, not the word: text that mentions cache_control, or a schema property of that name,
+    # is not one.
+    return any(cache_markers(body.get(k)) for k in ("tools", "system", "messages"))
 
 
 def _mock_tool_call(body: dict, provider: str, api: str) -> tuple[str, dict] | None:

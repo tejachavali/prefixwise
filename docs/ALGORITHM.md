@@ -44,14 +44,24 @@ those, by an end-user id (`metadata.user_id`, OpenAI `user`).
 
 **Each block has three hashes** (SHA-256 over the block as parsed and re-serialized, so whitespace
 and escaping in the original bytes are not seen). With a per-install key set (`PREFIXWISE_HMAC_KEY`),
-blocks of 256 bytes or less, which a bare hash could give away, are keyed hashes (HMAC) instead;
-without one they are plain SHA-256 like the rest:
+a hash over 256 bytes or less, which a bare hash could give away, is a keyed hash (HMAC) instead;
+without one they are plain SHA-256 like the rest. Each of the three decides by its own text (the bytes
+as sent, the canonical form, the masked form), since a hash is only ever compared with the same kind
+of hash of another block: two blocks that are equal once masked are keyed alike, whatever their raw
+lengths. The three hashes:
 
 | Hash | Over | Equal means |
 |---|---|---|
 | raw | the content as sent, serialized | the provider saw the same content in the same form |
 | canonical | the content with keys sorted at every depth, fixed separators, NFC unicode, and JSON Schema set-arrays (`required`, a list `type`) sorted | the same content, possibly serialized differently |
 | masked | the canonical form with dates, times, UUIDs, hex ids, numbers and any token containing a digit (`v2`, `gpt4`) replaced by placeholders | the same words: only volatile values differ |
+
+**Cache markers are not part of a block.** A `cache_control` says where to cache, not what the prompt
+is, and the usual pattern moves it to the newest message every turn, so it is left out of every hash.
+A marker is told by where it sits: on the request, a tool (or its `function`), a system block, a
+message, or a content block. A `cache_control` key inside a tool's schema or a tool call's input is
+the prompt's own content and is hashed, and text that contains the word is not a marker. The same
+rule decides whether a request carries a breakpoint at all and which lifetime its markers ask for.
 
 No prompt text is kept. The hashes live in memory for the lane's next turn; when a remote collector
 (`--collector`) or a record log (Redis) is configured, they travel with the turn's record to it,

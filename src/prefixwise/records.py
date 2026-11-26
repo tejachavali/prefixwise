@@ -29,6 +29,9 @@ RECORD_VERSION = 1
 # Prompt-affecting request parameters the classifier compares (RequestSnapshot.params). A change
 # in one of these re-renders the prompt without changing any block.
 PARAM_KEYS = ("tool_choice", "thinking", "reasoning", "output_format",
+              # Anthropic's current home of the effort level and the structured-output format
+              # (output_format is the older field), and its context-editing settings
+              "output_config", "context_management",
               # Chat Completions structured outputs: the schema is rendered into the prompt
               "response_format",
               # SGLang leaves extra_key out of its KV-event hashes, so a change must be seen here

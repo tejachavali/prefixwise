@@ -91,7 +91,7 @@ from dataclasses import dataclass, field
 import threading
 from collections import OrderedDict
 
-from .fingerprint import mask_only, mask_volatiles, schema_sets
+from .fingerprint import cache_markers, mask_only, mask_volatiles, schema_sets, without_cache_markers
 
 LOOKBACK_POSITIONS = 20  # Anthropic: positions checked per breakpoint, the breakpoint itself first
 LOOKBACK_CLAIM = LOOKBACK_POSITIONS + 2  # claim only this far out: block counting may differ slightly
@@ -157,24 +157,14 @@ def _h(obj) -> str:
 
 
 def _strip_markers(value):
-    if isinstance(value, dict):
-        return {k: _strip_markers(v) for k, v in value.items() if k != "cache_control"}
-    if isinstance(value, list):
-        return [_strip_markers(v) for v in value]
-    return value
+    """Without its cache markers; a `cache_control` inside a tool's schema or a tool call's input is
+    content and stays (fingerprint.without_cache_markers)."""
+    return without_cache_markers(value)
 
 
 def _cache_controls(value, out: list) -> None:
-    if isinstance(value, dict):
-        cc = value.get("cache_control")
-        if isinstance(cc, dict):
-            out.append(cc)
-        for k, v in value.items():
-            if k != "cache_control":
-                _cache_controls(v, out)
-    elif isinstance(value, list):
-        for v in value:
-            _cache_controls(v, out)
+    """The cache markers of a request, where the APIs define one (fingerprint.cache_markers)."""
+    cache_markers(value, out)
 
 
 _PREFIX_KEYS: OrderedDict = OrderedDict()  # prefix_key -> the four comparison keys; an agent resends its prefix
