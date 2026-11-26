@@ -215,11 +215,14 @@ ran in between, and the provider's diagnostics are chained to that same turn (a 
 sent with `previous_response_id` belongs to its parent's conversation and is compared with the turn
 it names). Known limits: conversations that open with the identical message are treated as one,
 and past 8 conversations in a lane the least recently used one is forgotten. A request that has no
-turn of its own to be compared with is not blamed for a change: an earlier point of its own
-conversation (its messages open the compared turn's: a record delivered late, a rewind), or, where
-the session names no conversation or the lane is full of recent ones, a request of several
-messages whose opening and following messages are not the compared turn's. It is judged by its own
-read (`none` if at least half of its prompt came from the cache, else `unknown`). The specification
+turn of its own to be compared with is not blamed for a change in its conversation: an earlier
+point of its own conversation (its messages open the compared turn's: a record delivered late, a
+rewind), or, where the session names no conversation or the lane is full of recent ones, a request
+of several messages none of which is the compared turn's. It is judged by its own read (`none` if
+at least half of its prompt came from the cache, else `unknown`); a change in its tools or system
+prompt is still named. A request that keeps any message of the compared turn under another opening
+(a sliding window, a summary and a kept tail) is that conversation with its history rewritten, and
+takes its place in the lane. The specification
 is [ALGORITHM.md](ALGORITHM.md); this is its outline. The
 first rule that fires wins; later ones are kept as secondary causes. In order:
 
@@ -244,7 +247,8 @@ first rule that fires wins; later ones are kept as secondary causes. In order:
    - tool results: `tool_result_mutation`, or `compaction_rewrite` after a compaction.
 
    Facts from the responses overrule a change: nothing was read and the previous turn had left
-   nothing in the cache (on Anthropic, a marked prefix too small to cache: `below_min_prefix`);
+   nothing in the cache (on Anthropic, a marked part too small to cache: `below_min_prefix`; or
+   one clearly large enough whose markers were not honoured: `unknown`);
    nothing was read and the entry was older than the cache's TTL (it had expired anyway:
    `ttl_expired`); or the cache still served all of the prefix the previous turn could share (the
    change cost nothing: `none`). The change is kept as a secondary cause either way. A change that
@@ -261,7 +265,8 @@ first rule that fires wins; later ones are kept as secondary causes. In order:
    - a **hit**, `none`: at least half of the reusable prefix was read from cache;
    - `below_min_prefix` on Anthropic when the previous turn carried `cache_control` and still
      read and wrote nothing (what its marker covered was too small to cache), and nothing was
-     read now;
+     read now; `unknown` when what it covered was clearly above the minimum (the markers were
+     not honoured);
    - engine evidence: a confirmed `evicted`, or a confirmed `routing_miss` across caches;
    - `retry_replay`: the identical request again within a minute, less than half read;
    - with one self-hosted engine and no event evidence: `evicted`, inferred and said so (with

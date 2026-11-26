@@ -6,8 +6,9 @@ shape, fingerprints it exactly as the proxy does, applies ONE known change for t
 checks that the verdict names that change. Seeded, so a failure reproduces: the case id names the
 seed. These are the rules docs/ALGORITHM.md states; a failure here is a bug in one or the other.
 
-PREFIXWISE_INVARIANT_SEEDS=20 runs every generated test on 20 times as many seeds (the first
-seeds are the same ones, so a default run is a subset of a longer one)."""
+PREFIXWISE_TEST_INVARIANT_SEEDS=20 runs every generated test on 20 times as many seeds (the first
+seeds are the same ones, so a default run is a subset of a longer one). The name starts with
+PREFIXWISE_TEST_ because conftest.py removes every other PREFIXWISE_ variable from the environment."""
 
 import copy
 import json
@@ -21,7 +22,7 @@ from prefixwise.fingerprint import Fingerprinter
 from prefixwise.ledger import avoidable_for_turn, held_for_turn
 from prefixwise.proxy import extract_blocks
 
-SEEDS = max(1, int(os.environ.get("PREFIXWISE_INVARIANT_SEEDS", "1")))  # a multiplier on every seed count below
+SEEDS = max(1, int(os.environ.get("PREFIXWISE_TEST_INVARIANT_SEEDS", "1")))  # a multiplier on every seed count below
 FP = Fingerprinter()
 MODELS = {"anthropic": "claude-sonnet-4-6", "openai": "gpt-5"}
 WORDS = ("search", "read", "write", "list", "grep", "fetch", "edit", "run", "plan", "test", "diff", "open")
@@ -229,8 +230,11 @@ def test_one_change_is_named_and_a_full_read_is_never_a_miss(seed, rng, provider
     # write count), its whole prompt (it wrote it), or, on Anthropic, known to be nothing (it
     # carried cache_control, reported a write count, and read and wrote 0).
     left = ("not known", "its prompt", "nothing")[seed % 3]
+    # (How many tokens the previous turn's markers covered, by the collector's estimate: under the
+    # model's minimum of 1,024, far above it, or not known.)
+    marked = (300, 5_000, None)[(seed // 3) % 3]
     prev = _snap(body, provider, 20_000, 0, cache_written=20_000 if left == "its prompt" else 0,
-                 write_reported=provider == "anthropic" and left != "not known")
+                 write_reported=provider == "anthropic" and left != "not known", marked_tokens=marked)
     left_nothing = provider == "anthropic" and left == "nothing"
     engine = provider == "openai" and rng.random() < 0.3  # behind vLLM/SGLang: system before tools
     # 1. A miss (nothing read): the verdict is exactly the change made, with its legitimacy.
@@ -238,7 +242,10 @@ def test_one_change_is_named_and_a_full_read_is_never_a_miss(seed, rng, provider
     if left_nothing:
         # ...unless the previous turn is known to have left nothing: then nothing was lost, and the
         # change, kept as a secondary cause, is never waste (so no waste verdict has 0 avoidable).
-        assert miss.cause is MissCause.BELOW_MIN_PREFIX and miss.legit is None and expected in miss.secondary, (seed, miss)
+        # Below the minimum when the marked part was small (or its size is not known); not known
+        # when it was far above the minimum: the markers were not honoured.
+        assert miss.cause is (MissCause.UNKNOWN if marked == 5_000 else MissCause.BELOW_MIN_PREFIX), (seed, miss)
+        assert miss.legit is None and expected in miss.secondary and not miss.score, (seed, miss)
     else:
         assert miss.cause is expected, (seed, mutation.__name__, miss.cause, miss.evidence)
         assert miss.legit is (False if expected in WASTE else True if expected in LEGIT else None)

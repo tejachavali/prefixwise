@@ -133,16 +133,26 @@ the cause:**
 
 One exception: **another conversation is not an edit of this one.** It is decided only when the walk
 reaches the conversation, so a change in the tools or the system prompt is named first, against
-whichever turn of the lane the request was compared with. When the opening message differs and no
-compaction event came with the request (with one, it is a `compaction_rewrite`, always):
+whichever turn of the lane the request was compared with (an earlier point of its conversation
+included, 2.4). When the opening message differs and no compaction event came with the request
+(with one, it is a `compaction_rewrite`, always), the first row that fits decides:
 
 | The request | Is |
 |---|---|
+| It has several messages, none of the compared turn's messages or tool results is anywhere among its own (the same role, equal as blocks are compared), and there is evidence that the lane mixes conversations: the session names no conversation, or the lane is full (it remembers turns under 8 opening messages, each with a turn in the hour before this request was sent) | **another conversation whose own previous turn is not at hand** (never seen, or dropped to make room): judged by its own read (section 1) |
 | The previous request was a single message (an agent's side call, a one-shot classification) | a **new conversation** on the same tools and system prompt. The edit is kept as a secondary cause and the walk goes on to the tool results (a changed tool result is still named) |
 | This request is a single message, in a session that names no conversation (section 1) | a **new conversation**. The previous conversation's tool results are not compared |
-| This request has several messages, and the blocks after its opening are the compared turn's (at least one to compare, all that both have equal) | the same conversation with its first message edited: `history_edit` |
-| This request has several messages, the blocks after its opening are not the compared turn's, and there is evidence that the lane mixes conversations: the session names no conversation, or the lane is full (it remembers 8 conversations, each with a turn in the hour before this request was sent) | **another conversation whose own previous turn is not at hand** (never seen, or dropped to make room): judged by its own read (section 1) |
-| Anything else (a named session with room to remember) | `history_edit`: a history rewritten from its first message is still reported |
+| Anything else | `history_edit`: the same conversation, its history rewritten from the first message on. A request of several messages that keeps any message or tool result of the compared turn is always this, in every kind of session, full lane or not: a sliding window that dropped the oldest messages, a summary followed by a kept tail, an edited first message. So is a full rewrite in a named session with room to remember |
+
+A rewrite that goes on from the turn it was compared with does not add a conversation to the lane.
+When a request with another opening still carries the end of the lane's latest turn (that turn's
+last two messages or tool results, adjacent and in order; its only one if it has one), it is filed
+in that turn's place under its new opening: a history trimmed from the front, a summary with a kept
+tail, an edited first message. So is a compaction sent with its event while the lane holds one
+conversation. A lane is therefore filled by conversations, not by one conversation's rewrites. Any
+other request with another opening is filed beside the turn it was compared with. (One recurring
+message decides the verdict above, but not this: two conversations that share a message would
+otherwise take each other's place in the lane, turn after turn.)
 
 **A new conversation** is judged by 2.3 up to and including the first-marker rule: a hit is a hit, a
 missing `cache_control` is still named. Below that it shares only the tools and system prompt before
@@ -160,7 +170,7 @@ A change is then weighed against what the cache actually did:
 | Condition | Verdict |
 |---|---|
 | This request is below the provider's minimum and nothing was read | `below_min_prefix`: no version of it could have been read; the change cost nothing |
-| The previous turn left nothing in the cache (below), and nothing was read | `below_min_prefix`: nothing was there to lose, or to expire; the change cost nothing |
+| The previous turn left nothing in the cache (below), and nothing was read | `below_min_prefix` or `unknown` (below): nothing was there to lose, or to expire; the change cost nothing |
 | The entry's age exceeds the cache TTL and nothing was read | `ttl_expired`: the entry was gone; the change cost nothing more |
 | The cache served all of `R` | `none`: the change came after the reusable prefix or never reached the rendered prompt |
 | Otherwise | the change's cause |
@@ -168,8 +178,8 @@ A change is then weighed against what the cache actually did:
 In the first four the change is kept as a secondary cause, and the provider's own reason (if any)
 is not scored against the verdict, since it answers another question.
 
-**A previous turn that left nothing in the cache.** Claimed only where a marked prefix below the
-model's minimum cacheable size is the one explanation left. All of these hold:
+**A previous turn that left nothing in the cache.** Claimed only where the provider's own counts say
+so. All of these hold:
 
 - Anthropic's own API, not behind a self-hosted engine;
 - the previous turn's usage carried a cache-write count (`cache_creation_input_tokens`, or the
@@ -182,7 +192,21 @@ model's minimum cacheable size is the one explanation left. All of these hold:
 
 After such a turn a request that read nothing lost nothing: with a change it is the row above, and
 with none it is the row of 2.3. So no waste verdict follows such a turn, except for a request that
-carries no `cache_control` at all (2.3, section 5).
+carries no `cache_control` at all (2.3, section 5). Why nothing was left is named as far as it is
+known, from an estimate of the tokens that turn's markers covered: the blocks up to its last marker,
+as a share of the request's bytes, times its prompt tokens. (Exact in bytes for a marker on a tool or
+on the last block of the system prompt; a marker on an earlier system block or inside the
+conversation is placed by its position among those blocks. Tokens are not bytes, so it is an
+estimate either way.)
+
+| The estimate | Verdict |
+|---|---|
+| Under twice the model's minimum cacheable size | `below_min_prefix`: the marked part was below the minimum, or not clearly above it |
+| At least twice the minimum | `unknown`: the markers were not honoured (a gateway that strips them, or a server that fills the write count with 0). The evidence gives the estimate and the minimum |
+| Not known (a record with no marker positions) | `below_min_prefix`; the evidence says the size is not known |
+
+Neither is scored against the provider's own reason when a change is kept as a secondary cause, and
+`unknown` never is.
 
 **Age, not idle time.** A stated TTL is compared with the cache entry's age: the time since the
 previous turn was *sent*. A provider counts an entry's lifetime from the request that wrote or read
@@ -212,7 +236,7 @@ and nothing is cached until the markers are there too.
 | Half read (section 1) | `none` |
 | Anthropic: this is the first turn carrying a breakpoint and less than half was read | `first_write` |
 | A new conversation (2.2) whose shared tools and system prompt are not known to have been cached and missed | `first_write`, legitimacy left open |
-| The previous turn left nothing in the cache (2.2), and nothing was read | `below_min_prefix`: what its marker covered was too small to cache, so there was nothing for a router to miss, nothing to expire, and nothing a retry could have read |
+| The previous turn left nothing in the cache (2.2), and nothing was read | `below_min_prefix`, or `unknown` when its markers covered clearly more than the minimum (2.2): there was nothing for a router to miss, nothing to expire, and nothing a retry could have read |
 | Engine evidence: the block where the read stopped was removed | `evicted`, confirmed |
 | Engine evidence: another cache served this request while the previous one still held the prefix | `routing_miss`, confirmed |
 | An OpenAI-compatible API that is not OpenAI, prompt under 1,024 tokens | `unknown` (its minimum is not known) |
@@ -229,13 +253,14 @@ and nothing is cached until the markers are there too.
 ### 2.4 Facts outside the two requests
 
 Three facts about the turn at hand are checked before the comparison, in this order. The first and
-the third replace 2.1 to 2.3 altogether, the second replaces 2.2 and 2.3; no detail is attached to
-their verdicts:
+the third replace 2.1 to 2.3 altogether. The second replaces only what 2.2 and 2.3 say about the
+conversation: 2.1 and the comparison of tools and system prompt (2.2) come first. No detail is
+attached to their verdicts:
 
 | Fact | Verdict |
 |---|---|
 | `previous_response_id` names a response this proxy never saw | `unknown`: the prefix cannot be reconstructed |
-| **An earlier point of its own conversation.** The request's conversation blocks (messages and tool results, in order) are a proper prefix of the compared turn's: every block it carries opens that turn, which goes on after them. It carries no compaction event, and is not a stitched Responses turn | 2.1 still applies (a compared turn below the minimum is `below_min_prefix`). Otherwise nothing it sent changed, and its predecessor is the turn before that point, not the one at hand: it is judged by its own read (section 1), and is also `none` when the cache served all of `R`, since the turn at hand is its own conversation's and what that turn left is what it could read |
+| **An earlier point of its own conversation.** The request's conversation blocks (messages and tool results, in order) are a proper prefix of the compared turn's: every block it carries opens that turn, which goes on after them. It carries no compaction event, and is not a stitched Responses turn | 2.1 still applies (a compared turn below the minimum is `below_min_prefix`), and so does the comparison of tools and system prompt: a change there is named and weighed as in 2.2, and the request is then subject to the in-flight rule below like any other. With tools and system unchanged, nothing it sent changed, and its predecessor is the turn before that point, not the one at hand: it is judged by its own read (section 1), and is also `none` when the cache served all of `R`, since the turn at hand is its own conversation's and what that turn left is what it could read |
 | The request was sent more than the clock skew (1 s, `PREFIXWISE_CLOCK_SKEW`) before the turn it is compared with finished, it is not a new conversation in the lane (2.1) or a stitched Responses turn, and it read less than half of the shorter of the two prompts | `unknown`: it could not have read that turn's write |
 
 An earlier point is told by the blocks alone, never by the clock. What the clock then decides is only
@@ -392,13 +417,24 @@ Anthropic's request shape, and the Anthropic early-breakpoint case (each has han
   apart is told from the messages (2.2):
   - A conversation whose own previous turn is not at hand (it opens with several messages, or the
     lane dropped it) is judged by its own read: a miss is `unknown`, never named.
-  - A compaction sent with no compaction event is not reported there. Rewritten into a single
-    message it reads as a new conversation; rewritten into several, as another conversation.
-    Send the event (`X-Prefixwise-Compaction-Event: 1`) or a session id.
+  - A rewrite that keeps none of the previous messages (a compaction into a summary alone), sent
+    with no compaction event, is not reported there. Rewritten into a single message it reads as a
+    new conversation; into several, as another conversation. The same holds in a named session
+    whose lane is full. Send the event (`X-Prefixwise-Compaction-Event: 1`). A rewrite that keeps
+    any message (a sliding window, a summary and a kept tail) is `history_edit` everywhere.
+  - One shared message makes two requests one conversation. Two conversations in a session whose
+    requests have a message or tool result in common (a reply such as "continue", an identical tool
+    output) read as one whose history was rewritten, `history_edit`, when one of them is compared
+    with the other's turn (its own previous turn is not remembered). As before these rules.
+  - A window that keeps fewer than the last two messages of the previous turn is reported
+    (`history_edit`) but each such turn is filed as one more conversation of its lane.
   - In a session that does name a conversation, a first message unlike the latest turn's still reads
     as a `history_edit` when it is really another conversation's (a second subagent of the same
     type starting after the first one's second turn), unless the lane is full of recent
     conversations and the request has several messages.
+- **How much a marker covered is an estimate.** After a turn that left nothing in the cache, the
+  choice between `below_min_prefix` and `unknown` rests on the marked blocks' share of the request's
+  bytes. Neither is waste, so the estimate never changes what is counted, only the cause named.
 - **Judged by its own read means half of its own prompt.** A request with no turn of its own to be
   compared with is a hit when at least half of its prompt came from the cache. One that read only a
   large shared system prompt is then a hit though its own history was not read; one that read all of

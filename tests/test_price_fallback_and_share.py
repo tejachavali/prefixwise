@@ -50,7 +50,10 @@ def test_the_report_names_approximate_and_unpriced_models():
 
 
 def test_share_block_has_the_numbers_and_no_text():
-    p = proxy([a_usage(write5=8_000), a_usage(fresh=8_000), a_usage(fresh=8_000)])
+    # Each turn that misses writes its prefix again, as Anthropic does for a marked prompt. (A marked
+    # turn that reports 0 written and 0 read is one whose markers were not honoured: the turn after
+    # it is then `unknown`, which is another line of the block; tests/test_classifier_verdicts.py.)
+    p = proxy([a_usage(write5=8_000), a_usage(write5=8_000), a_usage(write5=8_000)])
     secret = "zqx-never-shown"
     msgs = [{"role": "user", "content": f"please {secret}"}]
     p.handle("anthropic", body(msgs, model="claude-opus-4-8"), {"x-prefixwise-session-id": "s"})

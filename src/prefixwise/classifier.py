@@ -162,6 +162,10 @@ class RequestSnapshot:
     write_reported: bool = False
     # cache_control on the request's last block: the marked prefix is the whole prompt.
     last_block_marked: bool = False
+    # An estimate of the tokens this request's cache_control covered: the blocks up to its last
+    # marker, by their share of the request's bytes, times its prompt tokens. None when it carried
+    # no marker or the share is not known.
+    marked_tokens: int | None = None
     # False when the usage is a placeholder (offline `explain` without usage): rules that read
     # the cache's response must not fire.
     usage_known: bool = True
@@ -207,6 +211,9 @@ def _blocks_by_role(blocks: list[BlockFingerprint]) -> dict[str, list[BlockFinge
 
 def _tool_multiset(blocks: list[BlockFingerprint]) -> list[str]:
     return sorted(b.canonical for b in blocks if b.role == "tools")
+
+
+_WALKED = ("messages", "tool_results")  # the conversation, walked in the order it was sent
 
 
 def _same(a: BlockFingerprint, b: BlockFingerprint) -> bool:
@@ -278,9 +285,10 @@ def _wrote_nothing(prev: RequestSnapshot) -> bool:
 
 
 def _left_nothing(prev: RequestSnapshot, curr: RequestSnapshot) -> bool:
-    """The previous turn carried cache_control and still left nothing in the cache, because what its
-    markers covered was below the model's minimum cacheable size. Claimed only where that is the
-    one explanation left:
+    """The previous turn carried cache_control and is known to have left nothing in the cache: what
+    its markers covered was below the model's minimum cacheable size, or they were not honoured
+    (`_after_nothing_left` says which, as far as that is known). Claimed only where all of these
+    hold:
 
     - Anthropic's own API, not a self-hosted engine, and the turn's usage carried a cache-write
       count (a server that reports no writes says nothing by its 0);
@@ -292,6 +300,39 @@ def _left_nothing(prev: RequestSnapshot, curr: RequestSnapshot) -> bool:
     return (_wrote_nothing(prev) and prev.write_reported and prev.has_breakpoint
             and not prev.engine and not curr.engine
             and not prev.last_block_marked and not _markers_ignored(curr))
+
+
+def _after_nothing_left(prev: RequestSnapshot, curr: RequestSnapshot, secondary: list, native_reason: str | None,
+                        changed: MissCause | None = None) -> Classification:
+    """The verdict for a request that read nothing after a turn that left nothing (`_left_nothing`):
+    never waste, since nothing was in the cache to lose, to expire or to be missed. Why nothing was
+    there is named only as far as it is known. The previous turn's markers covered about
+    `prev.marked_tokens` tokens (an estimate from block sizes): when that is at least twice the
+    model's minimum cacheable size, the markers were not honoured and the cause is `unknown`;
+    below twice the minimum the marked part was too small to cache, or too close to the minimum for
+    an estimate to say otherwise: `below_min_prefix`. `changed`: a change this
+    request carries, which cost nothing and is kept as a secondary cause. With no estimate (a
+    record with no marker positions) it stays `below_min_prefix`, and the evidence says the size is
+    not known."""
+    floor = _min_prefix(curr) or anthropic_min_prefix(curr.model)
+    marked = prev.marked_tokens
+    cost = f"; the {changed.value} after it cost nothing" if changed is not None else ""
+    also = secondary + ([changed] if changed is not None else [])
+    if marked is not None and marked >= 2 * floor:
+        return Classification(MissCause.UNKNOWN, None,
+                              f"the previous turn carried cache_control on about {marked:,} tokens (estimated from the "
+                              f"size of its blocks), above the model's minimum cacheable size ({floor} tokens), yet "
+                              "the provider reported nothing read and nothing written, so that turn left nothing in "
+                              "the cache for this request to read. Its markers were not honoured (a gateway that "
+                              f"strips them, or a server that fills the write count with 0){cost}",
+                              also, native_reason, score=False)
+    size = (f"about {marked:,} tokens, estimated from the size of its blocks, was below the model's minimum "
+            f"cacheable size ({floor} tokens), or not clearly above it" if marked is not None else
+            f"of a size that is not known, is taken to be below the model's minimum cacheable size ({floor} tokens)")
+    return Classification(MissCause.BELOW_MIN_PREFIX, None,
+                          "the previous turn left nothing in the cache (it carried cache_control, yet read and wrote "
+                          f"0 tokens): the part its markers covered, {size}, so there was nothing to read{cost}",
+                          also, native_reason, score=changed is None)
 
 
 def own_read(curr: RequestSnapshot, why: str, native_reason: str | None = None,
@@ -427,13 +468,16 @@ def _volatile_kinds(prev_blocks: list, curr_blocks: list) -> str:
 
 
 def _first_change(prev: RequestSnapshot, curr: RequestSnapshot, secondary: list,
-                  native_reason: str | None, notes: dict | None = None) -> Classification | None:
+                  native_reason: str | None, notes: dict | None = None,
+                  conversation: bool = True) -> Classification | None:
     """The cause named by the first part of the prompt that changed, or None if none did
     (a changed user turn only adds to `secondary`). notes["new_conversation"] is set when the
     opening message differs because this is another conversation, not an edit of this one;
     notes["foreign"] (with None returned) when it is another conversation whose own previous turn
     is not the one at hand, and says why. Both are decided only after tools and system compared
-    equal: those are the lane's, and a change in them stands against any of its turns."""
+    equal: those are the lane's, and a change in them stands against any of its turns.
+    `conversation=False` stops after the tools and system (an earlier point of the compared turn's
+    conversation changed nothing in the conversation)."""
     prev_by_role = _blocks_by_role(prev.blocks)
     curr_by_role = _blocks_by_role(curr.blocks)
     # First divergence in prefix order. Anthropic and OpenAI put tools before the system
@@ -461,9 +505,10 @@ def _first_change(prev: RequestSnapshot, curr: RequestSnapshot, secondary: list,
     # The conversation grows by appending: the previous turn's blocks must be an unchanged prefix of
     # this turn's. The first block that is not, in the order they were sent (messages and tool
     # results interleaved), is where the cache stopped matching, and its kind names the cause.
-    walked = ("messages", "tool_results")  # "user" blocks (wire records only) are judged apart, below
-    pc = [b for b in prev.blocks if b.role in walked]
-    cc = [b for b in curr.blocks if b.role in walked]
+    if not conversation:
+        return None
+    pc = [b for b in prev.blocks if b.role in _WALKED]  # ("user" blocks, wire records only, are judged apart, below)
+    cc = [b for b in curr.blocks if b.role in _WALKED]
     i = next((k for k, (a, b) in enumerate(zip(pc, cc)) if a.role != b.role or not _same(a, b)), None)
     if i is None and len(pc) > len(cc):
         i = len(cc)  # earlier blocks removed (truncated history)
@@ -473,10 +518,23 @@ def _first_change(prev: RequestSnapshot, curr: RequestSnapshot, secondary: list,
         return None
     role = pc[i].role
     if role == "messages":
-        p, c = prev_by_role.get("messages", []), curr_by_role.get("messages", [])
-        one_shot = len(p) == 1
-        another_opening = bool(not curr.compaction_event and p and c and p[0].raw != c[0].raw)
-        if another_opening and (one_shot or (len(c) == 1 and curr.shared_session)):
+        relation = another_opening(prev, curr)
+        if relation == OTHER_CONVERSATION:
+            # Several messages, another opening, and not one message or tool result of the compared
+            # turn anywhere in it: not a rewrite of that turn's history but another conversation,
+            # whose own previous turn is not the one at hand (it was never seen, or the lane
+            # dropped it to make room).
+            if notes is not None:
+                notes["foreign"] = (
+                    "none of its messages is the compared turn's, and the session names no conversation: "
+                    "another conversation, whose own previous turn is not at hand"
+                    if curr.shared_session else
+                    "none of its messages is the compared turn's, and this session has turns under "
+                    f"{curr.lane_crowded} different opening messages on this model in the last hour, as many as "
+                    "it remembers: another conversation, whose own previous turn is no longer remembered "
+                    "(PREFIXWISE_LANE_THREADS raises the limit)")
+            return None
+        if relation == NEW_CONVERSATION:
             # The opening message differs, and either the previous request was a one-shot (a single
             # message: an agent's "title this" side call, a classification), or this request is a
             # single message in a session that names no single conversation (traffic with no
@@ -487,7 +545,7 @@ def _first_change(prev: RequestSnapshot, curr: RequestSnapshot, secondary: list,
             # (or a compaction, with its event).
             if notes is not None:
                 notes["new_conversation"] = True
-            if not one_shot:
+            if len(prev_by_role.get("messages", [])) != 1:
                 return None  # the previous conversation's tool results are not this one's to keep
             secondary.append(MissCause.HISTORY_EDIT)
             pt, ct = prev_by_role.get("tool_results", []), curr_by_role.get("tool_results", [])
@@ -495,24 +553,6 @@ def _first_change(prev: RequestSnapshot, curr: RequestSnapshot, secondary: list,
                 role = "tool_results"
             else:
                 return None
-        elif (another_opening and len(c) > 1 and (curr.shared_session or curr.lane_crowded)
-              and not _same_after_opening(pc[i:], cc[i:])):
-            # Several messages, another opening, and what follows the opening is not the compared
-            # turn's either: not an edit of that turn's first message but another conversation,
-            # whose own previous turn is not the one at hand (it was never seen, or the lane
-            # dropped it to make room). That needs evidence that the lane mixes conversations: the
-            # session names none, or the lane is full of recent ones. Without it (a named session
-            # with room to remember), a history rewritten from its first message is still an edit.
-            if notes is not None:
-                notes["foreign"] = (
-                    "its opening message and the messages after it are not the compared turn's, and the session "
-                    "names no conversation: another conversation, whose own previous turn is not at hand"
-                    if curr.shared_session else
-                    "its opening message and the messages after it are not the compared turn's, and this session "
-                    f"already holds {curr.lane_crowded} conversations on this model with a turn in the last hour, "
-                    "all it remembers: another conversation, whose own previous turn is no longer remembered "
-                    "(PREFIXWISE_LANE_THREADS raises the limit)")
-            return None
         else:
             cause = MissCause.COMPACTION_REWRITE if curr.compaction_event else MissCause.HISTORY_EDIT
             legit = True if curr.compaction_event else False
@@ -532,19 +572,64 @@ def _first_change(prev: RequestSnapshot, curr: RequestSnapshot, secondary: list,
     return None
 
 
-def _same_after_opening(pc: list[BlockFingerprint], cc: list[BlockFingerprint]) -> bool:
-    """Two conversations (messages and tool results in the order sent, each from its opening
-    message on) whose openings differ: do the blocks after the opening match, as far as both go,
-    with at least one to compare? Then it is one conversation whose first message was edited."""
-    common = list(zip(pc[1:], cc[1:]))
-    return bool(common) and all(a.role == b.role and _same(a, b) for a, b in common)
+NEW_CONVERSATION, OTHER_CONVERSATION, REWRITTEN = "new conversation", "another conversation", "rewritten"
+
+
+def blocks_recur(prev_blocks: list[BlockFingerprint], blocks: list[BlockFingerprint]) -> bool:
+    """Does any message or tool result of the compared turn appear anywhere among this request's
+    (the same role, and equal as the walk compares blocks)? A sliding window that dropped the oldest
+    messages, or a summary followed by a kept tail, keeps some; another conversation keeps none."""
+    theirs = {(b.role, b.raw, b.canonical, b.masked) for b in prev_blocks if b.role in _WALKED}
+    return any((b.role, b.raw, b.canonical, b.masked) in theirs for b in blocks if b.role in _WALKED)
+
+
+def keeps_tail(prev_blocks: list[BlockFingerprint], blocks: list[BlockFingerprint]) -> bool:
+    """Does this request still carry the end of the compared turn's conversation: its last two
+    messages or tool results, adjacent and in that order (its only one, if it has one)? A history
+    trimmed from the front, or summarised with a tail kept, does; so does one whose first message
+    was edited. Stronger than `blocks_recur`, which one coincidence satisfies (two conversations
+    that both hold the message "yes"): this is what decides that a turn takes the compared turn's
+    place in its lane."""
+    key = lambda b: (b.role, b.raw, b.canonical, b.masked)  # noqa: E731
+    tail = [key(b) for b in prev_blocks if b.role in _WALKED][-2:]
+    mine = [key(b) for b in blocks if b.role in _WALKED]
+    return bool(tail) and any(mine[j:j + len(tail)] == tail for j in range(len(mine) - len(tail) + 1))
+
+
+def another_opening(prev: RequestSnapshot, curr: RequestSnapshot) -> str | None:
+    """What a request is whose opening message is not the compared turn's (None when it is the
+    same, or either has no message). Decided from the conversation alone, so the collector can
+    file the turn by the same answer the walk gives:
+
+    - REWRITTEN with a compaction event: a compaction is what it is, always.
+    - OTHER_CONVERSATION: several messages, none of the compared turn's messages or tool results
+      among them, and evidence that the lane mixes conversations (the session names none, or the
+      lane is full of recent ones). Its own previous turn is not at hand.
+    - NEW_CONVERSATION: the compared turn was a single message, or this request is a single
+      message in a session that names no conversation.
+    - REWRITTEN otherwise: the same conversation with its history rewritten from the first
+      message on. Whenever a block of the compared turn recurs in a request of several messages
+      it is this, in every kind of session."""
+    p = [b for b in prev.blocks if b.role == "messages"]
+    c = [b for b in curr.blocks if b.role == "messages"]
+    if not p or not c or p[0].raw == c[0].raw:
+        return None
+    if curr.compaction_event:
+        return REWRITTEN
+    if (len(c) > 1 and (curr.shared_session or curr.lane_crowded)
+            and not blocks_recur(prev.blocks, curr.blocks)):
+        return OTHER_CONVERSATION
+    if len(p) == 1 or (len(c) == 1 and curr.shared_session):
+        return NEW_CONVERSATION
+    return REWRITTEN
 
 
 def classify(prev: RequestSnapshot | None, curr: RequestSnapshot,
              *, native_reason: str | None = None, earlier_point: str | None = None) -> Classification:
     """Classify one turn against the previous turn in the same session. `earlier_point`: this
     request is an earlier point of the compared turn's own conversation (the collector's finding,
-    in words): after the rules that need no comparison, it is judged by its own read."""
+    in words): the rules that need no comparison apply, then a change in the tools or the system
+    prompt is named like any other, and with none it is judged by its own read."""
     if prev is None:
         if curr.fork_parent_session_id:
             return Classification(MissCause.FORK_BOUNDARY, True,
@@ -574,15 +659,15 @@ def classify(prev: RequestSnapshot | None, curr: RequestSnapshot,
                               f"cacheable prefix ({floor}): nothing was cached to reuse",
                               native_reason=native_reason)
 
-    if earlier_point:
-        # Nothing it sent changed, and its predecessor is the turn before that point, not the one at
-        # hand: no change is claimed. The turn at hand is still its own conversation's, so reading
-        # all that turn left of what this request repeats is a hit.
-        return own_read(curr, earlier_point, native_reason, served_all_left=_served_all(prev, curr))
-
     secondary: list[MissCause] = []
     notes: dict = {}
-    changed = _first_change(prev, curr, secondary, native_reason, notes)
+    changed = _first_change(prev, curr, secondary, native_reason, notes, conversation=not earlier_point)
+    if changed is None and earlier_point:
+        # Tools and system are as they were, and nothing in the conversation changed: its
+        # predecessor is the turn before that point, not the one at hand, so no change is claimed.
+        # The turn at hand is still its own conversation's, so reading all that turn left of what
+        # this request repeats is a hit.
+        return own_read(curr, earlier_point, native_reason, served_all_left=_served_all(prev, curr))
     if changed is None and notes.get("foreign"):
         return own_read(curr, notes["foreign"], native_reason)
     if (changed is not None and floor is not None and curr.usage_known
@@ -596,12 +681,7 @@ def classify(prev: RequestSnapshot | None, curr: RequestSnapshot,
     if changed is not None:
         if curr.usage_known and curr.prompt_tokens > 0 and curr.cached_tokens == 0 and _left_nothing(prev, curr):
             # Nothing was in the cache to lose (and so nothing to expire: this comes before the TTL).
-            return Classification(MissCause.BELOW_MIN_PREFIX, None,
-                                  "the previous turn left nothing in the cache (it carried cache_control, yet read "
-                                  "and wrote 0 tokens: what its markers covered was below the model's minimum "
-                                  f"cacheable size, {_min_prefix(curr) or anthropic_min_prefix(curr.model)} tokens); "
-                                  f"the {changed.cause.value} after it cost nothing",
-                                  secondary + [changed.cause], native_reason, score=False)
+            return _after_nothing_left(prev, curr, secondary, native_reason, changed.cause)
         age, ttl = _age(curr), curr.ttl_seconds
         if (curr.usage_known and ttl is not None and age is not None and age > ttl
                 and curr.prompt_tokens > 0 and curr.cached_tokens == 0):
@@ -744,13 +824,9 @@ def classify(prev: RequestSnapshot | None, curr: RequestSnapshot,
                               secondary, native_reason)
 
     if curr.usage_known and curr.cached_tokens == 0 and _left_nothing(prev, curr):
-        # The previous turn's marked prefix was too small to cache. There was nothing for a router
-        # to miss, nothing to expire and nothing a retry could have read.
-        return Classification(MissCause.BELOW_MIN_PREFIX, None,
-                              "the previous turn left nothing in the cache (it carried cache_control, yet read "
-                              "and wrote 0 tokens): what its markers covered was below the model's minimum "
-                              f"cacheable size ({_min_prefix(curr) or anthropic_min_prefix(curr.model)} tokens), "
-                              "so there was nothing to read", secondary, native_reason)
+        # Nothing was in the cache: nothing for a router to miss, nothing to expire and nothing a
+        # retry could have read.
+        return _after_nothing_left(prev, curr, secondary, native_reason)
 
     # From here the prefix was reusable but cache_read was low.
     # Engine eviction events are direct evidence; they outrank inference.
@@ -818,13 +894,13 @@ def classify(prev: RequestSnapshot | None, curr: RequestSnapshot,
     # What is judged from here: the unchanged prompt, or, for a new conversation, the tools and
     # system prompt it shares with the previous request (which is not evidence of how long an
     # unchanged prompt lasts).
-    cold = not shared_missed
+    unchanged = not shared_missed  # (cold_unchanged: an unchanged prefix that came back short)
     what = ("a new conversation on the tools and system prompt the previous request cached at a marker this "
             "one repeats; " if shared_missed else "")
     if ttl is not None and age is not None and age > ttl:
         return Classification(MissCause.TTL_EXPIRED, True,
                               f"{what}{_since(curr)} exceeds the cache TTL {ttl:.0f}s; {read}",
-                              secondary, native_reason, cold_unchanged=cold)
+                              secondary, native_reason, cold_unchanged=unchanged)
 
     # Within the TTL (or, when it is unknown, within the shortest TTL any provider keeps), an
     # unchanged prefix that came back short did not expire. With no eviction evidence, the request
@@ -842,20 +918,28 @@ def classify(prev: RequestSnapshot | None, curr: RequestSnapshot,
         limit = alive  # the cache has been seen to hold an unchanged prefix this long here
     if curr.cached_tokens and curr.provider == "anthropic":
         limit, by_observation = min(limit, MIN_PROVIDER_TTL_SECONDS), False
+    # Which lifetime decides: the stated one (or the shortest any provider keeps), against the
+    # entry's age; only when the age is past that does an observed lifetime decide, against the
+    # idle gap. The evidence names the one that decided.
+    stated = ttl if ttl is not None else MIN_PROVIDER_TTL_SECONDS
+    if curr.cached_tokens and curr.provider == "anthropic":
+        stated = min(stated, MIN_PROVIDER_TTL_SECONDS)
+    by_observation = by_observation and not (age is not None and age <= stated)
     measure = gap if by_observation else age
+    if not by_observation:
+        limit = stated
     if curr.prompt_tokens > 0 and measure is not None and measure <= limit:
-        window = (f"TTL {ttl:.0f}s" if ttl is not None and limit == ttl
+        window = (f"the observed lifetime on this model: {observed.describe()}" if by_observation
+                  else f"TTL {ttl:.0f}s" if ttl is not None and limit == ttl
                   else f"{MIN_PROVIDER_TTL_SECONDS // 60} minutes (the shortest TTL a breakpoint can have)"
                   if curr.provider == "anthropic" and curr.cached_tokens
-                  else f"the observed lifetime on this model: {observed.describe()}"
-                  if alive is not None and gap is not None and gap > MIN_PROVIDER_TTL_SECONDS
                   else f"shortest provider TTL {MIN_PROVIDER_TTL_SECONDS}s")
         # (An observed lifetime is measured in idle gaps; a stated one against the entry's age.)
         span = f"gap {gap:.0f}s" if by_observation else _since(curr, short=True)
         return Classification(MissCause.ROUTING_MISS, None,
                               f"inferred: {what or 'blocks and params equal, '}{span} within {window}, "
                               f"no eviction evidence, {read}",
-                              secondary, native_reason, cold_unchanged=cold)
+                              secondary, native_reason, cold_unchanged=unchanged)
     if curr.prompt_tokens > 0 and age is not None and curr.cached_tokens and curr.provider == "anthropic":
         return Classification(MissCause.UNKNOWN, None,
                               f"a part read ({read}), {_since(curr)}: a 5-minute breakpoint may "
@@ -876,7 +960,7 @@ def classify(prev: RequestSnapshot | None, curr: RequestSnapshot,
                               secondary, native_reason, cold_unchanged=True)
     return Classification(MissCause.UNKNOWN, None,
                           f"{what}prefix reusable but cache_read low ({read}); no timing or usage evidence to name "
-                          "a cause", secondary, native_reason, cold_unchanged=cold)
+                          "a cause", secondary, native_reason, cold_unchanged=unchanged)
 
 
 def classify_first_divergence(changed_role: str | None, *, model_changed: bool = False,

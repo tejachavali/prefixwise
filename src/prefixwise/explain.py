@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .classifier import RequestSnapshot, classify, first_divergence
-from .details import body_facts, last_block_marked, shared_breakpoint
+from .details import body_facts, last_block_marked, marked_share, shared_breakpoint
 from .fingerprint import BlockFingerprint, Fingerprinter
 from .pricing import breakdown, cache_reported, write_reported
 from .records import PARAM_KEYS as _PARAM_KEYS, param_fingerprint
@@ -119,6 +119,9 @@ def _snapshot(turn: Turn, provider: str, fp: Fingerprinter) -> RequestSnapshot:
         # Offline: pretend the shared prefix was fully served, so only a
         # divergence in the request itself can explain a miss.
         prompt, cached, min_prefix = 1, 1, 0
+    facts = body_facts(provider, turn.body)
+    share = marked_share(facts, blocks)
+    marked = int(prompt * share) if share is not None and turn.usage is not None and prompt > 0 else None
     return RequestSnapshot(model=str(turn.body.get("model", "unknown")), provider=provider,
                            blocks=blocks, prompt_tokens=prompt, cached_tokens=cached, cache_written=written,
                            gap_seconds=turn.gap_seconds, compaction_event=turn.compaction_event,
@@ -129,7 +132,8 @@ def _snapshot(turn: Turn, provider: str, fp: Fingerprinter) -> RequestSnapshot:
                            min_prefix_tokens=min_prefix, usage_known=turn.usage is not None,
                            cache_reported=cache_reported(provider, turn.usage) if turn.usage else True,
                            write_reported=write_reported(provider, turn.usage) if turn.usage else False,
-                           last_block_marked=last_block_marked(body_facts(provider, turn.body)))
+                           last_block_marked=last_block_marked(facts),
+                           marked_tokens=marked)
 
 
 def explain_pair(prev: Turn | None, curr: Turn, provider: str | None = None,

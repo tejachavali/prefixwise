@@ -19,9 +19,9 @@ import threading
 import time
 from collections import OrderedDict
 
-from .classifier import (MAX_ANTHROPIC_TTL_SECONDS, UNSEEN_PARENT, Classification, MissCause, RequestSnapshot,
-                         classify, first_divergence, served_all)
-from .details import Facts, detail_for, last_block_marked, shared_breakpoint
+from .classifier import (MAX_ANTHROPIC_TTL_SECONDS, REWRITTEN, UNSEEN_PARENT, Classification, MissCause,
+                         RequestSnapshot, another_opening, classify, first_divergence, keeps_tail, served_all)
+from .details import Facts, detail_for, last_block_marked, marked_share, shared_breakpoint
 from .diagnostics import AgreementScorer
 from .ledger import Ledger, LedgerEntry, avoidable_for_turn, held_for_turn, unread_write
 from .lifetime import LEDGER_SQL, LifetimeTracker
@@ -387,7 +387,23 @@ class Collector:
         curr.lane_crowded = crowded
         facts = rec.facts
         curr.last_block_marked = last_block_marked(facts)
+        share = marked_share(facts, rec.blocks)
+        curr.marked_tokens = int(prompt_tokens * share) if share is not None and prompt_tokens > 0 else None
         curr.shared_breakpoint = not stitched and state is not None and shared_breakpoint(parent_facts, facts)
+        # The same conversation with another opening message (a sliding window dropped the oldest
+        # messages, a summary replaced them, the first message was edited): it was compared with the
+        # lane's latest turn, and the end of that turn is still in it, so it goes on from that turn.
+        # It is filed in that turn's place, under its new opening, and does not add a remembered
+        # conversation: a lane is crowded by conversations, not by one conversation's rewrites. (A
+        # compaction sent with its event counts the same way while the lane holds that one
+        # conversation.) One recurring message is not enough for this: two conversations that both
+        # hold a "yes" would take each other's place turn after turn.
+        # (Another opening means its own turn was not remembered, so the compared turn is the lane's
+        # latest. A subagent of another type, with its own system prompt, never takes a place.)
+        moved_opening = bool(
+            state is not None and not stitched and not new_thread
+            and another_opening(prev, curr) == REWRITTEN
+            and (keeps_tail(prev.blocks, fps) or (rec.compaction_event and prior_threads <= 1)))
         if rec.engine_verdict is not None:
             verdict = rec.engine_verdict
             curr.evicted_blocks, curr.resident_blocks = verdict[0], verdict[1]
@@ -395,13 +411,14 @@ class Collector:
         # Only a verdict the join made on a hit counts as restored (engines.Restored, sent as a 4th
         # element): a miss's removed blocks on a turn the classifier calls a hit were never restored.
         restored = bool(rec.engine_verdict and len(rec.engine_verdict) > 3 and rec.engine_verdict[3] is True)
-        if unknown_parent:
-            result = Classification(MissCause.UNKNOWN, None, UNSEEN_PARENT, native_reason=native_reason)
-        elif earlier is not None and not rec.compaction_event:
+        early = None
+        if earlier is not None and not rec.compaction_event and not unknown_parent:
             # (With a compaction event it is compared as always: a compaction is what it is.)
             # Its predecessor is the turn before this point, not the one at hand, which is a later
-            # turn of the conversation: nothing it sent changed, and no change is claimed. Only the
-            # rules that compare nothing still apply (a compared turn too short to cache).
+            # turn of the conversation: nothing in its conversation changed, and no change is
+            # claimed there. The rules that compare nothing still apply (a compared turn too short
+            # to cache), and so does the comparison of tools and system prompt, which stands against
+            # any turn of the lane.
             point = f"an earlier point of this conversation (its {earlier[0]} blocks open the compared turn's {earlier[1]})"
             if late:
                 why = (f"{point}: its record arrived late, after a later turn's; it was sent "
@@ -413,7 +430,11 @@ class Collector:
                 why = f"{point}, sent within the clock allowance of that turn: a rewind, a replay or a late record"
             else:
                 why = f"{point}: a rewind, a replay or a late record (when that turn was sent is not known)"
-            result = classify(prev, curr, native_reason=native_reason, earlier_point=why)
+            early = classify(prev, curr, native_reason=native_reason, earlier_point=why)
+        if unknown_parent:
+            result = Classification(MissCause.UNKNOWN, None, UNSEEN_PARENT, native_reason=native_reason)
+        elif early is not None and early.own_read:
+            result = early  # tools and system as they were: judged by its own read
         elif (concurrent and not stitched and not new_thread
               and curr.cached_tokens < 0.5 * (min(prev.prompt_tokens, prompt_tokens) if prev.prompt_tokens
                                              else prompt_tokens)):
@@ -430,7 +451,8 @@ class Collector:
             learn = rec.ttl_seconds is None and rec.engine is None and provider != "anthropic"
             if learn:
                 curr.observed_lifetime = self.lifetimes.estimate(provider, rec.model)
-            result = classify(prev, curr, native_reason=native_reason)
+            # (An earlier point whose tools or system prompt changed: that change, weighed as always.)
+            result = early if early is not None else classify(prev, curr, native_reason=native_reason)
             if learn and prev is not None and gap_seconds is not None and prompt_tokens > 0 and curr.cache_reported:
                 lifetime_evidence = (1 if result.cause is MissCause.NONE else 0 if result.cold_unchanged else None)
             if result.own_read:
@@ -541,6 +563,8 @@ class Collector:
             self.last_snapshot[session_id] = curr
             if state is None:
                 state = _Lane()
+            if moved_opening:
+                state.threads.pop(prior_latest, None)
             state.threads[identity[0]] = (curr, now, facts, response_id)
             state.threads.move_to_end(identity[0])
             while len(state.threads) > LANE_THREADS:
