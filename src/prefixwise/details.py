@@ -331,6 +331,13 @@ def shared_breakpoint(prev: Facts | None, curr: Facts) -> bool:
     return bool(inside) and max(inside) in curr.breakpoints
 
 
+def last_marker_shared(prev: Facts | None, curr: Facts) -> bool:
+    """This request's last cache_control is at a position the compared turn had marked too: what
+    that turn cached up to there is what a live cache would have served this request. (Positions
+    compare only where the prompt up to there is the same in both, which the caller has judged.)"""
+    return bool(prev is not None and curr.breakpoints and max(curr.breakpoints) in prev.breakpoints)
+
+
 def usage_facts(f: Facts, usage: dict, cache_write: int) -> Facts:
     created = (usage or {}).get("cache_creation") or {}
     f.write_5m = int(created.get("ephemeral_5m_input_tokens") or 0)
