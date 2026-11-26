@@ -195,7 +195,7 @@ def test_no_usage_is_reported_as_no_usage_not_as_a_missing_price(tmp_path, capsy
 
 def test_price_file_dates_are_checked(tmp_path):
     path = tmp_path / "p.json"
-    for bad in (20261126, "yesterday", ["2026-11-26"]):
+    for bad in (20261126, "yesterday", ["2026-11-26"], "20261126"):
         path.write_text(json.dumps({"models": {"m": {"input": 1.0, "cache_read": 0.1, "output": 2.0,
                                                      "priced_since": bad}}}))
         with pytest.raises(ValueError, match="priced_since must be a date"):

@@ -362,7 +362,8 @@ def _validate(name: str, rates: object, path: str) -> None:
     since = rates.get("priced_since")
     if since is not None:
         try:
-            ok = isinstance(since, str) and bool(date.fromisoformat(since))
+            ok = (isinstance(since, str) and bool(re.fullmatch(r"\d{4}-\d{2}-\d{2}", since))
+                  and bool(date.fromisoformat(since)))  # dashes required: rows are compared as text
         except ValueError:
             ok = False
         if not ok:
