@@ -1,6 +1,17 @@
 # Changelog
 
-## Unreleased
+## 0.12.8: 2026-11-26
+
+Fixes from three independent audits of 0.12.7 (#184): a first-time-user run of the docs, an adversarial review of the core, and a check of every verdict on a real Claude Code session of 10,517 calls. Each finding was reproduced before it was fixed, and each fix was reviewed by an independent reviewer told to break it. New: `prefixwise demo`, and what an expired cache cost in the report.
+
+**Before you upgrade:**
+- **CI:** `prefixwise check` now exits 1 when no request got a verdict. If your job can legitimately run no scenario, add `--allow-empty` (the GitHub Action has an `allow-empty` input).
+- **Ledger:** schema 9 adds `cache_age_seconds`, `missed_tokens` and `missed_cost`. A ledger is migrated when opened. If you send rows to ClickHouse, add the columns first (`docs/DATA.md` has the statements).
+- **Edges and a collector:** upgrade them together, the collector first. What an edge sends has changed (a new field, more request parameters compared, some hashes), so a conversation that spans the upgrade can show one change that did not happen.
+- **`serve`:** `PREFIXWISE_MOCK_UPSTREAM=1` now means mock even with an upstream set (it was ignored). If that variable is in a proxy's environment and you want real calls, unset it before upgrading, or every client gets synthetic answers. With no upstream, `serve` is a mock, and with a key set it now starts and says so (beyond localhost, with no auth token, it used to refuse to start).
+- **`PREFIXWISE_HMAC_KEY`:** with a key set, every hash and digest is now keyed, on every edge. On `serve`, the hashes of blocks longer than 256 bytes and the digests of messages and parameters differ from 0.12.7's. On `prefixwise run`, `prefixwise.wrap`, the LiteLLM callback and the vLLM middleware, which did not read the key before, every hash differs; with `--fix cache_key` the `prompt_cache_key` sent changes once, so each live conversation misses once (named `cache_key_changed`).
+- **Dashboards and alerts:** some numbers step at the upgrade without anything having changed in your traffic. Costs: Fable 5.2 and Mythos 5.2 have their own prices (they were priced as 5.1, 25% high), and a response with no usage has no cost (it was $0). Failures: a stream the upstream cut is a failure row now (`upstream_dropped`), and so is an error inside a stream (under the upstream's own error type; it was a success row); a request that could not be read is `not_recorded`. An upstream that breaks off before or inside the headers, or inside a non-streamed body, is a 502 to the client (it was a 500).
+- **The GitHub Action:** `uses: ...@v0.12` installs the newest release, and the `allow-empty` input exists only from 0.12.8's `action.yml`. Until the `v0.12` tag is moved to this release, a job on `@v0.12` that runs no scenario fails with no way to opt out: pin `@v0.12.8`, or set the Action's `version` input to `0.12.7` until then.
 
 - **The report says what an expired cache cost.** A miss with a legitimate cause is not waste, but it is on the bill, and the report had no number for it. On a real Claude Code session of 10,517 calls, 82 resumes after the cache had expired, with nothing else changed, sent 32 million tokens again that the cache had held: about 20% of that session's bill, with nothing in the report to show it.
   - The "Expected misses" line now carries, for expiries: the tokens the previous turn had left in the cache that were sent again, what they cost above reading them, and that cost's share of the bill. What cost most comes first. When the figure covers fewer requests than the line counts, or the dollars fewer than the tokens, it says on how many.
