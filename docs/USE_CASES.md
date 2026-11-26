@@ -140,4 +140,4 @@ Without a session header, Anthropic traffic is grouped by `metadata.user_id` if 
 
 ### What Prefixwise stores
 
-Hashes of each prompt block (raw, canonical, and with volatile values masked), token counts, the cause, and your session, task and agent labels. Never prompt text. Set `PREFIXWISE_HMAC_KEY` so hashes of short blocks are keyed and cannot be reversed by guessing common strings.
+Hashes of each prompt block (raw, canonical, and with volatile values masked), token counts, the cause, and your session, task and agent labels. Never prompt text. Set `PREFIXWISE_HMAC_KEY` so the hashes are keyed and a short block cannot be recovered by guessing common strings.

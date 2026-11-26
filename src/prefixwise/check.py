@@ -340,8 +340,12 @@ class VolatileWatch:
         for role, value in raw_blocks:
             if role not in ("system", "system_dynamic"):
                 continue
-            text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
-            kinds.update(k for k in mask_volatiles_kinds(text)[1] if k in ("date", "time", "path"))
+            # A string is the prompt itself; anything else is looked at as JSON, where a line break
+            # is an escape (the masks need telling: a Windows path holds backslash-t and -r too).
+            plain = isinstance(value, str)
+            text = value if plain else json.dumps(value, ensure_ascii=False)
+            found = mask_volatiles_kinds(text, json_text=not plain)[1]
+            kinds.update(k for k in found if k in ("date", "time", "path"))
         if kinds:
             self.seen.setdefault(str(session_id), set()).update(kinds)
 

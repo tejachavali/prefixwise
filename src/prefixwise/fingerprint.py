@@ -19,12 +19,14 @@ Hashes are stored, never raw prompts, by default.
 
 Privacy: a bare hash of a short or predictable block (a four-word user
 message, a boilerplate system line) is dictionary-guessable. When an
-HMAC key is supplied, every hash of a short/predictable block is an
-HMAC with the per-install key, replacing bare SHA-256 entirely for
-that block (raw, canonical, and masked). The short-block threshold
-is a policy choice (default 64 tokens, approximate, ~256 characters),
-not a verified fact; a 60-token boilerplate line can still be
-predictable, and a long block can still be guessable.
+HMAC key is supplied, every hash of every block is an HMAC with the
+per-install key (raw, canonical, and masked), and so is every other
+digest of prompt content a record carries (details.py, records.py).
+(Until 0.12.7 only blocks of 256 bytes or less were keyed. A length
+limit cannot be applied the same way to two blocks that are equal once
+canonical or masked but differ in raw length, so one of them was keyed
+and the other not, and they compared as different; and a long block
+can be guessable too.)
 
 Soft tokens / summaries are fingerprinted as distinct block types:
 their content is never hashed as text. A soft-token block hashes
@@ -52,9 +54,6 @@ BLOCK_ROLES = (
     "summary",
     "soft_tokens",
 )
-
-# Policy choice, not a verified fact (see module docstring).
-DEFAULT_SHORT_BLOCK_CHARS = 256
 
 # Masked hashes are memoised by canonical hash: an agent resends the same
 # system prompt, tools and history every turn, and masking (six regex passes)
@@ -107,10 +106,37 @@ _MASKS = ((_DATE_RE, "<DATE>", "date"), (_TIME_RE, "<TIME>", "time"), (_UUID_RE,
           (_TOKEN_WITH_DIGIT_RE, "<ID>", "id"))  # abc123 / session-42 are ids, not stable words
 
 
-def mask_volatiles_kinds(text: str) -> tuple[str, tuple[str, ...]]:
+# The fingerprinter hands the masks JSON text, where a line break in the prompt is the two characters
+# `\n`. That puts the letter n right before a value at the start of a line, and most patterns here
+# begin at a word boundary or look at the character before: `\nThu Nov 26 09:15:02 2026` kept its
+# date, `\n/home/a/b` was not seen as a path, and `\n42` lost its `n` to the id mask. With
+# json_text=True a mark is put after each escaped line break and tab for the masks to see as a
+# boundary, and taken out again afterwards, so the escapes themselves stay in the masked text: a
+# prompt that differs only in its line breaks is still a different prompt. (An escaped backslash
+# followed by n, a literal backslash-n in the prompt, is not a line break and gets no mark.) JSON
+# text holds no raw control character, so the mark cannot collide with the prompt's own text.
+_ESCAPED_SPACE_RE = re.compile(r"(?<!\\)((?:\\\\)*)(\\[nrt])")
+_BREAK_MARK = "\x00"
+
+
+def _mark_breaks(text: str) -> str:
+    if "\\" not in text:
+        return text
+    if "\\\\" not in text:  # no escaped backslash: every backslash-n, -r, -t is an escape (the usual case, and fast)
+        for esc in ("\\n", "\\r", "\\t"):
+            text = text.replace(esc, esc + _BREAK_MARK)
+        return text
+    return _ESCAPED_SPACE_RE.sub(r"\1\2" + _BREAK_MARK, text)
+
+
+def mask_volatiles_kinds(text: str, json_text: bool = False) -> tuple[str, tuple[str, ...]]:
     """(the text with volatile values replaced by placeholders, the kinds of value found, in order:
     date, time, id, path, number). The kinds are the only thing kept about the values; `path` is
-    noted but not masked."""
+    noted but not masked. json_text: the text is JSON (escaped line breaks), not the prompt itself."""
+    if json_text:
+        text = _mark_breaks(text)
+        masked, kinds = mask_volatiles_kinds(text)
+        return masked.replace(_BREAK_MARK, ""), kinds
     kinds: list[str] = []
     for pattern, token, kind in _MASKS:
         if pattern is _DATE_RE and not _DATE_HINT_RE.search(text):
@@ -125,9 +151,9 @@ def mask_volatiles_kinds(text: str) -> tuple[str, tuple[str, ...]]:
     return text, tuple(kinds)
 
 
-def mask_volatiles(text: str) -> str:
+def mask_volatiles(text: str, json_text: bool = False) -> str:
     """Replace volatile values (dates, times, ids, numbers) with placeholders."""
-    return mask_volatiles_kinds(text)[0]
+    return mask_volatiles_kinds(text, json_text)[0]
 
 
 # A token with both letters and digits (alice42, session-7f, build_2026b): an id, where a bare number is not.
@@ -136,10 +162,13 @@ _ONLY = {"date": ((_DATE_RE, "<DATE>"),), "time": ((_TIME_RE, "<TIME>"),),
          "id": ((_UUID_RE, "<ID>"), (_HEX_ID_RE, "<ID>"), (_ALNUM_ID_RE, "<ID>")), "number": ((_NUMBER_RE, "<N>"),)}
 
 
-def mask_only(text: str, kinds: frozenset) -> str:
+def mask_only(text: str, kinds: frozenset, json_text: bool = False) -> str:
     """The text with only the given kinds of volatile value masked (e.g. {"date", "time"}), so two
     texts can be compared with one kind of difference allowed. For "id" a bare number is not an id
-    (the full masking turns numbers into <N> first; here they must stay apart)."""
+    (the full masking turns numbers into <N> first; here they must stay apart). json_text as in
+    mask_volatiles_kinds."""
+    if json_text:
+        return mask_only(_mark_breaks(text), kinds).replace(_BREAK_MARK, "")
     for kind in ("date", "time", "id", "number"):
         if kind not in kinds:
             continue
@@ -148,6 +177,48 @@ def mask_only(text: str, kinds: frozenset) -> str:
                 continue
             text = pattern.sub(token, text)
     return text
+
+
+# A `cache_control` object is a cache marker wherever it sits in a request (the APIs and the gateways
+# put one on the request, a tool or its `function`, a system block, a message, a content block),
+# except inside a payload, where it is the user's data: a tool's schema can have a property of that
+# name, a structured-output schema too, and a tool call's input a field. Text that merely contains
+# the word is neither. Not every payload is known: a tool's `input_examples`, or a tool call in a
+# format with another field name (Bedrock's `toolUse.input`, Gemini's `functionCall.args`), is
+# still walked, as before.
+_PAYLOAD_KEYS = frozenset(("input_schema", "parameters", "arguments", "json_schema", "schema"))
+
+
+def _is_payload(holder: dict, key: str) -> bool:
+    return key in _PAYLOAD_KEYS or (key == "input" and str(holder.get("type") or "").endswith("tool_use"))
+
+
+def cache_markers(value: object, out: list | None = None) -> list:
+    """Every cache marker in a request (or a part of one), in order: the dict values of the
+    `cache_control` keys that sit where a marker can."""
+    out = [] if out is None else out
+    if isinstance(value, dict):
+        if isinstance(value.get("cache_control"), dict):
+            out.append(value["cache_control"])
+        for k, v in value.items():
+            if k != "cache_control" and not _is_payload(value, k):
+                cache_markers(v, out)
+    elif isinstance(value, list):
+        for v in value:
+            cache_markers(v, out)
+    return out
+
+
+def without_cache_markers(value: object) -> object:
+    """The value with its cache markers removed, for hashing: a marker says where to cache, not what
+    the prompt is, and the usual pattern moves it to the newest message every turn. A `cache_control`
+    inside a payload is content and stays."""
+    if isinstance(value, dict):
+        return {k: (v if _is_payload(value, k) else without_cache_markers(v))
+                for k, v in value.items() if k != "cache_control"}
+    if isinstance(value, list):
+        return [without_cache_markers(v) for v in value]
+    return value
 
 
 # JSON Schema arrays that are sets: their order means nothing, and a client that builds them from a
@@ -231,31 +302,27 @@ class BlockFingerprint:
 
 @dataclass
 class Fingerprinter:
-    """Per-install fingerprinter. Supply hmac_key to protect short blocks."""
+    """Per-install fingerprinter. Supply hmac_key to key every hash (guessable blocks stay private)."""
 
     hmac_key: bytes | None = None
-    short_block_chars: int = DEFAULT_SHORT_BLOCK_CHARS
     _masked_cache: OrderedDict = field(default_factory=OrderedDict, repr=False, compare=False)
     _cache_lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
 
-    def _masked_hash(self, canon: bytes, canon_hash: str, key: bytes | None) -> tuple[str, tuple[str, ...]]:
+    def _masked_hash(self, canon: bytes, canon_hash: str) -> tuple[str, tuple[str, ...]]:
         """(masked hash, kinds of volatile value found)."""
-        # canon_hash already depends on key, so it is a safe cache key for either mode.
+        # canon_hash already depends on the key, so it is a safe cache key for either mode.
         with self._cache_lock:
             hit = self._masked_cache.get(canon_hash)
             if hit is not None:
                 self._masked_cache.move_to_end(canon_hash)
                 return hit
-        text, kinds = mask_volatiles_kinds(canon.decode("utf-8", "surrogatepass"))
-        entry = (_hash(text.encode("utf-8", "surrogatepass"), key), kinds)
+        text, kinds = mask_volatiles_kinds(canon.decode("utf-8", "surrogatepass"), json_text=True)
+        entry = (_hash(text.encode("utf-8", "surrogatepass"), self.hmac_key), kinds)
         with self._cache_lock:
             self._masked_cache[canon_hash] = entry
             if len(self._masked_cache) > MASK_CACHE_ENTRIES:
                 self._masked_cache.popitem(last=False)
         return entry
-
-    def _is_short(self, raw: bytes) -> bool:
-        return len(raw) <= self.short_block_chars
 
     def fingerprint_block(self, role: str, index: int, value: object) -> BlockFingerprint:
         if role == "soft_tokens":
@@ -268,10 +335,11 @@ class Fingerprinter:
         raw = raw_bytes(value)
         # A tool's schema sets (`required`, a `type` list) in another order are the same tool.
         canon = canonical_bytes(schema_sets(value) if role == "tools" else value)
-        # HMAC replaces bare hashing for short/predictable blocks entirely.
-        key = self.hmac_key if self._is_short(raw) else None
+        # With a key, every hash is keyed: all three, whatever the block's length (see the module's
+        # note on privacy for why there is no length limit).
+        key = self.hmac_key
         canon_hash = _hash(canon, key)
-        masked, kinds = self._masked_hash(canon, canon_hash, key)
+        masked, kinds = self._masked_hash(canon, canon_hash)
         return BlockFingerprint(
             role=role, index=index,
             raw=_hash(raw, key), canonical=canon_hash, masked=masked,

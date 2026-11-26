@@ -42,7 +42,7 @@ from __future__ import annotations
 
 import json
 
-from .fingerprint import schema_sets
+from .fingerprint import cache_markers, schema_sets
 
 AVAILABLE_FIXES = ("canonical_tools", "auto_breakpoints", "cache_key")
 PROVEN_FIXES = ("canonical_tools", "auto_breakpoints")  # what --optimize turns on; a fix joins after an E4 run (FIX_STATUS)
@@ -119,7 +119,7 @@ def auto_breakpoints(body: dict, min_prefix_tokens: int = 1024) -> dict | None:
     tool when there is no system). Marker 2 is on the last block of the last message. Marker 3 is
     on the last block of the previous user turn when more than LOOKBACK_BLOCKS blocks follow it,
     where the previous request's marker 2 sat. Never mutates body."""
-    if "cache_control" in json.dumps(body, default=str):
+    if cache_markers(body):  # a marker the client set, not the word in its text or a schema
         return None
     tools, system = body.get("tools"), body.get("system")
     if not tools and not system:
