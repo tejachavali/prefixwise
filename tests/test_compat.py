@@ -55,6 +55,16 @@ def test_anthropic_minimums_by_model():
     assert anthropic_min_prefix("claude-sonnet-4-6") == 1024
     assert anthropic_min_prefix("claude-opus-4-5-20251101") == 4096
     assert anthropic_min_prefix("some-new-claude") == 512  # the floor: never over-claims
+    # Anthropic's prompt-caching page, read 2026-11-26
+    for model, tokens in (("claude-fable-5-2", 512), ("claude-opus-5-5", 512), ("claude-opus-5", 512),
+                          ("claude-sonnet-5-5", 512), ("claude-sonnet-5", 1024), ("claude-sonnet-5-20260601", 1024),
+                          ("claude-opus-4-8", 1024), ("claude-sonnet-4-5", 1024), ("claude-sonnet-4-5-20250929", 1024),
+                          ("claude-opus-4-1", 1024), ("claude-opus-4-1-20250805", 1024), ("claude-opus-4-20250514", 1024),
+                          ("claude-sonnet-4-20250514", 1024), ("us.anthropic.claude-sonnet-4-20250514-v1:0", 1024),
+                          ("claude-opus-4-7", 2048), ("claude-mythos-preview", 2048),
+                          ("claude-opus-4-6", 4096), ("claude-haiku-4-5-20251001", 4096),
+                          ("claude-3-5-haiku-20241022", 2048), ("claude-3-7-sonnet-20250219", 1024)):
+        assert anthropic_min_prefix(model) == tokens, model
 
 
 def test_short_previous_request_is_below_the_minimum_even_if_history_changed():

@@ -173,7 +173,7 @@ class PriceTable:
 
     def resolve(self, model: str, today: date | None = None) -> tuple[str | None, dict | None, bool]:
         """(table id, rates, approximate) for a model id. Exact, or a table id plus only a dated
-        snapshot (-20261007) and/or a cloud version suffix (-v1, -v1:0), optionally behind a cloud
+        snapshot (-20261007, or OpenAI's -2026-10-07) and/or a cloud version suffix (-v1, -v1:0), optionally behind a cloud
         prefix ('us.anthropic.'); a different model that merely starts with a table id
         (gpt-5.6-sol-pro) is NOT matched that way. Failing that, a Claude id of a known family
         (claude-opus-4-9) is priced at the nearest version of that family in the table, the newest
@@ -187,7 +187,9 @@ class PriceTable:
         approx = False
         if key is None:
             for k in self.models:
-                if re.search(rf"(^|[./:]){re.escape(k)}(-\d{{8}})?(-v\d+(:\d+)?)?$", model) and (key is None or len(k) > len(key)):
+                # a dated snapshot: Anthropic's -20261007, OpenAI's -2026-10-07
+                if (re.search(rf"(^|[./:]){re.escape(k)}(-\d{{8}}|-\d{{4}}-\d{{2}}-\d{{2}})?(-v\d+(:\d+)?)?$", model)
+                        and (key is None or len(k) > len(key))):
                     key = k
         if key is None:
             key, approx = self._nearest_in_family(model), True
@@ -240,6 +242,8 @@ class PriceTable:
         if rates is None:
             return None
         b = breakdown(provider, usage)
+        if not (b.prompt or b.output):
+            return None  # the response reported no usage: what it cost is not known, and is not $0
         r = self._tier(rates, b.prompt)
         parts = [("input", b.uncached_input, r.get("input")), ("cache_read", b.cache_read, r.get("cache_read")),
                  ("output", b.output, r.get("output")),

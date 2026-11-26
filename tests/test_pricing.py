@@ -12,7 +12,7 @@ T = PriceTable.load()
 
 
 def test_builtin_table_is_dated_and_sourced():
-    assert T.as_of == "2026-11-09"
+    assert T.as_of == "2026-11-26"
     official = {"anthropic": "platform.claude.com", "openai": "developers.openai.com"}
     for name, r in T.models.items():
         assert official[r["provider"]] in r["source"], name  # official pages only
@@ -87,7 +87,7 @@ def test_proxy_records_cost_and_report_shows_dollars(tmp_path, capsys):
             "system": [{"type": "text", "text": "x", "cache_control": {"type": "ephemeral"}}]}
     proxy.handle("anthropic", dict(body))
     _, entry = proxy.handle("anthropic", dict(body))
-    assert entry.cost is not None and entry.cost > 0 and entry.price_as_of == "2026-11-09"
+    assert entry.cost is not None and entry.cost > 0 and entry.price_as_of == "2026-11-26"
     proxy.handle("openai", {"model": "gpt-5.6", "session_id": "o", "messages": []})  # unpriced
     main(["report", "--ledger", path])
     out = capsys.readouterr().out
@@ -123,3 +123,43 @@ def test_matching_does_not_borrow_another_models_price():
     assert T.rates_for("claude-sonnet-5-5-fast") is None
     assert T.rates_for("claude-sonnet-5-5-20261001") is T.models["claude-sonnet-5-5"]
     assert T.rates_for("anthropic.claude-sonnet-4-6-v1:0") is T.models["claude-sonnet-4-6"]
+
+
+def test_dated_snapshots_of_both_providers_are_priced_as_their_model():
+    """OpenAI answers gpt-5.6-terra as gpt-5.6-terra-2026-10-15; Anthropic's dates have no dashes."""
+    assert T.resolve("gpt-5.6-terra-2026-10-15") == ("gpt-5.6-terra", T.models["gpt-5.6-terra"], False)
+    assert T.resolve("claude-haiku-5-5-20261007")[0] == "claude-haiku-5-5"
+    assert T.rates_for("gpt-5.6-terra-pro-2026-10-15") is None   # another model, still not borrowed
+    assert T.rates_for("gpt-5.6-terra-2026-10") is None            # not a date
+
+
+def test_a_response_with_no_usage_has_no_cost():
+    for provider, usage in (("openai", {}), ("anthropic", {}), ("openai", {"prompt_tokens": 0, "completion_tokens": 0})):
+        assert T.request_cost("gpt-5.6-terra" if provider == "openai" else "claude-opus-5-5", provider, usage) is None
+    assert T.cost_fields("claude-opus-5-5", "anthropic", {})["cost"] is None
+    assert T.request_cost("claude-opus-5-5", "anthropic", {"input_tokens": 0, "output_tokens": 3}) == pytest.approx(60e-6)
+
+
+def test_the_response_model_falls_back_to_the_requested_one(tmp_path):
+    """A provider can answer under an id the table does not have (an alias, a new snapshot form)."""
+    from prefixwise.proxy import PrefixwiseProxy
+
+    proxy = PrefixwiseProxy(upstream_url="http://unused.invalid", api_key="k")
+    usage = {"prompt_tokens": 3000, "completion_tokens": 5, "prompt_tokens_details": {"cached_tokens": 0}}
+    proxy._forward = lambda *a, **k: (200, {"id": "chatcmpl-1", "model": "gpt-5.6-terra-latest-build", "usage": usage})
+    body = {"model": "gpt-5.6-terra", "messages": [{"role": "user", "content": "hi"}]}
+    entry = proxy.handle("openai", body, {"x-prefixwise-session-id": "s"})[1]
+    assert entry.cost == pytest.approx(T.request_cost("gpt-5.6-terra", "openai", usage))
+
+
+def test_fable_and_mythos_5_2_have_their_own_rows():
+    """Read from Anthropic's pricing page on 2026-11-26: $8 in, $40 out, reads at 0.025x input."""
+    for model in ("claude-fable-5-2", "claude-mythos-5-2"):
+        key, rates, approximate = T.resolve(model)
+        assert key == model and approximate is False
+        assert (rates["input"], rates["cache_write_5m"], rates["cache_write_1h"], rates["cache_read"],
+                rates["output"]) == (8.0, 10.0, 16.0, 0.2, 40.0)
+    usage = {"input_tokens": 1000, "output_tokens": 100, "cache_read_input_tokens": 100_000,
+             "cache_creation_input_tokens": 2000, "cache_creation": {"ephemeral_1h_input_tokens": 2000}}
+    assert T.request_cost("claude-fable-5-2", "anthropic", usage) == pytest.approx(
+        (1000 * 8 + 100_000 * 0.2 + 2000 * 16 + 100 * 40) / 1e6)

@@ -394,7 +394,11 @@ class Collector:
                                     [], native_reason)
 
         div = first_divergence(prev.blocks, curr.blocks, engine=curr.engine) if prev is not None else None
+        # Priced as the model that answered. When that id is not in the table (a snapshot or alias the
+        # provider answered with), the model that was asked for is the same model at the same price.
         priced_model = str(rec.response_model or rec.model)
+        if rec.response_model and self.prices.rates_for(priced_model) is None:
+            priced_model = str(rec.model)
         # Waste is capped at what the previous turn left in the cache, except for a breakpoint left
         # early (the cache served all it held): there the waste is the stable prefix it left out.
         held = ((prev.cached_tokens + prev.cache_written) if prev is not None

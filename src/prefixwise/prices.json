@@ -1,8 +1,8 @@
 {
-  "as_of": "2026-11-09",
+  "as_of": "2026-11-26",
   "currency": "USD",
   "unit": "per 1M tokens",
-  "note": "Only rates read from a provider's own pricing page (OpenAI's read by Muse in a browser, since Claude's environment cannot reach it), with the API model id confirmed. Batch, fast mode and data-residency multipliers are not modelled. Override or extend with your own file: PREFIXWISE_PRICES=/path/prices.json or --prices.",
+  "note": "Only rates read from a provider's own pricing page (OpenAI's read by Muse in a browser, since Claude's environment cannot reach it), with the API model id confirmed. Anthropic's rows were checked against its page again on 2026-11-26; OpenAI's are as read on 2026-11-07. Batch, fast mode and data-residency multipliers are not modelled. Override or extend with your own file: PREFIXWISE_PRICES=/path/prices.json or --prices.",
   "models": {
     "claude-haiku-5-5": {
       "provider": "anthropic",
@@ -38,6 +38,15 @@
       "cache_write_1h": 8.0,
       "cache_read": 0.2,
       "output": 20.0
+    },
+    "claude-fable-5-2": {
+      "provider": "anthropic",
+      "source": "https://platform.claude.com/docs/en/about-claude/pricing (read 2026-11-26; cache reads are 0.025x input on this model, per the page's footnote); the id is confirmed by traffic",
+      "input": 8.0,
+      "cache_write_5m": 10.0,
+      "cache_write_1h": 16.0,
+      "cache_read": 0.2,
+      "output": 40.0
     },
     "claude-fable-5-1": {
       "provider": "anthropic",
@@ -87,6 +96,16 @@
       "cache_write_12h": 0.5,
       "output": 1.2,
       "note": "cache_write = the 30-minute write price (the default retention); cache_write_12h recorded, not yet applied"
+    },
+    "claude-mythos-5-2": {
+      "provider": "anthropic",
+      "source": "https://platform.claude.com/docs/en/about-claude/pricing (read 2026-11-26; cache reads are 0.025x input on this model, per the page's footnote); the id is the one Anthropic's prompt-caching page lists, not confirmed by traffic",
+      "input": 8.0,
+      "cache_write_5m": 10.0,
+      "cache_write_1h": 16.0,
+      "cache_read": 0.2,
+      "output": 40.0,
+      "note": "limited availability"
     },
     "claude-mythos-5-1": {
       "provider": "anthropic",
