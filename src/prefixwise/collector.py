@@ -23,7 +23,7 @@ from .classifier import (UNSEEN_PARENT, Classification, MissCause, RequestSnapsh
                          served_all)
 from .details import Facts, detail_for, last_block_marked, marked_tokens, shared_breakpoint
 from .diagnostics import AgreementScorer
-from .ledger import Ledger, LedgerEntry, avoidable_for_turn, held_for_turn, unread_write
+from .ledger import Ledger, LedgerEntry, avoidable_for_turn, held_for_turn, missed_for_turn, unread_write
 from .lifetime import LEDGER_SQL, LifetimeTracker
 from .pricing import PriceTable, breakdown, cache_reported, completion_tokens_of, normalize_usage, write_reported
 from .prom import Metrics
@@ -453,6 +453,10 @@ class Collector:
         prev_facts = parent_facts if state is not None else self.session_facts.get(session_id)
         if prev is None or stitched:
             prev_facts = None  # a stitched branch: the lane's latest request may be another branch
+        # Whether the classifier judged an unchanged prompt that came back short (it says so itself:
+        # a new conversation, a changed block, a request with no markers are not that). Read before
+        # a detail can replace the verdict below.
+        unchanged_prompt = result.cold_unchanged and not result.own_read
         # No detail on a turn left unjudged (in flight with its previous turn, or continuing one never
         # seen) or judged by its own read: its timing is not a gap, the facts at hand are another
         # turn's, and a detail could promote it to a cause.
@@ -508,8 +512,19 @@ class Collector:
         )
         entry.avoidable_cost = self.prices.avoidable_cost(priced_model, entry.avoidable_tokens, prompt_tokens,
                                                           provider, usage)
+        # What an expiry sent again: only for a prompt the classifier judged unchanged, and a
+        # previous turn whose usage reports what it wrote (so what it left is known, zero included).
+        left = prev.cached_tokens + prev.cache_written if prev is not None and prev.write_reported else None
+        entry.missed_tokens = missed_for_turn(entry.cause, result.legit, prompt_tokens, cached,
+                                              prev.prompt_tokens if prev else None, left,
+                                              unchanged=unchanged_prompt,
+                                              covered_tokens=cached + entry.cache_write_tokens
+                                              if write_reported(provider, usage) else None)
+        if entry.missed_tokens is not None:
+            entry.missed_cost = self.prices.missed_cost(priced_model, entry.missed_tokens, prompt_tokens,
+                                                        provider, usage)
         if entry.cost is None:  # no rates, or no usage: nothing about this request has a dollar figure
-            entry.avoidable_cost = None
+            entry.avoidable_cost = entry.missed_cost = None
         # The previous turn's cache write, left unread: only when that turn is this conversation's
         # own: the same opening message, its own interleaved turn, or a compaction (which rewrites
         # the opening) while no other conversation shares the lane. Not another conversation this

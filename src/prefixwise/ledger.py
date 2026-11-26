@@ -94,6 +94,12 @@ class LedgerEntry:
     # the cache entry this request could read, which a stated TTL is compared with. `gap_seconds` is
     # the idle time (from that turn's end). None with no compared turn on this model, and on older rows.
     cache_age_seconds: float | None = None
+    # Schema 9: what an expected miss cost. On an expiry (`ttl_expired`) of a prompt that had not
+    # changed, where what the previous turn left in the cache is known: the tokens it had left that
+    # this turn sent again, and what they cost above reading them (USD). Not waste, so not in
+    # `avoidable_*`: nothing in the request was wrong. None on every other row, and on older rows.
+    missed_tokens: int | None = None
+    missed_cost: float | None = None
     schema_version: int = SCHEMA_VERSION
 
 
@@ -168,6 +174,40 @@ def avoidable_for_turn(legit: bool | None, prompt_tokens: int, cached_tokens: in
     return max(0, reusable - cached_tokens)
 
 
+# The expected miss that gets a figure: the cache entry expired. (Not an engine's eviction yet: what
+# an engine held is counted in blocks and its dollars are not priced. Not a miss after a change with
+# a legitimate cause, a compaction or a new tool: how much of the prompt before the change could
+# have been read is not known in tokens.)
+EXPECTED_MISS_CAUSES = frozenset({"ttl_expired"})
+
+
+def missed_for_turn(cause: str | None, legit: bool | None, prompt_tokens: int, cached_tokens: int,
+                    prev_prompt_tokens: int | None, prev_left_tokens: int | None, *,
+                    unchanged: bool = True, covered_tokens: int | None = None) -> int | None:
+    """Tokens an expiry sent again that the previous turn had left in the cache, less what was read
+    all the same. A figure is given only where it is true:
+
+    - the cause is an expiry and is not waste (waste is counted in `avoidable_tokens`, never both);
+    - the prompt had not changed (`unchanged`): after a change, a live cache would not have served
+      the changed part, and how much it would have served is not known;
+    - what the previous turn left in the cache is known and is not zero (`prev_left_tokens`: what it
+      read plus what it wrote). A turn that left nothing had nothing to expire, and where a provider
+      does not report writes, what was held is a guess.
+
+    No more is counted than this request's own markers cover (`covered_tokens`: what it read plus
+    what it wrote, where its usage reports a write count). A read stops at a breakpoint, so a live
+    cache could not have served a request past its last one, whatever the previous turn had left.
+
+    None otherwise."""
+    if (legit is False or cause not in EXPECTED_MISS_CAUSES or not unchanged
+            or not prev_prompt_tokens or not prev_left_tokens):
+        return None
+    reach = min(prev_prompt_tokens, prompt_tokens, prev_left_tokens)
+    if covered_tokens is not None:
+        reach = min(reach, covered_tokens)
+    return max(0, reach - cached_tokens)
+
+
 def held_for_turn(prev, cause: str, cached_tokens: int) -> int | None:
     """The cap `avoidable_for_turn` takes as `prev_held_tokens`, as the collector computes it: what
     the compared turn (a RequestSnapshot, or None) left in the cache, where that is known (Anthropic,
@@ -210,7 +250,7 @@ _MIGRATIONS = {"task_id": "TEXT", "request_id": "TEXT", "completion_tokens": "IN
                "cost_cache_read": "REAL", "cost_input": "REAL", "cost_cache_write": "REAL",
                "cost_output": "REAL",  # schema 7
                "lifetime_evidence": "INTEGER",  # schema 8
-               "cache_age_seconds": "REAL"}  # schema 9
+               "cache_age_seconds": "REAL", "missed_tokens": "INTEGER", "missed_cost": "REAL"}  # schema 9
 
 _COLUMNS = [f.name for f in fields(LedgerEntry)]
 

@@ -60,7 +60,7 @@ from pathlib import Path
 
 from .diagnostics import NO_VERDICT, map_native_reason
 from .fingerprint import schema_sets
-from .ledger import Ledger, LedgerEntry, avoidable_for_turn, unread_write
+from .ledger import Ledger, LedgerEntry, avoidable_for_turn, missed_for_turn, unread_write
 from .pricing import PriceTable, breakdown
 
 CLASSIFIER_VERSION = "log-3"  # of the Claude Code rules below; stored on each row
@@ -203,6 +203,11 @@ def _requests(path: Path) -> dict[str, list[_Request]]:
             if ts is not None and kind in ("user", "attachment", "system"):
                 inputs.setdefault(key, []).append((ts, kind == "user"))
     return streams
+
+
+def _names_a_change(native: str | None) -> bool:
+    """Whether Anthropic's own diagnosis for a request says something in it had changed."""
+    return bool(native) and native not in NO_VERDICT and map_native_reason("anthropic", native) is not None
 
 
 def _agent_label(log: Path, stream: str) -> str:
@@ -394,6 +399,22 @@ def import_claude_code(root: str | os.PathLike | None = None, ledger: Ledger | N
                 prev_prompt_before = same.prompt if same is not None else None
                 held = same.held if same is not None and same.held > 0 else None
                 avoidable = avoidable_for_turn(legit, prompt, read, prev_prompt_before, held)
+                # An expiry gets a figure only when nothing else changed in the gap, as far as the log
+                # shows: the same model throughout, the same Claude Code version, the same system
+                # prompt snapshot, the same effort (on models where effort is in the prompt), and no
+                # diagnosis from Anthropic that names a change. And only when what the previous
+                # request left is exact (not a sum of several calls). (`same.held`, not `held`: zero
+                # is "left nothing", not "unknown".)
+                was = same.req if same is not None else None
+                only_expired = (was is not None and not same.summed and prev is not None and prev.model == r.model
+                                and not (was.version and r.version and was.version != r.version)
+                                and not (was.system_hash and r.system_hash and was.system_hash != r.system_hash)
+                                and not (was.effort and r.effort and was.effort != r.effort
+                                         and not _EFFORT_SAFE.search(r.model))
+                                and not _names_a_change(r.native))
+                missed = missed_for_turn(cause, legit, prompt, read, prev_prompt_before,
+                                         same.held if same is not None else None, unchanged=only_expired,
+                                         covered_tokens=read + write)
                 several = isinstance(u.get("iterations"), list) and len(u["iterations"]) > 1
                 if read + write > 0 or same is None or same.held == 0:
                     # A call that read and wrote nothing did not touch this model's cache: what the
@@ -426,8 +447,11 @@ def import_claude_code(root: str | os.PathLike | None = None, ledger: Ledger | N
                     cache_ttl_seconds=own_ttl,
                     classifier_version=CLASSIFIER_VERSION)
                 entry.avoidable_cost = prices.avoidable_cost(r.model, avoidable, prompt, "anthropic", u)
+                entry.missed_tokens = missed
+                if missed is not None:
+                    entry.missed_cost = prices.missed_cost(r.model, missed, prompt, "anthropic", u)
                 if entry.cost is None:  # no rates, or no usage: no dollar figure of any kind
-                    entry.avoidable_cost = None
+                    entry.avoidable_cost = entry.missed_cost = None
                 # A compaction's summary call reads the previous write, and Claude Code does not log
                 # that call: the write was not left unread. A request that used no cache at all leaves
                 # its model's lane as it was, so the write is counted at the next request that does.

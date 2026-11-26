@@ -264,7 +264,9 @@ def findings(ledger, since: float | None = None, until: float | None = None,
     window = {"since": since, "until": until}
     s = metrics.summary(ledger, **window)
     by_cause = metrics.query(ledger, ["requests", "prompt_tokens", "cached_tokens", "avoidable_tokens",
-                                      "avoidable_cost_usd", "requests_wasteful"], by="cause", **window)
+                                      "avoidable_cost_usd", "requests_wasteful", "missed_tokens",
+                                      "missed_cost_usd", "requests_missed", "requests_missed_priced"],
+                             by="cause", **window)
     waste, expected, unexplained = [], [], []
     for r in by_cause:
         cause = r["cause"]
@@ -272,6 +274,9 @@ def findings(ledger, since: float | None = None, until: float | None = None,
             continue
         item = {"cause": cause, "what": CAUSE_PLAIN.get(cause, cause), "requests": r["requests"],
                 "avoidable_tokens": r["avoidable_tokens"], "avoidable_cost_usd": r["avoidable_cost_usd"],
+                # what an expected miss sent again and what that cost: not waste, but on the bill
+                "missed_tokens": r["missed_tokens"], "missed_cost_usd": r["missed_cost_usd"],
+                "requests_missed": r["requests_missed"], "requests_missed_priced": r["requests_missed_priced"],
                 "details": _details(ledger, cause, window)}
         if cause == "unknown":  # not known to be expected, nor waste
             unexplained.append(item)
@@ -284,7 +289,7 @@ def findings(ledger, since: float | None = None, until: float | None = None,
         else:
             expected.append(item)
     waste.sort(key=lambda x: -x["avoidable_tokens"])
-    expected.sort(key=lambda x: -x["requests"])
+    expected.sort(key=lambda x: (-(x["missed_cost_usd"] or 0), -(x["missed_tokens"] or 0), -x["requests"]))  # what cost most first
     table = prices or PriceTable.load(None)
     unpriced, approximate, earlier_rate = [], [], []
     for row in metrics.query(ledger, ["requests", "requests_priced", "prompt_tokens"], by="model", **window):
@@ -328,6 +333,7 @@ def findings(ledger, since: float | None = None, until: float | None = None,
     summary = {k: s[k] for k in ("requests", "requests_failed", "prompt_tokens", "cached_tokens",
                                  "cache_hit_rate", "avoidable_tokens", "avoidable_share",
                                  "cost_usd", "avoidable_cost_usd", "requests_priced",
+                                 "missed_tokens", "missed_cost_usd",
                                  "tasks_successful", "tokens_per_successful_task")}
     summary["cache_hit_rate_if_fixed"] = hit_rate_if_fixed(summary)
     return {"summary": summary,
@@ -395,6 +401,27 @@ def _usd(x) -> str:
     if x is None:
         return "-"
     return f"${x:,.2f}" if abs(x) >= 1 or x == 0 else f"${x:.4f}"  # cents need precision
+
+
+def _missed(e: dict, bill) -> str:
+    """What an expected miss cost, for the report: the tokens sent again that the cache had held, their
+    cost above a cache read, and its share of the bill. Empty when the ledger has no such figure (a
+    cause it is not computed for, rows from before 0.12.8)."""
+    tokens, cost = e.get("missed_tokens"), e.get("missed_cost_usd")
+    if not tokens:
+        return ""
+    # The figure covers the requests that have one, which can be fewer than the cause's count (a
+    # prompt that had also changed, a previous turn of unknown size, rows from an older version),
+    # and the dollars cover the priced ones among those: say so when the numbers differ.
+    n, with_figure, priced = e.get("requests") or 0, e.get("requests_missed") or 0, e.get("requests_missed_priced") or 0
+    scope = f"on {with_figure:,} of them, " if with_figure and with_figure != n else ""
+    money = ""
+    if cost and cost >= 0.00005:  # (a sum that would print as $0.0000 says nothing)
+        money = (f", {_usd(cost)} more than reading them"
+                 + (f" on the {priced:,} that {'is' if priced == 1 else 'are'} priced"
+                    if priced and priced != with_figure else "")
+                 + (f", {_share(cost, bill)} of the bill" if bill else ""))
+    return f" ({scope}{_n(tokens)} tokens the cache had held were sent again{money})"
 
 
 def _req(n: int) -> str:
@@ -492,7 +519,7 @@ f"{n:,} request{'' if n == 1 else 's'} on {m} (recorded before the table of {sin
             lines.append(f"Cause not determined for {n} request{'s' if n != 1 else ''} "
                          "(`prefixwise report --detail` shows the evidence).")
     if f["expected"]:
-        parts = [f"{e['requests']} x {e['what']}" for e in f["expected"][:4]]
+        parts = [f"{e['requests']:,} x {e['what']}{_missed(e, s.get('cost_usd'))}" for e in f["expected"][:4]]
         lines.append("Expected misses (not waste): " + "; ".join(parts) + ".")
         for e in f["expected"]:
             for d in e.get("details") or []:
