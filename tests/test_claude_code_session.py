@@ -60,7 +60,7 @@ def test_an_older_ledger_is_scrubbed_of_the_device_and_account_ids(tmp_path):
 
     path = str(tmp_path / "old.db")
     led = Ledger(path)
-    for sid in (USER_ID, "plain-session", '{"not":"claude"}'):
+    for sid in (USER_ID, "plain-session", '{"not":"claude"}', '{"session_id":"main","run":1}'):
         led.record(LedgerEntry(session_id=sid, agent_id="a", provider="anthropic", model="m", cause="none",
                                legit=None, prompt_tokens=1, cached_tokens=0, avoidable_tokens=0,
                                avoidable_cost=0.0, task_success=None))
@@ -70,4 +70,4 @@ def test_an_older_ledger_is_scrubbed_of_the_device_and_account_ids(tmp_path):
     Ledger(path)
     with sqlite3.connect(path) as c:
         ids = [r[0] for r in c.execute("SELECT session_id FROM entries ORDER BY id")]
-    assert ids == ["sess-42", "plain-session", '{"not":"claude"}']
+    assert ids == ["sess-42", "plain-session", '{"not":"claude"}', '{"session_id":"main","run":1}']  # only Claude Code's shape

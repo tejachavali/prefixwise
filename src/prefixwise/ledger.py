@@ -195,15 +195,19 @@ _COLUMNS = [f.name for f in fields(LedgerEntry)]
 
 def _scrub_claude_code_ids(conn) -> int:
     """Rows written before 0.12.7 keyed a Claude Code session on its whole metadata.user_id, a JSON
-    string carrying the device and account ids. Rewrite each to its session_id alone, once (later opens
-    find nothing to do: the range scan on the session index is empty). Returns the rows rewritten."""
+    string carrying the device and account ids. Rewrite each to its session_id alone. Only Claude
+    Code's shape is touched (device_id, account_uuid and session_id, all text), and a read-only check
+    comes first, so an open with nothing to rewrite never waits for the write lock. Returns the rows
+    rewritten."""
+    where = ("session_id >= '{' AND session_id < '|' AND json_valid(session_id) "
+             "AND json_type(session_id, '$.session_id') = 'text' AND json_extract(session_id, '$.session_id') != '' "
+             "AND json_type(session_id, '$.device_id') = 'text' AND json_type(session_id, '$.account_uuid') = 'text'")
     try:
-        cur = conn.execute(
-            "UPDATE entries SET session_id = json_extract(session_id, '$.session_id') "
-            "WHERE session_id >= '{' AND session_id < '|' AND json_valid(session_id) "
-            "AND json_type(session_id, '$.session_id') = 'text' AND json_extract(session_id, '$.session_id') != ''")
+        if not conn.execute(f"SELECT EXISTS (SELECT 1 FROM entries WHERE {where})").fetchone()[0]:
+            return 0
+        cur = conn.execute(f"UPDATE entries SET session_id = json_extract(session_id, '$.session_id') WHERE {where}")
         return cur.rowcount or 0
-    except Exception:  # noqa: BLE001 - an SQLite without JSON functions: leave the rows as they are
+    except Exception:  # noqa: BLE001 - no JSON functions, or a read-only or busy ledger: leave the rows
         return 0
 
 
