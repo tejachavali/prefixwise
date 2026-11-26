@@ -25,6 +25,7 @@ from __future__ import annotations
 import time
 
 import json
+import os
 import sqlite3
 import sys
 from dataclasses import astuple, dataclass, fields
@@ -193,22 +194,64 @@ _MIGRATIONS = {"task_id": "TEXT", "request_id": "TEXT", "completion_tokens": "IN
 _COLUMNS = [f.name for f in fields(LedgerEntry)]
 
 
-def _scrub_claude_code_ids(conn) -> int:
+_SCRUB_WHERE = ("session_id >= '{' AND session_id < '|' AND json_valid(session_id) "
+                "AND json_type(session_id, '$.session_id') = 'text' AND json_extract(session_id, '$.session_id') != '' "
+                "AND json_type(session_id, '$.device_id') = 'text' AND json_type(session_id, '$.account_uuid') = 'text'")
+REBUILD_MAX_BYTES = 256 * 1024 * 1024  # a larger ledger is not rebuilt on open: that would hold the write lock too long
+
+
+def _scrub_claude_code_ids(conn, path: str = "") -> int:
     """Rows written before 0.12.7 keyed a Claude Code session on its whole metadata.user_id, a JSON
     string carrying the device and account ids. Rewrite each to its session_id alone. Only Claude
     Code's shape is touched (device_id, account_uuid and session_id, all text), and a read-only check
     comes first, so an open with nothing to rewrite never waits for the write lock. Returns the rows
-    rewritten."""
-    where = ("session_id >= '{' AND session_id < '|' AND json_valid(session_id) "
-             "AND json_type(session_id, '$.session_id') = 'text' AND json_extract(session_id, '$.session_id') != '' "
-             "AND json_type(session_id, '$.device_id') = 'text' AND json_type(session_id, '$.account_uuid') = 'text'")
+    rewritten; a ledger another process is writing is left for a later open, and says so."""
     try:
-        if not conn.execute(f"SELECT EXISTS (SELECT 1 FROM entries WHERE {where})").fetchone()[0]:
+        if not conn.execute(f"SELECT EXISTS (SELECT 1 FROM entries WHERE {_SCRUB_WHERE})").fetchone()[0]:
             return 0
-        cur = conn.execute(f"UPDATE entries SET session_id = json_extract(session_id, '$.session_id') WHERE {where}")
-        return cur.rowcount or 0
-    except Exception:  # noqa: BLE001 - no JSON functions, or a read-only or busy ledger: leave the rows
+    except Exception:  # noqa: BLE001 - an SQLite without JSON functions: nothing can be done here
         return 0
+    try:
+        conn.execute("PRAGMA secure_delete = ON")  # the old values are zeroed where they are freed
+        cur = conn.execute(f"UPDATE entries SET session_id = json_extract(session_id, '$.session_id') WHERE {_SCRUB_WHERE}")
+        return cur.rowcount or 0
+    except Exception:  # noqa: BLE001 - busy (another process is writing) or read-only
+        print(f"prefixwise: {path or 'the ledger'} still holds Claude Code's device and account ids in older rows, "
+              "but could not rewrite them now (another process is writing it, or it is read-only); open it again "
+              "once that stops (0.12.7)", file=sys.stderr)
+        return 0
+
+
+def _purge_freed_pages(conn, path: str, scrubbed: int) -> None:
+    """After a scrub, the old values can still sit in the file's freed pages and in the write-ahead
+    log. Rebuild the file (VACUUM) and empty the log, so the device and account ids are gone from the
+    ledger itself; copies and backups taken before keep them. Only if nothing else is using the file
+    right now (a short busy timeout, and the checkpoint must complete), and only for a ledger small
+    enough to rebuild quickly; otherwise say what is left and the command that finishes it."""
+    done = (f"prefixwise: removed Claude Code's device and account ids from {scrubbed} ledger row(s) in {path} "
+            "(0.12.7 keeps the session id only)")
+    finish = (f"; old values may remain in the file's free space until you stop every Prefixwise process using it "
+              f"and run: sqlite3 {path} VACUUM")
+    try:
+        size = os.path.getsize(path) + (os.path.getsize(path + "-wal") if os.path.exists(path + "-wal") else 0)
+    except OSError:
+        size = 0
+    if size > REBUILD_MAX_BYTES:
+        print(f"{done}, but did not rebuild the {size // (1024 * 1024)} MB file now{finish}", file=sys.stderr)
+        return
+    try:
+        conn.execute("PRAGMA busy_timeout = 1000")
+        conn.execute("VACUUM")
+        busy, log, checkpointed = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+        ok = not busy and (log <= 0 or checkpointed >= log)
+    except Exception:  # noqa: BLE001 - another process holds it
+        ok = False
+    finally:
+        try:
+            conn.execute("PRAGMA busy_timeout = 10000")
+        except Exception:  # noqa: BLE001
+            pass
+    print(done if ok else f"{done}, but another process was using the file{finish}", file=sys.stderr)
 
 
 class Ledger:
@@ -255,13 +298,15 @@ class Ledger:
             self.conn.execute("CREATE INDEX IF NOT EXISTS entries_request ON entries(request_id)")
             self.conn.execute("CREATE INDEX IF NOT EXISTS entries_session ON entries(session_id)")
             self.conn.execute("CREATE INDEX IF NOT EXISTS entries_time ON entries(recorded_at)")
-            _scrub_claude_code_ids(self.conn)
+            scrubbed = _scrub_claude_code_ids(self.conn, path)
             self.conn.execute(
                 """CREATE TABLE IF NOT EXISTS tasks (
                     task_id TEXT PRIMARY KEY, success INTEGER NOT NULL, recorded_at REAL
                 )"""
             )
             self.conn.commit()
+            if scrubbed:
+                _purge_freed_pages(self.conn, path, scrubbed)
 
     def add_sink(self, sink) -> None:
         """A LedgerSink (record(entry, at), close(timeout)) that gets a copy of every row once it is
