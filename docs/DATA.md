@@ -48,7 +48,7 @@ Added (observed today, previously dropped):
 | `api`, `stream` | chat / responses / messages; streamed or not |
 | `uncached_tokens`, `cache_write_tokens` | the token breakdown behind cost and hit rate |
 | `latency_ms`, `overhead_ms` | upstream time; Prefixwise's own processing time |
-| `gap_seconds` | time since the session's previous turn (TTL questions) |
+| `gap_seconds` | idle time: from the end of the session's previous turn on this model to this request being sent. A stated TTL is compared with the entry's age instead (since that turn was sent), which the evidence gives when it differs |
 | `evidence`, `secondary_causes` | why the verdict was given, in Prefixwise's own words |
 | `divergence_role`, `divergence_index` | where the prompt first changed (system, tools, messages, ...) |
 | `schema_version` | rows say which schema wrote them |

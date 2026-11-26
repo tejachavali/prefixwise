@@ -160,10 +160,16 @@ def test_first_changed_is_a_position_in_the_whole_prompt_and_blank_on_a_model_sw
     path = str(tmp_path / "l.db")
     p = PrefixwiseProxy(ledger_path=path, mock=True)
     p.handle("openai", {"model": "small", "session_id": "s", "messages": Q1})
-    p.handle("openai", {"model": "m", "session_id": "s", "tools": [A, B], "messages": Q1})
-    p.handle("openai", {"model": "m", "session_id": "s", "tools": [A, B], "messages": [{"role": "user", "content": "other"}]})
+    more = [{"role": "assistant", "content": "ok"}, {"role": "user", "content": "go on"}]
+    p.handle("openai", {"model": "m", "session_id": "s", "tools": [A, B], "messages": Q1 + more})
+    p.handle("openai", {"model": "m", "session_id": "s", "tools": [A, B],
+                        "messages": [{"role": "user", "content": "other"}] + more})   # its first message rewritten
+    p.handle("openai", {"model": "m", "session_id": "s", "tools": [A, B], "messages": Q1})  # one message, then another:
+    p.handle("openai", {"model": "m", "session_id": "s", "tools": [A, B],                   # a new conversation
+                        "messages": [{"role": "user", "content": "something else"}]})
     turns = p.ledger.turns("s")
     assert turns[1]["cause"] == "model_switch" and turns[1]["first_changed"] is None
     assert turns[2]["first_changed"] == "messages[2]"  # block 2 of the prompt: after the two tools
+    assert turns[4]["cause"] == "first_write" and turns[4]["first_changed"] is None  # compared with another conversation
     main(["report", "--ledger", path, "--session", "s"])
     assert "position in the whole prompt" in capsys.readouterr().out

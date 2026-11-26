@@ -74,6 +74,10 @@ class TurnRecord:
     request_id: str
     task_id: str | None = None
     session_is_user: bool = False  # the session id is an end-user id, not a conversation id
+    # No conversation id came with the request: the session is the edge's default (or an end-user
+    # id) and holds every conversation that named none. A new opening message there is a new
+    # conversation, not an edit of the previous one.
+    session_shared: bool = False
     fork_of: str | None = None  # X-Prefixwise-Fork-Of
     compaction_event: bool = False
     stream: bool = False

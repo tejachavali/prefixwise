@@ -433,11 +433,12 @@ def test_responses_forwarding_chaining_and_usage():
 
 
 def age(proxy, session, model, when):
-    """Pretend the session's previous response on `model` ended at `when`."""
+    """Pretend the session's previous request on `model` was sent, and answered, at `when`."""
     proxy.last_seen[session] = when
     lane = proxy.lane_threads[(session, model)]
     snap, _, facts, rid = lane.threads[lane.latest]
     lane.threads[lane.latest] = (snap, when, facts, rid)
+    snap.sent_at = when  # a cache entry's age counts from when the request was sent
 
 
 def test_responses_previous_response_id_is_stitched_not_history_edit():
@@ -508,8 +509,10 @@ def test_tool_result_mutation_through_proxy():
 def test_anthropic_ttl_expired_and_one_hour_ttl():
     import time as _time
 
-    payload = {"id": "msg", "usage": {"input_tokens": 2000, "cache_read_input_tokens": 0,
-                                      "cache_creation_input_tokens": 0}}
+    # Every turn writes its prefix and reads nothing back. (A turn that wrote nothing would have left
+    # nothing to expire or to miss: that is below_min_prefix, tested in test_classifier_verdicts.)
+    payload = {"id": "msg", "usage": {"input_tokens": 10, "cache_read_input_tokens": 0,
+                                      "cache_creation_input_tokens": 2000}}
     up = FakeUpstream(payload=payload)
     proxy, server, port = run_proxy(upstream_url=up.url)
     try:

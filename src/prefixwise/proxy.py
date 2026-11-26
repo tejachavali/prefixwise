@@ -1243,6 +1243,7 @@ class PrefixwiseProxy:
             "fork_of": headers.get("x-prefixwise-fork-of"),
             "thread_key": thread_key,  # (lane, opening): this conversation, for the recording wait
             "session_is_user": session_is_user,  # a user id, not a conversation id (OpenTelemetry)
+            "session_shared": not given,  # no conversation id at all: the session holds many conversations
             "ttl_seconds": cache_ttl_seconds(provider, body, headers),
         }
 
@@ -1341,7 +1342,8 @@ class PrefixwiseProxy:
         return TurnRecord(
             provider=provider, api=ctx.get("api") or "chat", model=ctx["model"], session_id=ctx["session_id"],
             agent_id=ctx["agent_id"], request_id=ctx["request_id"], task_id=ctx["task_id"],
-            session_is_user=bool(ctx.get("session_is_user")), fork_of=ctx.get("fork_of"),
+            session_is_user=bool(ctx.get("session_is_user")), session_shared=bool(ctx.get("session_shared")),
+            fork_of=ctx.get("fork_of"),
             compaction_event=bool(ctx["compaction_event"]), stream=bool(ctx.get("stream")),
             previous_response_id=(str(body["previous_response_id"]) if ctx.get("api") == "responses"
                                   and body.get("previous_response_id") else None),

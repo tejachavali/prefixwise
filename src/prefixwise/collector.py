@@ -96,6 +96,15 @@ def _best_parent(lane: _Lane, identity: tuple, compaction: bool = False) -> tupl
     return latest, False, bool(not compaction and system and system != theirs)
 
 
+def _age(started: float, parent, parent_done: float) -> float:
+    """Seconds since the compared turn (a RequestSnapshot) was sent: the age of what it left in the
+    cache. Providers count a cache entry's lifetime from the request that wrote or read it, so that
+    turn's own generation time is part of the age. Its done time stands in when its send time is not
+    known."""
+    sent = getattr(parent, "sent_at", None)
+    return max(0.0, started - (sent if sent else parent_done))
+
+
 SEED_ROWS = 20_000  # recent ledger turns a collector learns cache lifetimes from at start
 
 
@@ -301,13 +310,24 @@ class Collector:
                 parent, interleaved, new_thread = _best_parent(state, identity, rec.compaction_event)
             prev, prev_done, parent_facts, _ = parent
             gap_seconds = max(0.0, started - prev_done)
+            cache_age = _age(started, prev, prev_done)
             concurrent = started < prev_done - CLOCK_SKEW  # sent while the compared turn was still in flight
+            # Sent before the turn it would be compared with was even sent: its record arrived late
+            # (an edge's batch, a retried delivery), after a later turn of the conversation.
+            parent_sent = getattr(prev, "sent_at", None)
+            late = not stitched and bool(parent_sent) and started < parent_sent - CLOCK_SKEW
+            # Its opening matches no remembered conversation, its system prompt is the lane's, and the
+            # lane is full: its own previous turn may be one that was dropped to make room.
+            opening = identity[0]
+            forgotten = (not stitched and not new_thread and opening is not None and opening != state.latest
+                         and opening not in state.threads and prior_threads >= LANE_THREADS)
         else:
             # First turn on this model: FIRST_WRITE for a new session, else
             # MODEL_SWITCH (the classifier compares models first).
             prev = self.last_snapshot.get(session_id)
             gap_seconds = max(0.0, started - self.last_seen[session_id]) if session_id in self.last_seen else None
-            concurrent = False
+            cache_age = None  # another model's turn: no cache entry of this model to age
+            concurrent = late = forgotten = False
         unknown_parent = concurrent_verdict = False
         lifetime_evidence = None  # set below when this turn shows how long the cache held (prefixwise.lifetime)
         if stitched:
@@ -321,9 +341,11 @@ class Collector:
                 mine = state.threads.get(identity[0]) if state is not None else None
                 if mine is not None:
                     gap_seconds, parent_facts = max(0.0, started - mine[1]), mine[2]
+                    cache_age = _age(started, mine[0], mine[1])
         curr = RequestSnapshot(model=rec.model, provider=provider, blocks=fps,
                                prompt_tokens=prompt_tokens, cached_tokens=cached,
-                               gap_seconds=gap_seconds, compaction_event=rec.compaction_event,
+                               gap_seconds=gap_seconds, cache_age_seconds=cache_age,
+                               compaction_event=rec.compaction_event,
                                params=dict(rec.params), has_breakpoint=rec.has_breakpoint,
                                ttl_seconds=rec.ttl_seconds, fork_parent_session_id=rec.fork_of,
                                session_id=session_id)
@@ -333,7 +355,9 @@ class Collector:
         curr.cache_reported = cache_reported(provider, usage)
         parts = breakdown(provider, usage)
         curr.cache_written = parts.cache_write_5m + parts.cache_write_1h + parts.cache_write
+        curr.sent_at = started
         curr.new_thread, curr.interleaved = new_thread, interleaved
+        curr.shared_session = rec.session_shared or rec.session_is_user
         if rec.engine_verdict is not None:
             verdict = rec.engine_verdict
             curr.evicted_blocks, curr.resident_blocks = verdict[0], verdict[1]
@@ -343,6 +367,19 @@ class Collector:
         restored = bool(rec.engine_verdict and len(rec.engine_verdict) > 3 and rec.engine_verdict[3] is True)
         if unknown_parent:
             result = Classification(MissCause.UNKNOWN, None, UNSEEN_PARENT, native_reason=native_reason)
+        elif late or forgotten:
+            # The turn it should be compared with is not the one at hand, so no change is claimed
+            # against it: a turn that read at least half of its own prompt was a hit, and anything
+            # else is not known.
+            why = (f"its record arrived late: it was sent {parent_sent - started:.1f} s before the later turn of "
+                   "this conversation that is already recorded" if late else
+                   f"more than {LANE_THREADS} conversations are interleaved in this session on this model, and "
+                   "this one's previous turn is no longer remembered (PREFIXWISE_LANE_THREADS raises the limit)")
+            hit = prompt_tokens > 0 and curr.cache_reported and cached >= 0.5 * prompt_tokens
+            result = Classification(
+                MissCause.NONE if hit else MissCause.UNKNOWN, None,
+                f"{why}; judged by its own read: {cached:,} of {prompt_tokens:,} prompt tokens came from the cache",
+                native_reason=native_reason, score=False)
         elif (concurrent and not stitched and not new_thread
               and curr.cached_tokens < 0.5 * (min(prev.prompt_tokens, prompt_tokens) if prev.prompt_tokens
                                              else prompt_tokens)):
@@ -401,7 +438,12 @@ class Collector:
         # early (the cache served all it held): there the waste is the stable prefix it left out.
         held = ((prev.cached_tokens + prev.cache_written) if prev is not None
                 and (prev.provider == "anthropic" or prev.cache_written) else None)
-        if held and result.cause is MissCause.BREAKPOINT_MISPLACED and cached >= held:
+        if result.cause is MissCause.BREAKPOINT_MISPLACED and (not held or cached >= held):
+            held = None  # (nothing held because nothing was marked: the waste is the whole stable prefix)
+        elif held == 0 and not curr.has_breakpoint:
+            # A change in a prompt with no cache_control at all: nothing was held, and what a marked,
+            # stable prompt would have reused stands (the evidence says both need fixing). With
+            # markers present and nothing held, there was nothing to lose: the cap of 0 applies.
             held = None
         entry = LedgerEntry(
             session_id=session_id, agent_id=rec.agent_id,
@@ -457,22 +499,24 @@ class Collector:
                 self.stats["concurrent"] += 1
             if result.score:  # a verdict overriding the compared pair is not an (dis)agreement
                 self.scorer.record(result.cause, native_reason, provider)
-        # Then the conversation state this turn leaves behind.
-        self.last_seen[session_id] = now
-        self.session_facts[session_id] = facts
-        self.last_snapshot[session_id] = curr
-        if state is None:
-            state = _Lane()
-        state.threads[identity[0]] = (curr, now, facts, response_id)
-        state.threads.move_to_end(identity[0])
-        while len(state.threads) > LANE_THREADS:
-            state.threads.popitem(last=False)
-        state.latest = identity[0]
-        self.lane_threads[lane] = state  # (re)assigning refreshes the lane in the LRU
-        if response_id:
-            self.last_response_id[session_id] = response_id
-            if rec.api == "responses":
-                self.snapshot_by_response[response_id] = curr
+        # Then the conversation state this turn leaves behind. (A record that arrived late is an
+        # older turn: it must not become the conversation's latest, which the later one already is.)
+        if not late:
+            self.last_seen[session_id] = now
+            self.session_facts[session_id] = facts
+            self.last_snapshot[session_id] = curr
+            if state is None:
+                state = _Lane()
+            state.threads[identity[0]] = (curr, now, facts, response_id)
+            state.threads.move_to_end(identity[0])
+            while len(state.threads) > LANE_THREADS:
+                state.threads.popitem(last=False)
+            state.latest = identity[0]
+            self.lane_threads[lane] = state  # (re)assigning refreshes the lane in the LRU
+            if response_id:
+                self.last_response_id[session_id] = response_id
+                if rec.api == "responses":
+                    self.snapshot_by_response[response_id] = curr
         return {"request_id": rec.request_id, "status": rec.status, "cause": result.cause.value,
                 "legit": result.legit, "native_reason": native_reason, "usage": usage,
                 "prompt_tokens": prompt_tokens, "cached_tokens": cached,

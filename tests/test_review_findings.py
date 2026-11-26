@@ -134,6 +134,8 @@ def test_the_gap_is_measured_to_the_send_not_to_the_response():
     lane = p.lane_threads[("g", "claude-sonnet-5-5")]
     snap0, done, facts, rid = lane.threads[lane.latest]
     lane.threads[lane.latest] = (snap0, done - 100, facts, rid)
+    if snap0.sent_at:
+        snap0.sent_at -= 100
     slow.append(1)
     _, entry = p.handle("anthropic", body("You are careful.", "q", 2), h)
     assert 99.9 <= entry.gap_seconds < 100.4  # not ~100.6: generation time is not idle time

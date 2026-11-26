@@ -261,4 +261,8 @@ def test_replacing_a_one_shot_request_is_not_a_history_edit():
     c = classify(one("title for step 1", 0), one("title for step 2", 1900))
     assert c.cause is MissCause.NONE and MissCause.HISTORY_EDIT in c.secondary
     c = classify(one("title for step 1", 0), one("title for step 2", 0))
-    assert c.cause is MissCause.ROUTING_MISS  # nothing cached: a routing question, never waste by edit
+    # Nothing read: only the short system prompt before the message was shared, so this is the new
+    # conversation's first write. It was called a routing miss, as if the whole prompt had been
+    # unchanged, and kept as evidence of how long the cache lasts.
+    assert c.cause is MissCause.FIRST_WRITE and c.legit is True and not c.cold_unchanged
+    assert "a new conversation in this session" in c.evidence
