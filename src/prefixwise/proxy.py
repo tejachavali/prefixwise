@@ -682,12 +682,25 @@ class PrefixwiseProxy:
         # Every read and write holds self._lock: the classifier must compare
         # a turn with the turn recorded just before it, never a torn state.
         self._lock = threading.Lock()  # edge state: requests in flight, recordings pending
+        self._observer = None  # POST /api/v1/observe: made on first use (the observer property)
         self._upstream = threading.local()  # last upstream response headers, per thread
         self._recording: dict[tuple, threading.Event] = {}  # streams ended for the client, not yet recorded
 
+    @property
+    def observer(self):
+        """The queue behind POST /api/v1/observe (prefixwise.observe), made on first use."""
+        with self._lock:
+            if self._observer is None:
+                from .observe import Observer
+                self._observer = Observer(self)
+            return self._observer
+
     def close(self, timeout: float = 5.0) -> None:
-        """Flush records still on their way to a remote collector; stop the log consumer and the
-        KV-event reader."""
+        """Record the observed events still waiting; flush records still on their way to a remote
+        collector; stop the log consumer and the KV-event reader."""
+        observer = getattr(self, "_observer", None)
+        if observer is not None:  # first: its records go through the collector below
+            observer.close(timeout)
         if self.log_consumer is not None:
             self.log_consumer.stop(timeout)
         if getattr(self.collector, "remote", False):

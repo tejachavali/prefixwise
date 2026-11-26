@@ -50,6 +50,9 @@ HEADER_KEYS = ("request_headers", "headers")
 TTFT_MS_KEYS = ("ttft_ms", "time_to_first_token_ms")
 FIRST_BYTE_KEYS = ("completion_start_time", "completionstarttime", "first_token_time")
 STATUS_KEYS = ("status", "status_code")
+# A response that is only a usage object (a stream's final usage) has one of these at its top.
+USAGE_FIELDS = frozenset(("prompt_tokens", "input_tokens", "completion_tokens", "output_tokens",
+                          "cache_read_input_tokens", "prompt_tokens_details", "input_tokens_details"))
 
 
 class _Clock:
@@ -163,6 +166,8 @@ def parse_entry(raw, where: str = "") -> dict:
     if not isinstance(response, dict):
         raise EntryError("no response: expected an object (or JSON text) under one of "
                          + ", ".join(RESPONSE_KEYS))
+    if "usage" not in response and USAGE_FIELDS & set(response):
+        response = {"usage": response}  # a stream's final usage object, logged on its own
     start = parse_time(_get(raw, START_KEYS))
     if start is None:
         raise EntryError("no start time: expected unix seconds/ms or ISO 8601 under one of "
@@ -226,17 +231,7 @@ def replay(entries: list[dict], ledger_path: str, *, engine: str | None = None, 
 
     clock = _Clock()
     stats = {"imported": 0, "failed": 0, "first": None, "last": None}
-    events = []
-    for i, e in enumerate(entries):
-        if not e.get("timed", True):  # no durations: start, first byte, end at once, one after another
-            events += [(e["start"], 1, i, 0), (e["start"], 1, i, 1), (e["start"], 1, i, 2)]
-            continue
-        # At equal times a response lands before the next request starts, except a request's own,
-        # which comes after its start.
-        events.append((e["start"], 1, i, 0))
-        events.append((e.get("first", e["end"]), 0 if e.get("first", e["end"]) > e["start"] else 1, i, 1))
-        events.append((e["end"], 0 if e["end"] > e["start"] else 1, i, 2))
-    events.sort()
+    events = sorted(ev for i, e in enumerate(entries) for ev in steps(e, i))
     with _replay_clock(clock):
         # Every setting explicit (empty, not None), so no PREFIXWISE_* variable of a live deployment
         # (a remote collector, an engine, KV events, fixes) leaks into the replay.
@@ -258,35 +253,54 @@ def _run(events, entries, proxy, clock, ctxs, stats, is_responses_body, count_si
     for t, _order, i, step in events:
         clock.now = t
         e = entries[i]
-        if step == 1:  # the answer began: the request's cache entry exists
-            if i in ctxs:
-                proxy.response_started(ctxs[i])
-            continue
-        if step == 0:  # the request reaches the proxy
-            body = {k: v for k, v in e["body"].items() if k not in ("stream", "stream_options")}
-            api = "responses" if e["provider"] == "openai" and is_responses_body(body) else "chat"
-            try:
-                ctx = proxy.prepare(e["provider"], body, e["headers"], api=api)
-            except Exception:  # noqa: BLE001 - a malformed logged body: skip it, like the proxy's 400
-                stats["failed"] += counted(e)
-                continue
-            ctx["span_start"] = t
-            ctxs[i] = ctx
-            continue
-        ctx = ctxs.pop(i, None)
-        if ctx is None:
-            continue
-        ctx["span_end"] = t
-        if e["status"] >= 400:
-            proxy.record_failure(ctx, e["status"], e["response"])
+        outcome = apply_step(proxy, e, i, step, t, ctxs, is_responses_body)
+        if outcome == "failed":
             stats["failed"] += counted(e)
-            continue
-        _, entry = proxy.finalize_safely(ctx, e["status"], e["response"])
-        if entry is None:
-            stats["failed"] += counted(e)
-            continue
-        if not counted(e):
-            continue
-        stats["imported"] += 1
-        stats["first"] = e["start"] if stats["first"] is None else min(stats["first"], e["start"])
-        stats["last"] = t if stats["last"] is None else max(stats["last"], t)
+        elif outcome == "recorded" and counted(e):
+            stats["imported"] += 1
+            stats["first"] = e["start"] if stats["first"] is None else min(stats["first"], e["start"])
+            stats["last"] = t if stats["last"] is None else max(stats["last"], t)
+
+
+def steps(e: dict, key) -> list[tuple]:
+    """An entry's three events, as (time, order, key, step): 0 the request is sent, 1 the answer
+    began (its cache entry exists), 2 the response is recorded. Sorted together, requests that
+    overlapped overlap. At equal times a response lands before the next request starts, except
+    a request's own, which comes after its start. Without durations, all three at the start."""
+    if not e.get("timed", True):
+        return [(e["start"], 1, key, 0), (e["start"], 1, key, 1), (e["start"], 1, key, 2)]
+    first = e.get("first", e["end"])
+    return [(e["start"], 1, key, 0),
+            (first, 0 if first > e["start"] else 1, key, 1),
+            (e["end"], 0 if e["end"] > e["start"] else 1, key, 2)]
+
+
+def apply_step(proxy, e: dict, key, step: int, t: float, ctxs: dict, is_responses_body) -> str | None:
+    """Run one of an entry's steps (see steps()) through the proxy pipeline at time t, on the
+    entry's own clock (prepare(at=), span_end), so it is safe outside a clock swap. ctxs holds
+    the requests in flight between steps. Returns "recorded" or "failed" for the last step (and
+    "failed" for a body the proxy refuses), None otherwise. Shared by the import and
+    POST /api/v1/observe (prefixwise.observe)."""
+    if step == 1:  # the answer began: the request's cache entry exists
+        if key in ctxs:
+            proxy.response_started(ctxs[key])
+        return None
+    if step == 0:  # the request reaches the proxy
+        body = {k: v for k, v in e["body"].items() if k not in ("stream", "stream_options")}
+        api = "responses" if e["provider"] == "openai" and is_responses_body(body) else "chat"
+        try:
+            ctx = proxy.prepare(e["provider"], body, e["headers"], api=api, at=t)
+        except Exception:  # noqa: BLE001 - a malformed body: skip it, like the proxy's 400
+            return "failed"
+        ctx["span_start"] = t
+        ctxs[key] = ctx
+        return None
+    ctx = ctxs.pop(key, None)
+    if ctx is None:
+        return None
+    ctx["span_end"] = t
+    if e["status"] >= 400:
+        proxy.record_failure(ctx, e["status"], e["response"])
+        return "failed"
+    _, entry = proxy.finalize_safely(ctx, e["status"], e["response"])
+    return "failed" if entry is None else "recorded"
