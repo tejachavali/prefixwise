@@ -193,6 +193,20 @@ _MIGRATIONS = {"task_id": "TEXT", "request_id": "TEXT", "completion_tokens": "IN
 _COLUMNS = [f.name for f in fields(LedgerEntry)]
 
 
+def _scrub_claude_code_ids(conn) -> int:
+    """Rows written before 0.12.7 keyed a Claude Code session on its whole metadata.user_id, a JSON
+    string carrying the device and account ids. Rewrite each to its session_id alone, once (later opens
+    find nothing to do: the range scan on the session index is empty). Returns the rows rewritten."""
+    try:
+        cur = conn.execute(
+            "UPDATE entries SET session_id = json_extract(session_id, '$.session_id') "
+            "WHERE session_id >= '{' AND session_id < '|' AND json_valid(session_id) "
+            "AND json_type(session_id, '$.session_id') = 'text' AND json_extract(session_id, '$.session_id') != ''")
+        return cur.rowcount or 0
+    except Exception:  # noqa: BLE001 - an SQLite without JSON functions: leave the rows as they are
+        return 0
+
+
 class Ledger:
     def __init__(self, path: str = ":memory:"):
         # check_same_thread=False: the proxy serves on threads; every
@@ -237,6 +251,7 @@ class Ledger:
             self.conn.execute("CREATE INDEX IF NOT EXISTS entries_request ON entries(request_id)")
             self.conn.execute("CREATE INDEX IF NOT EXISTS entries_session ON entries(session_id)")
             self.conn.execute("CREATE INDEX IF NOT EXISTS entries_time ON entries(recorded_at)")
+            _scrub_claude_code_ids(self.conn)
             self.conn.execute(
                 """CREATE TABLE IF NOT EXISTS tasks (
                     task_id TEXT PRIMARY KEY, success INTEGER NOT NULL, recorded_at REAL

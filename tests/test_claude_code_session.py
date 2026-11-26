@@ -49,3 +49,25 @@ def test_a_plain_user_id_is_still_a_user():
     assert ctx["session_is_user"] is True
     ctx = p.prepare("anthropic", _turn(0, metadata={"user_id": USER_ID}), {})
     assert ctx["session_is_user"] is False
+
+
+def test_an_older_ledger_is_scrubbed_of_the_device_and_account_ids(tmp_path):
+    """Rows written before the fix keyed the session on the whole JSON; opening the ledger rewrites them
+    to the session id alone, and leaves every other session id as it was."""
+    import sqlite3
+
+    from prefixwise.ledger import Ledger, LedgerEntry
+
+    path = str(tmp_path / "old.db")
+    led = Ledger(path)
+    for sid in (USER_ID, "plain-session", '{"not":"claude"}'):
+        led.record(LedgerEntry(session_id=sid, agent_id="a", provider="anthropic", model="m", cause="none",
+                               legit=None, prompt_tokens=1, cached_tokens=0, avoidable_tokens=0,
+                               avoidable_cost=0.0, task_success=None))
+    led.conn.close()
+    with sqlite3.connect(path) as c:  # as an older version left it
+        c.execute("UPDATE entries SET session_id = ? WHERE session_id = 'sess-42'", (USER_ID,))
+    Ledger(path)
+    with sqlite3.connect(path) as c:
+        ids = [r[0] for r in c.execute("SELECT session_id FROM entries ORDER BY id")]
+    assert ids == ["sess-42", "plain-session", '{"not":"claude"}']

@@ -44,4 +44,4 @@ streaming and returned errors when streamed; Bifrost and Plano did not start. Ro
 happen without Prefixwise too (its own); Bifrost needs a virtual key; Plano showed that `prefixwise serve` read
 chunked request bodies as empty (fixed; `--chunked` checks it). Round 3: Plano and Bifrost pass every check on the
 fix, streamed and not; behind Bifrost the conversation id arrives through the body's `user` / `metadata.user_id`
-or `x-bf-eh-x-prefixwise-session-id`. Where the four stand: `runs/2026-11-24-round3.md`.
+or `x-bf-eh-x-prefixwise-session-id` (send that one with `--fix cache_key`, which keys only on a conversation id, never on `user`). Where the four stand: `runs/2026-11-24-round3.md`.

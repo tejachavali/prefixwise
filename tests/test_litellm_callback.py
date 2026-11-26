@@ -1159,3 +1159,28 @@ def test_another_model_in_converse_or_anthropics_format_is_not_recorded():
     c._record(_messages_kw(sent=anthropic_body, model="glm-4.6", litellm_params={"custom_llm_provider": "openai", "metadata": {}}),
               _response(usage, "glm-4.6"), None, None)
     assert spy.calls == []
+
+
+def test_claude_codes_metadata_names_the_conversation_and_its_device_and_account_ids_are_dropped():
+    """Claude Code sends metadata.user_id as JSON (device_id, account_uuid, session_id). With no
+    litellm_session_id (the SDK route), the callback keys on session_id alone, as a conversation."""
+    import json as _json
+    uid = _json.dumps({"device_id": "dev-abc123", "account_uuid": "acct-9f8e", "session_id": "sess-42"})
+    spy = _Spy()
+    c = PrefixwiseCallback(recorder=spy)
+    sent = {"model": "claude-haiku-5-5", "max_tokens": 50, "system": [{"type": "text", "text": "s"}],
+            "messages": [{"role": "user", "content": [{"type": "text", "text": "hi",
+                                                      "cache_control": {"type": "ephemeral"}}]}],
+            "metadata": {"user_id": uid}}
+    params = {"custom_llm_provider": "anthropic", "metadata": {"user_id": uid}}
+    usage = {"prompt_tokens": 1716, "completion_tokens": 5, "cache_read_input_tokens": 0,
+             "cache_creation_input_tokens": 0}
+    c.log_pre_api_call("claude-haiku-5-5", [], _messages_kw(sent=sent, litellm_params=params))
+    c.log_success_event(_messages_kw(litellm_params=params), _response(usage), None, None)
+    _, _, _, kw = spy.calls[0]
+    assert kw["session_id"] == "sess-42" and kw["session_is_user"] is False
+    plain = {"custom_llm_provider": "anthropic", "metadata": {"user_id": "person-1"}}
+    c.log_pre_api_call("claude-haiku-5-5", [], _messages_kw(call="m2", sent=sent, litellm_params=plain))
+    c.log_success_event(_messages_kw(call="m2", litellm_params=plain), _response(usage), None, None)
+    _, _, _, kw = spy.calls[1]
+    assert kw["session_id"] == "person-1" and kw["session_is_user"] is True
