@@ -13,7 +13,7 @@ from prefixwise.ledger import EXPECTED_MISS_CAUSES, Ledger, LedgerEntry, missed_
 from prefixwise.pricing import PriceTable
 
 from test_classifier_verdicts import A1, GO, OPUS, S, SYS, U1, claude, idle, marked, scripted
-from test_import_claude_code import Log, build, usage
+from test_import_claude_code import Log, build, ts, usage
 
 BASE = {"model": OPUS, "max_tokens": 9}
 RATES = PriceTable.load("").rates_for(OPUS)   # USD per million tokens
@@ -239,3 +239,129 @@ def test_no_figure_where_the_provider_does_not_report_what_it_cached():
     entry = proxy.handle("openai", body(A1, GO, A1, GO), headers)[1]
     assert entry.cause == "ttl_expired", entry.evidence
     assert entry.missed_tokens is None and entry.missed_cost is None
+
+
+# -- what a second review found: "unchanged" has to be said by the classifier, not inferred ------
+
+def test_no_figure_for_a_new_conversation_with_no_session_id():
+    """A single-message request after a longer conversation, with no session id, past the lifetime:
+    an expiry of the shared system prompt is named, but the prompt is another conversation's."""
+    from test_classifier_verdicts import shift
+
+    proxy = scripted([claude(write=30000), claude(write=23000)])
+    base = {**BASE, "system": marked()}
+    proxy.handle("anthropic", {**base, "messages": [U1, A1, GO, A1, GO]}, {})
+    for sid, _ in list(proxy.lane_threads):
+        shift(proxy, sid, sent=600, done=600)
+    entry = proxy.handle("anthropic", {**base, "messages": [{"role": "user", "content": "new task " + "paste " * 20000}]}, {})[1]
+    assert entry.cause == "ttl_expired" and "new conversation" in entry.evidence
+    assert entry.missed_tokens is None and entry.missed_cost is None
+
+
+def test_what_was_left_is_what_the_previous_turn_read_plus_wrote_when_it_reports_writes():
+    proxy = scripted([claude(write=3000), claude(read=3000, write=100), claude(write=3300)])
+    base = {**BASE, "system": marked()}
+    proxy.handle("anthropic", {**base, "messages": [U1]}, S)
+    proxy.handle("anthropic", {**base, "messages": [U1, A1, GO]}, S)
+    idle(proxy, 600)
+    entry = proxy.handle("anthropic", {**base, "messages": [U1, A1, GO, A1, GO]}, S)[1]
+    assert (entry.cause, entry.missed_tokens) == ("ttl_expired", 3100)        # 3,000 read + 100 written, not 100
+    # a server shaped like Anthropic's that reports no write count: what it left is not known
+    bare = lambda read: {"input_tokens": 3000 - read, "output_tokens": 5, "cache_read_input_tokens": read}  # noqa: E731
+    proxy = scripted([bare(0), bare(2800), bare(0)])
+    proxy.handle("anthropic", {**base, "messages": [U1]}, S)
+    proxy.handle("anthropic", {**base, "messages": [U1, A1, GO]}, S)
+    idle(proxy, 600)
+    entry = proxy.handle("anthropic", {**base, "messages": [U1, A1, GO, A1, GO]}, S)[1]
+    assert entry.missed_tokens is None and entry.missed_cost is None, (entry.cause, entry.evidence)
+
+
+def test_the_front_is_priced_at_the_long_lifetime_it_was_written_at():
+    """3,000 tokens written for an hour ahead of 30,000 written for five minutes: the expired front is
+    the 1-hour part. Rates given as "input", and the long-context tier, are followed."""
+    table = PriceTable.load("")
+    u = {"input_tokens": 200, "output_tokens": 5, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 33000,
+         "cache_creation": {"ephemeral_1h_input_tokens": 3000, "ephemeral_5m_input_tokens": 30000}}
+    assert table.missed_cost(OPUS, 3000, 33200, "anthropic", u) == pytest.approx(
+        3000 * (RATES["cache_write_1h"] - RATES["cache_read"]) / 1e6)
+    assert table.missed_cost(OPUS, 5000, 33200, "anthropic", u) == pytest.approx(
+        (3000 * (RATES["cache_write_1h"] - RATES["cache_read"]) + 2000 * (RATES["cache_write_5m"] - RATES["cache_read"])) / 1e6)
+    custom = PriceTable(models={"m": {"input": 2.0, "output": 8.0, "cache_read": 0.5, "cache_write": "input"}},
+                        as_of="2026-11-26", sources=["test"])
+    gpt_like = {"prompt_tokens": 4000, "completion_tokens": 5,
+                "prompt_tokens_details": {"cached_tokens": 0, "cache_write_tokens": 3000}}
+    assert custom.missed_cost("m", 3000, 4000, "openai", gpt_like) == pytest.approx(3000 * (2.0 - 0.5) / 1e6)
+    tiered = PriceTable(models={"m": {"input": 2.0, "output": 8.0, "cache_read": 0.5, "cache_write": 3.0,
+                                      "long_prompt": {"above_prompt_tokens": 1000, "input": 4.0, "cache_read": 1.0,
+                                                      "cache_write": 6.0}}}, as_of="2026-11-26", sources=["test"])
+    assert tiered.missed_cost("m", 3000, 4000, "openai", gpt_like) == pytest.approx(3000 * (6.0 - 1.0) / 1e6)
+    assert tiered.missed_cost("m", 300, 900, "openai", {**gpt_like, "prompt_tokens": 900}) == pytest.approx(
+        300 * (3.0 - 0.5) / 1e6)
+
+
+def import_rows(tmp_path, log):
+    log.write(tmp_path / "-proj" / "sess-1.jsonl")
+    led = Ledger()
+    import_claude_code(tmp_path, led)
+    with led.reader() as c:
+        return c.execute("SELECT cause, missed_tokens, missed_cost, evidence, model FROM entries "
+                         "ORDER BY recorded_at, id").fetchall()
+
+
+def test_the_import_gives_a_figure_only_when_nothing_else_changed_in_the_gap(tmp_path):
+    day = 86400
+    # the plain case: one model, one version, a day apart
+    log = Log()
+    log.user(1); log.reply(5, usage(w1h=100000))
+    log.user(day); log.reply(day + 5, usage(w1h=100500))
+    rows = import_rows(tmp_path / "plain", log)
+    assert (rows[1][0], rows[1][1]) == ("ttl_expired", 100000) and rows[1][2] > 0
+    # priced at what the front was written at, not a blend with the 5-minute tail and the uncached input
+    log = Log()
+    log.user(1); log.reply(5, usage(w1h=100000))
+    log.user(day); log.reply(day + 5, usage(w1h=100000, w5=50000, fresh=20000))
+    rows = import_rows(tmp_path / "mixed", log)
+    assert rows[1][1] == 100000 and rows[1][4] == OPUS
+    assert rows[1][2] == pytest.approx(100000 * (RATES["cache_write_1h"] - RATES["cache_read"]) / 1e6)
+    # the logged system prompt changed in the gap
+    log = Log()
+    snap = lambda t, v: log.lines.append({"type": "attachment", "timestamp": ts(t),  # noqa: E731
+                                          "attachment": {"type": "prompt_snapshot", "systemPrompt": [v]}})
+    snap(0, "v1"); log.user(1); log.reply(5, usage(w1h=100000))
+    snap(day - 1, "v2"); log.user(day); log.reply(day + 5, usage(w1h=100500))
+    rows = import_rows(tmp_path / "system", log)
+    assert rows[1][0] == "ttl_expired" and rows[1][1] is None and rows[1][2] is None
+    # Claude Code was upgraded in the gap
+    log = Log()
+    log.user(1); log.reply(5, usage(w1h=100000), version="2.1.330")
+    log.user(day); log.reply(day + 5, usage(w1h=100500), version="2.1.332")
+    rows = import_rows(tmp_path / "upgrade", log)
+    assert rows[1][0] == "ttl_expired" and "upgraded" in rows[1][3] and rows[1][1] is None
+    # another model was used in between
+    log = Log()
+    log.user(1); log.reply(5, usage(w1h=100000))
+    log.user(50); log.reply(55, usage(w5=100200), model="claude-haiku-5-5")
+    log.user(day); log.reply(day + 5, usage(w1h=100500))
+    rows = import_rows(tmp_path / "switch", log)
+    back = rows[2]
+    assert back[4] == "claude-opus-5-5" and back[1] is None, back
+    # the previous request's usage is a sum of several model calls: what it left is not exact
+    log = Log()
+    summed = {**usage(w1h=100000), "iterations": [{"input_tokens": 1}, {"input_tokens": 1}]}
+    log.user(1); log.reply(5, summed)
+    log.user(day); log.reply(day + 5, usage(w1h=100500))
+    rows = import_rows(tmp_path / "summed", log)
+    assert rows[1][1] is None, rows[1]
+
+
+def test_the_line_reads_right_with_one_priced_a_tiny_sum_and_large_counts():
+    item = {"requests": 1500, "missed_tokens": 1200, "missed_cost_usd": 0.0542, "requests_missed": 3,
+            "requests_missed_priced": 1}
+    assert "on the 1 that is priced" in _missed(item, None)
+    assert "$" not in _missed({**item, "missed_cost_usd": 0.00002}, 0.5)     # would print as $0.0000
+    led = Ledger()
+    for _ in range(1500):
+        led.record(LedgerEntry(session_id="s", agent_id="a", provider="anthropic", model=OPUS, cause="model_switch",
+                               prompt_tokens=10, cached_tokens=0, avoidable_tokens=0, avoidable_cost=None, legit=True))
+    line = next(ln for ln in render(findings(led)).splitlines() if ln.startswith("Expected misses"))
+    assert "1,500 x switched model" in line

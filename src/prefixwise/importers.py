@@ -394,9 +394,16 @@ def import_claude_code(root: str | os.PathLike | None = None, ledger: Ledger | N
                 prev_prompt_before = same.prompt if same is not None else None
                 held = same.held if same is not None and same.held > 0 else None
                 avoidable = avoidable_for_turn(legit, prompt, read, prev_prompt_before, held)
-                # (`same.held`, not `held`: zero is "left nothing", which gets no figure, not "unknown".)
+                # An expiry gets a figure only when nothing else changed in the gap, as far as the log
+                # shows: the same model throughout, the same Claude Code version, the same system
+                # prompt snapshot. And only when what the previous request left is exact (not a sum of
+                # several calls). (`same.held`, not `held`: zero is "left nothing", not "unknown".)
+                was = same.req if same is not None else None
+                only_expired = (was is not None and not same.summed and prev is not None and prev.model == r.model
+                                and not (was.version and r.version and was.version != r.version)
+                                and not (was.system_hash and r.system_hash and was.system_hash != r.system_hash))
                 missed = missed_for_turn(cause, legit, prompt, read, prev_prompt_before,
-                                         same.held if same is not None else None)
+                                         same.held if same is not None else None, unchanged=only_expired)
                 several = isinstance(u.get("iterations"), list) and len(u["iterations"]) > 1
                 if read + write > 0 or same is None or same.held == 0:
                     # A call that read and wrote nothing did not touch this model's cache: what the

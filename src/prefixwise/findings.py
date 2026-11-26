@@ -416,9 +416,10 @@ def _missed(e: dict, bill) -> str:
     n, with_figure, priced = e.get("requests") or 0, e.get("requests_missed") or 0, e.get("requests_missed_priced") or 0
     scope = f"on {with_figure:,} of them, " if with_figure and with_figure != n else ""
     money = ""
-    if cost:
+    if cost and cost >= 0.00005:  # (a sum that would print as $0.0000 says nothing)
         money = (f", {_usd(cost)} more than reading them"
-                 + (f" on the {priced:,} that are priced" if priced and priced != with_figure else "")
+                 + (f" on the {priced:,} that {'is' if priced == 1 else 'are'} priced"
+                    if priced and priced != with_figure else "")
                  + (f", {_share(cost, bill)} of the bill" if bill else ""))
     return f" ({scope}{_n(tokens)} tokens the cache had held were sent again{money})"
 
@@ -518,7 +519,7 @@ f"{n:,} request{'' if n == 1 else 's'} on {m} (recorded before the table of {sin
             lines.append(f"Cause not determined for {n} request{'s' if n != 1 else ''} "
                          "(`prefixwise report --detail` shows the evidence).")
     if f["expected"]:
-        parts = [f"{e['requests']} x {e['what']}{_missed(e, s.get('cost_usd'))}" for e in f["expected"][:4]]
+        parts = [f"{e['requests']:,} x {e['what']}{_missed(e, s.get('cost_usd'))}" for e in f["expected"][:4]]
         lines.append("Expected misses (not waste): " + "; ".join(parts) + ".")
         for e in f["expected"]:
             for d in e.get("details") or []:
