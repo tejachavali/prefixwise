@@ -109,6 +109,25 @@ def _pass_headers(args) -> None:
         os.environ["PREFIXWISE_PASS_HEADERS"] = ",".join(old + names)
 
 
+def _listen_error(exc: Exception, host: str, port: int) -> str:
+    """What to do about a port that cannot be bound, instead of the bare OS error."""
+    import errno
+    if isinstance(exc, OverflowError):
+        return f"--port must be between 0 and 65535, got {port}"
+    if isinstance(exc, OSError) and exc.errno == errno.EADDRINUSE:
+        return f"port {port} on {host} is already in use: pass another --port (0 picks a free one)"
+    return str(exc)
+
+
+def _listen_local(proxy, port: int):
+    """The proxy's server on 127.0.0.1 for `run` and `check`; a busy or bad port ends with a message."""
+    from .proxy import PrefixwiseHTTPServer, make_handler
+    try:
+        return PrefixwiseHTTPServer(("127.0.0.1", port), make_handler(proxy))
+    except (OSError, OverflowError) as exc:
+        sys.exit(f"prefixwise: {_listen_error(exc, '127.0.0.1', port)}")
+
+
 def cmd_serve(args) -> int:
     from .proxy import serve
 
@@ -125,8 +144,8 @@ def cmd_serve(args) -> int:
               fixes=_fixes(args), allow_unauthenticated=args.allow_unauthenticated,
               prices=args.prices, engine=engine, kv_events=kv_events,
               full_attention=args.full_attention, otel=args.otel, collector_url=args.collector, sinks=args.sink)
-    except (ValueError, OSError) as exc:  # unknown --fix, --engine, --otel or --sink value
-        sys.exit(f"prefixwise: {exc}")
+    except (ValueError, OSError, OverflowError) as exc:  # unknown --fix, --engine, --otel, --sink; a bad port
+        sys.exit(f"prefixwise: {_listen_error(exc, args.host, args.port)}")
     return 0
 
 
@@ -581,7 +600,7 @@ def cmd_run(args) -> int:
     proxy.versioned = {"openai"}
     proxy.api_key = None  # the agent's own keys pass through; never replace them here
     proxy.default_session = f"run-{time.strftime('%Y%m%d-%H%M%S')}"
-    server = PrefixwiseHTTPServer(("127.0.0.1", args.port), make_handler(proxy))
+    server = _listen_local(proxy, args.port)
     base = f"http://127.0.0.1:{server.server_address[1]}"
     threading.Thread(target=server.serve_forever, daemon=True).start()
     env = {**os.environ, "ANTHROPIC_BASE_URL": base, "OPENAI_BASE_URL": base + "/v1", "PREFIXWISE_URL": base}
@@ -704,7 +723,7 @@ def cmd_check(args) -> int:
     proxy.mock_tool_calls = True
     proxy.mock_first_turn_delay = max(0.0, args.first_turn_delay)
     proxy.request_observer = watch
-    server = PrefixwiseHTTPServer(("127.0.0.1", args.port), make_handler(proxy))
+    server = _listen_local(proxy, args.port)
     base = f"http://127.0.0.1:{server.server_address[1]}"
     threading.Thread(target=server.serve_forever, daemon=True).start()
     env = {**os.environ, "ANTHROPIC_BASE_URL": base, "OPENAI_BASE_URL": base + "/v1", "PREFIXWISE_URL": base,

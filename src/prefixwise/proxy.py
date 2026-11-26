@@ -665,6 +665,11 @@ class PrefixwiseProxy:
                              and h.strip().lower() not in NEVER_PASSED}
         self.mock = mock if mock is not None else (
             not (self.upstream_url or self.upstreams) or os.environ.get("PREFIXWISE_MOCK_UPSTREAM") == "1")
+        if not self.mock:  # a bad upstream would otherwise fail on every request, with a bare 500
+            for url in filter(None, [self.upstream_url, *self.upstreams.values()]):
+                parts = urllib.parse.urlsplit(url)
+                if parts.scheme not in ("http", "https") or not parts.hostname:
+                    raise ValueError(f"upstream must be an http:// or https:// URL, got {url!r}")
         self.default_session = "default"  # for requests that carry no session id
         # prefixwise check (prefixwise.check): sees every request's blocks (never stored), makes the
         # mock answer a user turn that offers tools with a tool call so an agent's loop runs a second
@@ -2224,7 +2229,9 @@ def serve(host: str = "127.0.0.1", port: int = 8080, *, ledger_path: str | None 
     once the server listens (tests). sinks: URLs (prefixwise.sinks) that receive a copy of every row."""
     hmac_key = os.environ.get("PREFIXWISE_HMAC_KEY")
     ledger_path = ledger_path or os.environ.get("PREFIXWISE_LEDGER_PATH", ":memory:")
-    proxy = PrefixwiseProxy(ledger_path=ledger_path, upstream_url=upstream_url, mock=mock or collect_only,
+    # mock stays None when not asked for, so the proxy's own default applies: mock when no upstream is set.
+    proxy = PrefixwiseProxy(ledger_path=ledger_path, upstream_url=upstream_url,
+                            mock=True if collect_only else mock,
                             hmac_key=hmac_key.encode() if hmac_key else None, fixes=fixes,
                             prices=prices, engine=engine, kv_events=kv_events, full_attention=full_attention,
                             otel=otel, collector_url="" if collect_only else collector_url)

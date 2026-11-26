@@ -49,6 +49,9 @@ jobs:
       - run: |
           docker run -d --name pw -p 8080:8080 prefixwise
           for i in $(seq 1 30); do curl -sf localhost:8080/health && break; sleep 1; done
+          # The default image is a mock: a request must be answered, not only /health.
+          curl -sf localhost:8080/v1/chat/completions -H 'content-type: application/json' \
+            -d '{"model":"m","messages":[{"role":"user","content":"hi"}]}' > /dev/null
           docker exec pw python -m prefixwise report
       - name: docker stop is graceful (SIGTERM handled as PID 1, exit 0 not 137)
         run: |
