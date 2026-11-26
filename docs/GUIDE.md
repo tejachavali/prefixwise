@@ -107,7 +107,7 @@ Ways in; all write the same kind of ledger and the same report. An import keeps 
 | An agent you run from a terminal (Claude Code, Codex, opencode, your own) | `prefixwise run -- <your command>` | unchanged: the agent still calls its provider |
 | A service, several agents, or a gateway | `prefixwise serve --upstream https://api.anthropic.com` and point clients at it | unchanged |
 | Your own vLLM server | `pip install "prefixwise[engines]"`, then `vllm serve <model> ... --middleware prefixwise.PrefixwiseMiddleware`: no proxy, no port change ([docs/VLLM.md](VLLM.md)) | nothing leaves the server |
-| Your own Python code | `client = prefixwise.wrap(Anthropic())` (or OpenAI) | unchanged: calls go straight to the provider |
+| Your own Python code | `client = prefixwise.wrap(Anthropic())` (or OpenAI, or `boto3.client("bedrock-runtime")`) | unchanged: calls go straight to the provider |
 | LiteLLM (SDK or proxy server) | `litellm.callbacks = [PrefixwiseCallback()]` | unchanged |
 | Claude Code or Codex on a subscription (no API key) | `prefixwise import claude-code` / `prefixwise import codex` | nothing is sent anywhere: reads the local logs |
 | Your CI | `prefixwise check -- pytest tests/agent_scenarios` (or the GitHub Action) | nothing is sent anywhere: a local mock answers |
@@ -237,6 +237,14 @@ from anthropic import Anthropic                       # or OpenAI(), AsyncOpenAI
 client = prefixwise.wrap(Anthropic())                 # ledger: ./prefixwise.db (or PREFIXWISE_LEDGER_PATH)
 with prefixwise.session("fix-bug-42", task_id="fix-bug-42"):
     client.messages.create(...)                       # then `prefixwise report`, as above
+```
+
+Claude on **Amazon Bedrock**, through boto3: wrap the runtime client. `converse` and `invoke_model` calls to Claude are recorded and judged by Anthropic's caching rules (a Converse `cachePoint` is a breakpoint on the block before it), a prompt router by the model it chose; other models, provisioned throughput and the two streaming calls pass through unrecorded. Details and limits: [`bedrock.py`](../src/prefixwise/bedrock.py).
+
+```python
+import boto3
+client = prefixwise.wrap(boto3.client("bedrock-runtime"))
+client.converse(modelId="us.anthropic.claude-sonnet-4-5-20250929-v1:0", system=[...], messages=[...])
 ```
 
 Every call through **LiteLLM** (the SDK or its proxy server), with no change to your calls:
