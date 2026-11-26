@@ -18,8 +18,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .classifier import RequestSnapshot, classify, first_divergence
+from .details import body_facts, last_block_marked, shared_breakpoint
 from .fingerprint import BlockFingerprint, Fingerprinter
-from .pricing import breakdown, cache_reported
+from .pricing import breakdown, cache_reported, write_reported
 from .records import PARAM_KEYS as _PARAM_KEYS, param_fingerprint
 from .proxy import (cache_ttl_seconds, completion_tokens_of, extract_blocks, has_cache_breakpoint,
                     normalize_usage)
@@ -126,7 +127,9 @@ def _snapshot(turn: Turn, provider: str, fp: Fingerprinter) -> RequestSnapshot:
                            has_breakpoint=has_cache_breakpoint(turn.body),
                            ttl_seconds=cache_ttl_seconds(provider, turn.body),
                            min_prefix_tokens=min_prefix, usage_known=turn.usage is not None,
-                           cache_reported=cache_reported(provider, turn.usage) if turn.usage else True)
+                           cache_reported=cache_reported(provider, turn.usage) if turn.usage else True,
+                           write_reported=write_reported(provider, turn.usage) if turn.usage else False,
+                           last_block_marked=last_block_marked(body_facts(provider, turn.body)))
 
 
 def explain_pair(prev: Turn | None, curr: Turn, provider: str | None = None,
@@ -135,6 +138,8 @@ def explain_pair(prev: Turn | None, curr: Turn, provider: str | None = None,
     fp = fingerprinter or Fingerprinter()
     curr_snap = _snapshot(curr, provider, fp)
     prev_snap = _snapshot(prev, provider, fp) if prev is not None else None
+    if prev is not None:  # where the two requests put their markers, as the collector knows it
+        curr_snap.shared_breakpoint = shared_breakpoint(body_facts(provider, prev.body), body_facts(provider, curr.body))
     result = classify(prev_snap, curr_snap)
     div = first_divergence(prev_snap.blocks, curr_snap.blocks, engine=curr_snap.engine) if prev_snap else None
     if div and result.cause.value == "tool_reserialize" and div["kind"] == "content changed":

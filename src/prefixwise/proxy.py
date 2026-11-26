@@ -745,6 +745,11 @@ class PrefixwiseProxy:
             if self.upstream_url and not {"anthropic", "openai"} <= set(self.upstreams):
                 checked_upstream(self.upstream_url, "the upstream (--upstream or PREFIXWISE_UPSTREAM_URL)")
         self.default_session = "default"  # for requests that carry no session id
+        # Whether the default session holds every conversation that named none (a proxy serving
+        # traffic: `serve`, the middleware, an SDK recorder) or is one conversation's own name
+        # (`prefixwise run` names it after the run; `prefixwise check` after the scenario). In a
+        # shared session a new opening message is a new conversation; in a named one it is an edit.
+        self.default_session_shared = True
         self._unreadable_kinds: set = set()  # exception types prepare_safely has reported (once each)
         # prefixwise check (prefixwise.check): sees every request's blocks (never stored), makes the
         # mock answer a user turn that offers tools with a tool call so an agent's loop runs a second
@@ -763,7 +768,7 @@ class PrefixwiseProxy:
         # flight by tools+system prefix, and when another session last finished one.
         self.prefix_inflight: dict[str, dict[str, float]] = _SessionMap(MAX_SESSIONS)
         self.prefix_done: dict[str, tuple[float, str]] = _SessionMap(MAX_SESSIONS)
-        # Completed requests by masked prefix key: (time, session, canonical key, dates-only key, ids-only
+        # Completed requests by masked prefix key: (time sent, session, canonical key, dates-only key, ids-only
         # key, wrote inside tools+system). A first request whose masked key is here under another
         # canonical key differs from that session only in volatile values of the system prompt.
         self.prefix_seen: dict[str, tuple] = _SessionMap(MAX_SESSIONS)
@@ -1243,7 +1248,8 @@ class PrefixwiseProxy:
             "fork_of": headers.get("x-prefixwise-fork-of"),
             "thread_key": thread_key,  # (lane, opening): this conversation, for the recording wait
             "session_is_user": session_is_user,  # a user id, not a conversation id (OpenTelemetry)
-            "session_shared": not given,  # no conversation id at all: the session holds many conversations
+            # no conversation id at all, on an edge whose default session holds many conversations
+            "session_shared": not given and self.default_session_shared and not self.check_mode,
             "ttl_seconds": cache_ttl_seconds(provider, body, headers),
         }
 
@@ -1396,11 +1402,15 @@ class PrefixwiseProxy:
         # Writes happen only at breakpoints: other sessions can reuse this request's entry for
         # tools+system only if it wrote one ending there.
         inside = [b for b in facts.breakpoints if b < facts.sys_end]
+        # Timed from when the request was sent: a cache entry's lifetime counts from the request
+        # that wrote it, so the windows other sessions are judged by (5 minutes, the cache TTL)
+        # include this request's generation time.
+        sent = facts.sent_at or time.time()
         if done_session is not None and facts.cache_write > 0 and inside:
-            self.prefix_done[facts.prefix_key] = (time.time(), done_session, max(inside))
+            self.prefix_done[facts.prefix_key] = (sent, done_session, max(inside))
         if done_session is not None and facts.prefix_key_masked:
             self.prefix_seen[facts.prefix_key_masked] = (
-                time.time(), done_session, facts.prefix_key_canonical, facts.prefix_key_masked_time,
+                sent, done_session, facts.prefix_key_canonical, facts.prefix_key_masked_time,
                 facts.prefix_key_masked_id, bool(facts.cache_write > 0 and inside))
 
     def response_started(self, ctx: dict) -> None:

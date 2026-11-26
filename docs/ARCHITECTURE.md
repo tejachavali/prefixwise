@@ -214,7 +214,13 @@ interleaving in one session are each compared with their own last turn, however 
 ran in between, and the provider's diagnostics are chained to that same turn (a Responses turn
 sent with `previous_response_id` belongs to its parent's conversation and is compared with the turn
 it names). Known limits: conversations that open with the identical message are treated as one,
-and past 8 conversations in a lane the least recently used one is forgotten. The
+and past 8 conversations in a lane the least recently used one is forgotten. A request that has no
+turn of its own to be compared with is not blamed for a change: an earlier point of its own
+conversation (its messages open the compared turn's: a record delivered late, a rewind), or, where
+the session names no conversation or the lane is full of recent ones, a request of several
+messages whose opening and following messages are not the compared turn's. It is judged by its own
+read (`none` if at least half of its prompt came from the cache, else `unknown`). The specification
+is [ALGORITHM.md](ALGORITHM.md); this is its outline. The
 first rule that fires wins; later ones are kept as secondary causes. In order:
 
 1. **No previous turn:** `first_write` (or `fork_boundary` for a forked session's first turn).
@@ -229,28 +235,44 @@ first rule that fires wins; later ones are kept as secondary causes. In order:
      different), else `tool_catalog_change`;
    - system: `volatile_system` if only a date, time or id changed (masked hashes equal), else
      `system_edit`;
-   - messages: `history_edit`, or `compaction_rewrite` when the client signalled a compaction;
+   - messages: `history_edit`, or `compaction_rewrite` when the client signalled a compaction.
+     Another opening message with no compaction event is another conversation, not an edit, when
+     the previous request was a single message, or this one is a single message in a session that
+     names no conversation: it is judged by what the cache read (`none`, or `first_write`; on
+     Anthropic, when the previous request cached the tools and system prompt at a marker this one
+     repeats and nothing was read, by the expiry and routing rules of step 4);
    - tool results: `tool_result_mutation`, or `compaction_rewrite` after a compaction.
 
-   Two facts from the response overrule a change: nothing was read and the gap exceeded the
-   cache's TTL (the entry had expired anyway: `ttl_expired`), or the cache still served all of the
-   prefix the previous turn could share (the change cost nothing: `none`). The change is kept as a
-   secondary cause either way. A change that broke reuse part-way is priced for the part it cost:
-   the reusable prefix minus what was read, never the whole prompt.
+   Facts from the responses overrule a change: nothing was read and the previous turn had left
+   nothing in the cache (on Anthropic, a marked prefix too small to cache: `below_min_prefix`);
+   nothing was read and the entry was older than the cache's TTL (it had expired anyway:
+   `ttl_expired`); or the cache still served all of the prefix the previous turn could share (the
+   change cost nothing: `none`). The change is kept as a secondary cause either way. A change that
+   broke reuse part-way is priced for the part it cost: the reusable prefix minus what was read,
+   never the whole prompt.
 3. **Prompt unchanged:** `param_rendered` (a parameter that renders into the prompt changed),
    `below_min_prefix`, `breakpoint_misplaced` (Anthropic with no breakpoint, one after
    volatile content, or one left early while the stable prompt grew past it: the cache serves
-   all it holds and the stable tail is paid uncached every turn).
+   all it holds and the stable tail is paid uncached every turn). With no breakpoint at all and
+   nothing read more than an hour after the previous turn was sent, `ttl_expired`: no marker
+   would have kept the entry.
 4. **Nothing changed in the request**, judged from usage (absent usage is `unknown`, never a
    zero read as evidence):
    - a **hit**, `none`: at least half of the reusable prefix was read from cache;
+   - `below_min_prefix` on Anthropic when the previous turn carried `cache_control` and still
+     read and wrote nothing (what its marker covered was too small to cache), and nothing was
+     read now;
    - engine evidence: a confirmed `evicted`, or a confirmed `routing_miss` across caches;
    - `retry_replay`: the identical request again within a minute, less than half read;
    - with one self-hosted engine and no event evidence: `evicted`, inferred and said so (with
      several caches known, `unknown` instead);
-   - `ttl_expired` when the gap exceeds the cache's TTL, `routing_miss` when less than half was read
-     within it. The gap runs from the previous turn's response to this request's send: this
-     request's own generation time is not idle time;
+   - `ttl_expired` when the entry's age exceeds the cache's TTL, `routing_miss` when less than half
+     was read within it. The age runs from when the previous turn was sent to when this request
+     was sent: a provider counts an entry's lifetime from the request that wrote or read it, so
+     that turn's generation time is part of it. The ledger's `gap_seconds` is the idle time, from
+     the previous turn's response to this request's send (this request's own generation time is
+     not idle time); `cache_age_seconds` is the age. The retry rule and observed lifetimes use the
+     idle time;
    - otherwise `unknown`, with the evidence that was missing. Prefixwise never guesses.
 
 Then `details.py` may add a sub-reason, and may refine a cause where a precondition proves it

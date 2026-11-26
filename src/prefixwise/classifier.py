@@ -68,6 +68,10 @@ _ANTHROPIC_MIN_PREFIX = [(re.compile(pattern), tokens) for pattern, tokens in (
 )]
 OPENAI_MIN_PREFIX = 1024
 MAX_ANTHROPIC_TTL_SECONDS = 3600  # the longest lifetime a cache_control can ask for
+# Twice the largest minimum cacheable prefix of any Claude model: a prompt this long whose last
+# block carries cache_control, yet wrote and read nothing, had its markers ignored (the
+# `markers_ignored` detail in prefixwise.details).
+MARKERS_MIN_PROMPT = 8192
 # No provider keeps a cache entry for less than ~5 minutes (Anthropic default
 # 5 min; OpenAI in-memory 5-10 min). A cold cache within this gap of the
 # last turn is not explained by expiry.
@@ -146,6 +150,18 @@ class RequestSnapshot:
     # The session names no single conversation (no conversation id came with the request): it
     # holds every conversation that named none, so a new opening message is a new conversation.
     shared_session: bool = False
+    # The lane is full of recent conversations: it remembers this many (its limit), each with a
+    # turn within the last hour, so a conversation it does not remember may have been dropped to
+    # make room. 0 when it is not full.
+    lane_crowded: int = 0
+    # The previous turn marked a block inside (or at the end of) tools+system, and this request
+    # marks the same block: what that turn cached up to there, this request could read.
+    shared_breakpoint: bool = False
+    # Anthropic: the usage carried a cache-write count (cache_creation_input_tokens), so a 0 is a
+    # count, not a missing field.
+    write_reported: bool = False
+    # cache_control on the request's last block: the marked prefix is the whole prompt.
+    last_block_marked: bool = False
     # False when the usage is a placeholder (offline `explain` without usage): rules that read
     # the cache's response must not fire.
     usage_known: bool = True
@@ -176,6 +192,10 @@ class Classification:
     # True when the prefix was unchanged and less than half of it was read, whatever cause that was
     # then given: the evidence prefixwise.lifetime learns cache lifetimes from.
     cold_unchanged: bool = False
+    # True when no comparison was made (the turn at hand is not this request's predecessor) and the
+    # verdict rests on this request's own read: no detail, no lifetime evidence, no "first changed"
+    # block belongs on such a row.
+    own_read: bool = False
 
 
 def _blocks_by_role(blocks: list[BlockFingerprint]) -> dict[str, list[BlockFingerprint]]:
@@ -235,20 +255,60 @@ def _age(curr: RequestSnapshot) -> float | None:
     return curr.cache_age_seconds if curr.cache_age_seconds is not None else curr.gap_seconds
 
 
-def _since(curr: RequestSnapshot) -> str:
-    """The age in words: 'gap 340s since last turn', or, when the previous turn took long to
-    answer, the age with the idle time beside it so the two numbers do not read as a contradiction."""
+def _since(curr: RequestSnapshot, short: bool = False) -> str:
+    """The age in words: 'gap 340s since last turn' ('gap 340s' when `short`), or, when the previous
+    turn took long to answer, the age with the idle time beside it so the two numbers do not read as
+    a contradiction. An age is never called a gap on a row whose idle gap is another number."""
     age, gap = _age(curr), curr.gap_seconds
     if curr.cache_age_seconds is None or gap is None or abs(age - gap) < 1:
-        return f"gap {age:.0f}s since last turn"
+        return f"gap {age:.0f}s" if short else f"gap {age:.0f}s since last turn"
     return f"{age:.0f}s since the previous turn was sent (its response ended {gap:.0f}s ago)"
 
 
-def _left_nothing(prev: RequestSnapshot) -> bool:
-    """Anthropic reports exact counts: a previous turn that read 0 and wrote 0 left nothing in the
-    cache, so nothing of it could be reused, whatever happened next."""
+def _markers_ignored(snap: RequestSnapshot) -> bool:
+    """The conditions of the `markers_ignored` detail (prefixwise.details), on a snapshot."""
+    return (snap.provider == "anthropic" and snap.last_block_marked and snap.usage_known
+            and snap.cached_tokens == 0 and snap.cache_written == 0 and snap.prompt_tokens >= MARKERS_MIN_PROMPT)
+
+
+def _wrote_nothing(prev: RequestSnapshot) -> bool:
+    """The previous turn read 0 and wrote 0 on Anthropic: it added nothing to the cache."""
     return (prev.provider == "anthropic" and prev.usage_known and prev.prompt_tokens > 0
             and prev.cached_tokens + prev.cache_written == 0)
+
+
+def _left_nothing(prev: RequestSnapshot, curr: RequestSnapshot) -> bool:
+    """The previous turn carried cache_control and still left nothing in the cache, because what its
+    markers covered was below the model's minimum cacheable size. Claimed only where that is the
+    one explanation left:
+
+    - Anthropic's own API, not a self-hosted engine, and the turn's usage carried a cache-write
+      count (a server that reports no writes says nothing by its 0);
+    - it read 0 and wrote 0, with a prompt;
+    - its last block was not marked: a marker there covers the whole prompt, and a whole prompt
+      below the minimum is the rule before any comparison (2.1), while one at or above it that
+      wrote nothing had its markers ignored;
+    - this request does not meet the `markers_ignored` detail's conditions, which then stands."""
+    return (_wrote_nothing(prev) and prev.write_reported and prev.has_breakpoint
+            and not prev.engine and not curr.engine
+            and not prev.last_block_marked and not _markers_ignored(curr))
+
+
+def own_read(curr: RequestSnapshot, why: str, native_reason: str | None = None,
+             served_all_left: bool = False) -> Classification:
+    """The verdict for a request that has no turn of its own to be compared with: no change is
+    claimed. `none` when at least half of its own prompt came from the cache, else `unknown` (a
+    server that reports no cached-token count reads as 0 here, so it is never a hit). Never scored
+    against the provider's reason. `served_all_left`: the compared turn is a later turn of its own
+    conversation and the cache served all that turn left of what this request repeats; that is a
+    hit too, whatever share of the prompt it is."""
+    half = curr.usage_known and curr.prompt_tokens > 0 and curr.cached_tokens >= 0.5 * curr.prompt_tokens
+    also = ("" if half or not served_all_left else
+            ": under half of its prompt, but all that the compared turn left in the cache of what it repeats")
+    return Classification(MissCause.NONE if half or served_all_left else MissCause.UNKNOWN, None,
+                          f"{why}; no change is claimed against a turn that is not its previous turn, and it is "
+                          f"judged by its own read: {curr.cached_tokens:,} of {curr.prompt_tokens:,} prompt tokens "
+                          f"came from the cache{also}", native_reason=native_reason, score=False, own_read=True)
 
 
 def _reusable(prev: RequestSnapshot, curr: RequestSnapshot) -> int:
@@ -370,7 +430,10 @@ def _first_change(prev: RequestSnapshot, curr: RequestSnapshot, secondary: list,
                   native_reason: str | None, notes: dict | None = None) -> Classification | None:
     """The cause named by the first part of the prompt that changed, or None if none did
     (a changed user turn only adds to `secondary`). notes["new_conversation"] is set when the
-    opening message differs because this is another conversation, not an edit of this one."""
+    opening message differs because this is another conversation, not an edit of this one;
+    notes["foreign"] (with None returned) when it is another conversation whose own previous turn
+    is not the one at hand, and says why. Both are decided only after tools and system compared
+    equal: those are the lane's, and a change in them stands against any of its turns."""
     prev_by_role = _blocks_by_role(prev.blocks)
     curr_by_role = _blocks_by_role(curr.blocks)
     # First divergence in prefix order. Anthropic and OpenAI put tools before the system
@@ -412,8 +475,8 @@ def _first_change(prev: RequestSnapshot, curr: RequestSnapshot, secondary: list,
     if role == "messages":
         p, c = prev_by_role.get("messages", []), curr_by_role.get("messages", [])
         one_shot = len(p) == 1
-        if (not curr.compaction_event and p and c and p[0].raw != c[0].raw
-                and (one_shot or (len(c) == 1 and curr.shared_session))):
+        another_opening = bool(not curr.compaction_event and p and c and p[0].raw != c[0].raw)
+        if another_opening and (one_shot or (len(c) == 1 and curr.shared_session)):
             # The opening message differs, and either the previous request was a one-shot (a single
             # message: an agent's "title this" side call, a classification), or this request is a
             # single message in a session that names no single conversation (traffic with no
@@ -432,6 +495,24 @@ def _first_change(prev: RequestSnapshot, curr: RequestSnapshot, secondary: list,
                 role = "tool_results"
             else:
                 return None
+        elif (another_opening and len(c) > 1 and (curr.shared_session or curr.lane_crowded)
+              and not _same_after_opening(pc[i:], cc[i:])):
+            # Several messages, another opening, and what follows the opening is not the compared
+            # turn's either: not an edit of that turn's first message but another conversation,
+            # whose own previous turn is not the one at hand (it was never seen, or the lane
+            # dropped it to make room). That needs evidence that the lane mixes conversations: the
+            # session names none, or the lane is full of recent ones. Without it (a named session
+            # with room to remember), a history rewritten from its first message is still an edit.
+            if notes is not None:
+                notes["foreign"] = (
+                    "its opening message and the messages after it are not the compared turn's, and the session "
+                    "names no conversation: another conversation, whose own previous turn is not at hand"
+                    if curr.shared_session else
+                    "its opening message and the messages after it are not the compared turn's, and this session "
+                    f"already holds {curr.lane_crowded} conversations on this model with a turn in the last hour, "
+                    "all it remembers: another conversation, whose own previous turn is no longer remembered "
+                    "(PREFIXWISE_LANE_THREADS raises the limit)")
+            return None
         else:
             cause = MissCause.COMPACTION_REWRITE if curr.compaction_event else MissCause.HISTORY_EDIT
             legit = True if curr.compaction_event else False
@@ -451,9 +532,19 @@ def _first_change(prev: RequestSnapshot, curr: RequestSnapshot, secondary: list,
     return None
 
 
+def _same_after_opening(pc: list[BlockFingerprint], cc: list[BlockFingerprint]) -> bool:
+    """Two conversations (messages and tool results in the order sent, each from its opening
+    message on) whose openings differ: do the blocks after the opening match, as far as both go,
+    with at least one to compare? Then it is one conversation whose first message was edited."""
+    common = list(zip(pc[1:], cc[1:]))
+    return bool(common) and all(a.role == b.role and _same(a, b) for a, b in common)
+
+
 def classify(prev: RequestSnapshot | None, curr: RequestSnapshot,
-             *, native_reason: str | None = None) -> Classification:
-    """Classify one turn against the previous turn in the same session."""
+             *, native_reason: str | None = None, earlier_point: str | None = None) -> Classification:
+    """Classify one turn against the previous turn in the same session. `earlier_point`: this
+    request is an earlier point of the compared turn's own conversation (the collector's finding,
+    in words): after the rules that need no comparison, it is judged by its own read."""
     if prev is None:
         if curr.fork_parent_session_id:
             return Classification(MissCause.FORK_BOUNDARY, True,
@@ -483,9 +574,17 @@ def classify(prev: RequestSnapshot | None, curr: RequestSnapshot,
                               f"cacheable prefix ({floor}): nothing was cached to reuse",
                               native_reason=native_reason)
 
+    if earlier_point:
+        # Nothing it sent changed, and its predecessor is the turn before that point, not the one at
+        # hand: no change is claimed. The turn at hand is still its own conversation's, so reading
+        # all that turn left of what this request repeats is a hit.
+        return own_read(curr, earlier_point, native_reason, served_all_left=_served_all(prev, curr))
+
     secondary: list[MissCause] = []
     notes: dict = {}
     changed = _first_change(prev, curr, secondary, native_reason, notes)
+    if changed is None and notes.get("foreign"):
+        return own_read(curr, notes["foreign"], native_reason)
     if (changed is not None and floor is not None and curr.usage_known
             and 0 < curr.prompt_tokens < floor and curr.cached_tokens == 0):
         # This request is itself too short to cache: no version of it could have been read
@@ -495,6 +594,14 @@ def classify(prev: RequestSnapshot | None, curr: RequestSnapshot,
                               f"{changed.cause.value} in it cost nothing",
                               secondary + [changed.cause], native_reason, score=False)
     if changed is not None:
+        if curr.usage_known and curr.prompt_tokens > 0 and curr.cached_tokens == 0 and _left_nothing(prev, curr):
+            # Nothing was in the cache to lose (and so nothing to expire: this comes before the TTL).
+            return Classification(MissCause.BELOW_MIN_PREFIX, None,
+                                  "the previous turn left nothing in the cache (it carried cache_control, yet read "
+                                  "and wrote 0 tokens: what its markers covered was below the model's minimum "
+                                  f"cacheable size, {_min_prefix(curr) or anthropic_min_prefix(curr.model)} tokens); "
+                                  f"the {changed.cause.value} after it cost nothing",
+                                  secondary + [changed.cause], native_reason, score=False)
         age, ttl = _age(curr), curr.ttl_seconds
         if (curr.usage_known and ttl is not None and age is not None and age > ttl
                 and curr.prompt_tokens > 0 and curr.cached_tokens == 0):
@@ -503,12 +610,13 @@ def classify(prev: RequestSnapshot | None, curr: RequestSnapshot,
                                   f"{_since(curr)} exceeds the cache TTL {ttl:.0f}s and nothing "
                                   f"was read; the {changed.cause.value} after it cost nothing more",
                                   secondary + [changed.cause], native_reason, score=False)
-        if (curr.provider == "anthropic" and not curr.has_breakpoint and curr.usage_known
-                and curr.cached_tokens == 0 and _left_nothing(prev)
+        if (curr.provider == "anthropic" and not curr.engine and not curr.has_breakpoint and curr.usage_known
+                and curr.cached_tokens == 0 and _wrote_nothing(prev)
                 and MissCause.BREAKPOINT_MISPLACED not in changed.secondary):
             # The request carries no cache_control either, and the previous turn wrote nothing: the
             # change is still the first thing to fix (a marker on a prefix that changes every turn
             # buys writes nobody reads), but nothing is cached until the markers are there too.
+            # (Not behind a self-hosted engine, which caches without markers.)
             changed.secondary = [*changed.secondary, MissCause.BREAKPOINT_MISPLACED]
             changed.evidence += ("; the request also carries no cache_control, so nothing is cached until both "
                                  "are fixed")
@@ -545,8 +653,9 @@ def classify(prev: RequestSnapshot | None, curr: RequestSnapshot,
     if prev.params != curr.params:
         changed = sorted(set(prev.params) ^ set(curr.params) |
                          {k for k in prev.params.keys() & curr.params.keys() if prev.params[k] != curr.params[k]})
+        same = "a new conversation on the same tools and system prompt" if new_conversation else "blocks equal"
         return Classification(MissCause.PARAM_RENDERED, None,
-                              f"blocks equal; prompt-affecting params changed: {changed}",
+                              f"{same}; prompt-affecting params changed: {changed}",
                               secondary, native_reason)
 
     min_prefix = _min_prefix(curr)
@@ -558,15 +667,18 @@ def classify(prev: RequestSnapshot | None, curr: RequestSnapshot,
                               secondary, native_reason)
 
     age, ttl = _age(curr), curr.ttl_seconds
-    # A request with no marker states no lifetime: the longest a marker could have asked for stands.
-    longest = ttl if ttl is not None else (MAX_ANTHROPIC_TTL_SECONDS if curr.provider == "anthropic" else None)
-    if ((curr.provider == "anthropic" and not curr.has_breakpoint or curr.breakpoint_after_volatile)
+    # A request with no marker states no lifetime (the edge's ttl_seconds is then the 5-minute default
+    # a marker would have had): the longest a marker can ask for is the lifetime to beat. A marker
+    # that is there, after a volatile block, states its own.
+    unmarked = curr.provider == "anthropic" and not curr.has_breakpoint
+    longest = MAX_ANTHROPIC_TTL_SECONDS if unmarked else ttl
+    if ((unmarked or curr.breakpoint_after_volatile)
             and curr.usage_known and longest is not None and age is not None and age > longest
             and curr.prompt_tokens > 0 and curr.cached_tokens == 0):
         # With markers in the right place the entry would have expired all the same: nothing here
         # was avoidable. (Every changed-block cause is weighed this way above.)
         return Classification(MissCause.TTL_EXPIRED, True,
-                              f"{_since(curr)} exceeds the {'cache TTL' if ttl is not None else 'longest cache TTL'} "
+                              f"{_since(curr)} exceeds the {'longest cache TTL' if unmarked else 'cache TTL'} "
                               f"{longest:.0f}s and nothing was read; the missing or misplaced cache_control cost "
                               "nothing more", secondary + [MissCause.BREAKPOINT_MISPLACED], native_reason, score=False)
     if curr.provider == "anthropic" and not curr.has_breakpoint:
@@ -582,7 +694,8 @@ def classify(prev: RequestSnapshot | None, curr: RequestSnapshot,
     # miss: say UNKNOWN rather than guess from a zero.
     if curr.prompt_tokens <= 0:
         return Classification(MissCause.UNKNOWN, None,
-                              "blocks unchanged but the provider returned no usage; cannot tell hit from miss",
+                              ("a new conversation in this session" if new_conversation else "blocks unchanged")
+                              + " but the provider returned no usage; cannot tell hit from miss",
                               secondary, native_reason)
     # A server that reports no cached-token count (Ollama, many llama.cpp builds) may have reused
     # its cache: its 0 is "not reported", so no timing or routing rule can read it.
@@ -610,16 +723,34 @@ def classify(prev: RequestSnapshot | None, curr: RequestSnapshot,
                               "the previous turn carried no cache_control, so nothing was written for this turn "
                               "to read; this turn's write is the first", secondary, native_reason)
 
-    if new_conversation:
-        # Only the tools and system prompt before the opening message could be reused, and how large
-        # they are is not known here. The rules below are for a prompt that did not change: none
-        # applies, no routing miss or expiry is inferred, and the turn teaches nothing about how
-        # long the cache lasts. It is the conversation's first write.
-        return Classification(MissCause.FIRST_WRITE, True,
+    # A new conversation shares only the tools and system prompt before its opening message with the
+    # compared turn. Was that part in the cache, where this request could read it? Only one case is
+    # known: on Anthropic's own API, the previous turn marked a block of tools+system, read or wrote
+    # something, and this request marks the same block. Then, with nothing read, that prefix is
+    # judged by the expiry and routing rules below like any prefix that did not change.
+    shared_missed = (new_conversation and curr.shared_breakpoint and curr.provider == "anthropic"
+                     and not curr.engine and curr.cached_tokens == 0
+                     and prev.cached_tokens + prev.cache_written > 0)
+    if new_conversation and not shared_missed:
+        # Otherwise how large the shared part is, or whether it was cached at all, is not known:
+        # no routing miss or expiry is inferred, and the turn teaches nothing about how long the
+        # cache lasts. It is the conversation's first write; whether a shared part was missed is
+        # left open (legit None).
+        return Classification(MissCause.FIRST_WRITE, None,
                               "a new conversation in this session (its opening message is not the previous "
-                              "request's): only the tools and system prompt before it could be reused, and "
-                              f"{curr.cached_tokens:,} of its {curr.prompt_tokens:,} prompt tokens were read",
+                              "request's): only the tools and system prompt before it could be reused; "
+                              f"{curr.cached_tokens:,} of its {curr.prompt_tokens:,} prompt tokens were read, and "
+                              "the size of that shared part is not known, so no miss of it is claimed",
                               secondary, native_reason)
+
+    if curr.usage_known and curr.cached_tokens == 0 and _left_nothing(prev, curr):
+        # The previous turn's marked prefix was too small to cache. There was nothing for a router
+        # to miss, nothing to expire and nothing a retry could have read.
+        return Classification(MissCause.BELOW_MIN_PREFIX, None,
+                              "the previous turn left nothing in the cache (it carried cache_control, yet read "
+                              "and wrote 0 tokens): what its markers covered was below the model's minimum "
+                              f"cacheable size ({_min_prefix(curr) or anthropic_min_prefix(curr.model)} tokens), "
+                              "so there was nothing to read", secondary, native_reason)
 
     # From here the prefix was reusable but cache_read was low.
     # Engine eviction events are direct evidence; they outrank inference.
@@ -684,19 +815,16 @@ def classify(prev: RequestSnapshot | None, curr: RequestSnapshot,
     read = (f"read {curr.cached_tokens:,} of the {reusable:,}-token unchanged prefix" if curr.cached_tokens
             else "nothing read from cache")
     observed = curr.observed_lifetime if ttl is None else None
+    # What is judged from here: the unchanged prompt, or, for a new conversation, the tools and
+    # system prompt it shares with the previous request (which is not evidence of how long an
+    # unchanged prompt lasts).
+    cold = not shared_missed
+    what = ("a new conversation on the tools and system prompt the previous request cached at a marker this "
+            "one repeats; " if shared_missed else "")
     if ttl is not None and age is not None and age > ttl:
         return Classification(MissCause.TTL_EXPIRED, True,
-                              f"{_since(curr)} exceeds the cache TTL {ttl:.0f}s; {read}",
-                              secondary, native_reason, cold_unchanged=True)
-
-    if _left_nothing(prev) and curr.cached_tokens == 0:
-        # Both turns carry cache_control, yet the previous one wrote nothing and read nothing: what
-        # its breakpoint covered was too small to cache. There was nothing for a router to miss.
-        return Classification(MissCause.BELOW_MIN_PREFIX, None,
-                              "the previous turn left nothing in the cache (it read and wrote 0 tokens): what "
-                              "its cache_control covered was below the model's minimum cacheable size "
-                              f"({_min_prefix(curr) or anthropic_min_prefix(curr.model)} tokens), so there was "
-                              "nothing to read", secondary, native_reason)
+                              f"{what}{_since(curr)} exceeds the cache TTL {ttl:.0f}s; {read}",
+                              secondary, native_reason, cold_unchanged=cold)
 
     # Within the TTL (or, when it is unknown, within the shortest TTL any provider keeps), an
     # unchanged prefix that came back short did not expire. With no eviction evidence, the request
@@ -722,13 +850,15 @@ def classify(prev: RequestSnapshot | None, curr: RequestSnapshot,
                   else f"the observed lifetime on this model: {observed.describe()}"
                   if alive is not None and gap is not None and gap > MIN_PROVIDER_TTL_SECONDS
                   else f"shortest provider TTL {MIN_PROVIDER_TTL_SECONDS}s")
+        # (An observed lifetime is measured in idle gaps; a stated one against the entry's age.)
+        span = f"gap {gap:.0f}s" if by_observation else _since(curr, short=True)
         return Classification(MissCause.ROUTING_MISS, None,
-                              f"inferred: blocks and params equal, gap {measure:.0f}s within {window}, "
+                              f"inferred: {what or 'blocks and params equal, '}{span} within {window}, "
                               f"no eviction evidence, {read}",
-                              secondary, native_reason, cold_unchanged=True)
+                              secondary, native_reason, cold_unchanged=cold)
     if curr.prompt_tokens > 0 and age is not None and curr.cached_tokens and curr.provider == "anthropic":
         return Classification(MissCause.UNKNOWN, None,
-                              f"a part read ({read}) {age:.0f}s after the last turn: a 5-minute breakpoint may "
+                              f"a part read ({read}), {_since(curr)}: a 5-minute breakpoint may "
                               "have expired while an earlier 1-hour one held, or the request reached another "
                               "server: expiry or routing, not distinguishable",
                               secondary, native_reason, cold_unchanged=True)
@@ -741,12 +871,12 @@ def classify(prev: RequestSnapshot | None, curr: RequestSnapshot,
     if curr.prompt_tokens > 0 and gap is not None and ttl is None:
         seen = f"; observed on this model: {observed.describe()}" if observed is not None else ""
         return Classification(MissCause.UNKNOWN, None,
-                              f"prefix reusable but cache_read low ({read}) after a {gap:.0f}s gap with unknown"
+                              f"prefix reusable but cache_read low ({read}), {_since(curr)}, with unknown"
                               f" TTL: expiry or routing, not distinguishable{seen}",
                               secondary, native_reason, cold_unchanged=True)
     return Classification(MissCause.UNKNOWN, None,
-                          f"prefix reusable but cache_read low ({read}); no timing or usage evidence to name a cause",
-                          secondary, native_reason, cold_unchanged=True)
+                          f"{what}prefix reusable but cache_read low ({read}); no timing or usage evidence to name "
+                          "a cause", secondary, native_reason, cold_unchanged=cold)
 
 
 def classify_first_divergence(changed_role: str | None, *, model_changed: bool = False,

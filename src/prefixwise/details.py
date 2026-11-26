@@ -7,14 +7,16 @@ extended-thinking docs (Nov 2026), Claude Code / Codex / opencode / LiteLLM issu
 
   ttl_shortened      The previous request asked for a 1-hour cache on every breakpoint
                      (and used no server tools, which add a 5-minute breakpoint), yet
-                     Anthropic reports its write in the 5-minute bucket only, and more
-                     than 5 minutes passed before this request was sent. Promotes a
+                     Anthropic reports its write in the 5-minute bucket only, and this
+                     request was sent more than 5 minutes after that one was sent (the
+                     entry's age: the previous turn's generation time counts). Promotes a
                      routing_miss/unknown to ttl_expired.
   lookback_exceeded  Anthropic checks at most 20 positions back from each breakpoint
                      (a run of tool_use blocks, or of tool_result blocks, is one
                      position). Claimed when tools, system and earlier messages are
                      provably unchanged, the previous request wrote at its breakpoint,
-                     the gap is within 5 minutes, and every breakpoint now is at least
+                     this request was sent within 5 minutes of that one being sent (so
+                     even a 5-minute write was alive), and every breakpoint now is at least
                      22 positions past that write (20 per the docs, plus a margin for
                      how blocks are counted). Promotes routing_miss/unknown to
                      breakpoint_misplaced: an earlier breakpoint fixes it.
@@ -52,9 +54,10 @@ extended-thinking docs (Nov 2026), Claude Code / Codex / opencode / LiteLLM issu
                      not exist yet.
   volatile_prefix_at_start
                      The first request of a session (first_write), reading nothing, within the
-                     cache window of another session's completed request with the same model,
-                     credential and tools (canonically) and a system prompt that differs only in
-                     volatile values (a timestamp set at session start, a per-user id): a restart,
+                     cache window (5 minutes, counted from when that request was sent) of another
+                     session's completed request with the same model, credential and tools
+                     (canonically) and a system prompt that differs only in volatile values (a
+                     timestamp set at session start, a per-user id): a restart,
                      or another user of the same prompt, recomputed a prefix it could have
                      shared. Says what differed (dates/times, ids, or mixed), from per-kind masked
                      keys; no text is kept. Any provider; on Anthropic the other request must have
@@ -63,9 +66,9 @@ extended-thinking docs (Nov 2026), Claude Code / Codex / opencode / LiteLLM issu
                      size is not measured, so the cause stays first_write with no avoidable
                      tokens; the report prints the fix.
   shared_prefix_not_reused
-                     Anthropic: the first request of a session, within 5 minutes of
-                     another session's request (same model, credentials, tools and
-                     system prompt) that wrote an entry ending inside tools/system,
+                     Anthropic: the first request of a session, sent within 5 minutes
+                     of another session's request being sent (same model, credentials,
+                     tools and system prompt) that wrote an entry ending inside tools/system,
                      with a breakpoint here that could reach it, yet it read little.
   cache_key_changed  OpenAI prompt_cache_key differs from the previous turn's.
   session_header_dropped
@@ -91,11 +94,11 @@ from dataclasses import dataclass, field
 import threading
 from collections import OrderedDict
 
+from .classifier import MARKERS_MIN_PROMPT  # twice the largest minimum cacheable prefix of any Claude model
 from .fingerprint import mask_only, mask_volatiles, schema_sets
 
 LOOKBACK_POSITIONS = 20  # Anthropic: positions checked per breakpoint, the breakpoint itself first
 LOOKBACK_CLAIM = LOOKBACK_POSITIONS + 2  # claim only this far out: block counting may differ slightly
-MARKERS_MIN_PROMPT = 8192  # twice the largest minimum cacheable prefix of any Claude model
 FANOUT_SECONDS = 1.0  # a request sent this soon after a same-prefix one: its prefill cannot be done
 SHARED_WINDOW = 300.0  # seconds: the default Anthropic cache lifetime
 _THINKING = ("thinking", "redacted_thinking")
@@ -138,10 +141,10 @@ class Facts:
     prompt_tokens: int = 0  # this request's prompt and output, from its usage (output_rerendered reads
     completion_tokens: int = 0  # the previous turn's)
     fanout_age: float | None = None  # seconds since a same-prefix request still in flight was sent
-    shared_age: float | None = None  # seconds since another session wrote an entry inside tools/system
+    shared_age: float | None = None  # seconds since another session sent a request that wrote an entry inside tools/system
     shared_write_pos: int | None = None  # where that entry ends
-    volatile_shared_age: float | None = None  # seconds since another session completed a request whose
-    #   tools+system equal this one's except for volatile values in the system prompt (a fresh timestamp)
+    volatile_shared_age: float | None = None  # seconds since another session sent a (since completed) request
+    #   whose tools+system equal this one's except for volatile values in the system prompt (a fresh timestamp)
     volatile_shared_wrote: bool = False  # that request wrote a cache entry ending inside tools+system
     volatile_shared_kind: str | None = None  # what differed: "date" (dates/times only), "id", or "mixed"
     # SGLang with --enable-session-radix-cache, a client x-session-id, and no body session_id sent: the
@@ -268,6 +271,20 @@ def body_facts(provider: str, body: dict, model: str = "", credential: str = "")
     return f
 
 
+def last_block_marked(f: Facts) -> bool:
+    """cache_control on the request's last block: the marked prefix is the whole prompt."""
+    return bool(f.breakpoints and f.n_pos and max(f.breakpoints) == f.n_pos - 1)
+
+
+def shared_breakpoint(prev: Facts | None, curr: Facts) -> bool:
+    """The compared turn marked a block inside (or at the end of) tools+system, and this request
+    marks the same block: what that turn cached up to its last such marker, this one could read."""
+    if prev is None or not prev.sys_end or prev.sys_end != curr.sys_end:
+        return False
+    inside = [b for b in prev.breakpoints if b < prev.sys_end]
+    return bool(inside) and max(inside) in curr.breakpoints
+
+
 def usage_facts(f: Facts, usage: dict, cache_write: int) -> Facts:
     created = (usage or {}).get("cache_creation") or {}
     f.write_5m = int(created.get("ephemeral_5m_input_tokens") or 0)
@@ -315,7 +332,12 @@ def detail_for(cause: str, prev: Facts | None, curr: Facts, *, prompt_tokens: in
             f"restored from the host or offload tier: {evicted_blocks} of the previous request's KV blocks had "
             f"been removed from GPU memory (KV events; the tier's own stores were seen), yet this request {read} "
             "without recomputing them")
-    gap = (curr.sent_at - prev.done_at) if prev is not None and curr.sent_at and prev.done_at else None
+    # The age of what the previous request left in the cache: since it was sent (a provider counts
+    # an entry's lifetime from the request that wrote or read it, so its generation time is part of
+    # the age), or since it ended when its send time is not known. Never before it ended.
+    age = None
+    if prev is not None and curr.sent_at and (prev.sent_at or prev.done_at):
+        age = max(0.0, curr.sent_at - min(prev.sent_at or prev.done_at, prev.done_at or prev.sent_at))
     anthropic = curr.provider == "anthropic"
 
     if cause == "none" and engine and prompt_served and prev is not None \
@@ -328,15 +350,16 @@ def detail_for(cause: str, prev: Facts | None, curr: Facts, *, prompt_tokens: in
             "history renders that output differently from how it was generated (a reasoning model's thinking is "
             "dropped) or the client did not resend it, and the turn after it is prefilled again each time")
 
-    if anthropic and prev is not None and cold and gap is not None and gap > 300 \
+    if anthropic and prev is not None and cold and age is not None and age > 300 \
             and cause in ("ttl_expired", "routing_miss", "unknown") \
             and prev.all_1h and not prev.server_tools and prev.write_5m > 0 and prev.write_1h == 0:
         why = (f"the previous request asked for a 1-hour cache on every breakpoint, but its write "
-               f"({prev.write_5m:,} tokens) was kept for 5 minutes, and {gap:.0f} s passed; this request {read}")
+               f"({prev.write_5m:,} tokens) was kept for 5 minutes, and this request was sent {age:.0f} s after "
+               f"it was; this request {read}")
         return (None if cause == "ttl_expired" else ("ttl_expired", True)), "ttl_shortened", why
 
     if anthropic and prev is not None and cold and cause in ("routing_miss", "unknown") \
-            and gap is not None and gap <= 300 and prev.cache_write > 0 and prev.breakpoints and curr.breakpoints \
+            and age is not None and age <= 300 and prev.cache_write > 0 and prev.breakpoints and curr.breakpoints \
             and prev.prefix_key == curr.prefix_key and prev.model == curr.model \
             and curr.msgs[:len(prev.msgs)] == prev.msgs:
         written = max(prev.breakpoints)
@@ -353,7 +376,9 @@ def detail_for(cause: str, prev: Facts | None, curr: Facts, *, prompt_tokens: in
             "the only change to earlier messages is removed thinking blocks; this model keeps them in context, "
             "so removing them changes the prompt")
 
-    if anthropic and curr.breakpoints and max(curr.breakpoints) == curr.n_pos - 1 and cached_tokens == 0 \
+    # (The classifier checks the same conditions on its snapshot, `_markers_ignored`, so that a
+    # turn whose markers were ignored is never said to have had a marked prefix below the minimum.)
+    if anthropic and last_block_marked(curr) and cached_tokens == 0 \
             and curr.cache_write == 0 and prompt_tokens >= MARKERS_MIN_PROMPT \
             and cause not in ("none", "below_min_prefix"):
         return None, "markers_ignored", (
@@ -371,16 +396,16 @@ def detail_for(cause: str, prev: Facts | None, curr: Facts, *, prompt_tokens: in
             and curr.shared_age <= SHARED_WINDOW and curr.shared_write_pos is not None \
             and any(0 <= b - curr.shared_write_pos < LOOKBACK_POSITIONS for b in curr.breakpoints):
         return None, "shared_prefix_not_reused", (
-            f"another session wrote a cache entry for the same model, tools and system prompt "
-            f"{curr.shared_age:.0f} s earlier, within reach of a breakpoint here, yet this request {read}")
+            f"another session's request, sent {curr.shared_age:.0f} s earlier, wrote a cache entry for the same "
+            f"model, tools and system prompt, within reach of a breakpoint here, yet this request {read}")
 
     if cold and cause == "first_write" and curr.volatile_shared_age is not None \
             and curr.volatile_shared_age <= SHARED_WINDOW and (curr.volatile_shared_wrote or not anthropic):
         what, fix = VOLATILE_START_WORDING.get(curr.volatile_shared_kind or "mixed", VOLATILE_START_WORDING["mixed"])
         return None, "volatile_prefix_at_start", (
             f"the first request of this session: {curr.volatile_shared_age:.0f} s earlier another session (a restart "
-            f"of this agent, or another user of the same prompt) completed a request with the same model, tools and "
-            f"system prompt except for {what} in the system prompt, so a value that changes per session kept this "
+            f"of this agent, or another user of the same prompt) sent a request, since answered, with the same model, "
+            f"tools and system prompt except for {what} in the system prompt, so a value that changes per session kept this "
             f"one from sharing that prefix; this request {read}. The prefix's size is not measured, so nothing is "
             f"counted as avoidable. Fix: {fix}")
 

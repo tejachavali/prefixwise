@@ -120,6 +120,10 @@ class TurnRecord:
         for name in ("session_unprotected", "no_prefix_cache"):
             if not d["facts"].get(name):
                 d["facts"].pop(name, None)
+        # session_shared likewise: left out when False, so an older collector still reads those records
+        # (it refuses a record that carries it: upgrade the collector before the edges).
+        if not d.get("session_shared"):
+            d.pop("session_shared", None)
         return d
 
     @classmethod

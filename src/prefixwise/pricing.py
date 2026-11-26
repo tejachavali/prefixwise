@@ -119,6 +119,16 @@ def normalize_usage(provider: str, usage: dict) -> tuple[int, int]:
     return _chat_prompt(usage), _chat_cached(usage, details)
 
 
+def write_reported(provider: str, usage: dict) -> bool:
+    """Whether Anthropic-shaped usage carries a cache-write count (`cache_creation_input_tokens`, or
+    the `cache_creation` split). Anthropic's own API always sends it, 0 included; a server that only
+    speaks the request shape (an engine's /v1/messages, a compatible API) may leave it out, and then
+    "wrote 0" is "not reported"."""
+    usage = usage or {}
+    return provider == "anthropic" and (usage.get("cache_creation_input_tokens") is not None
+                                        or isinstance(usage.get("cache_creation"), dict))
+
+
 def cache_reported(provider: str, usage: dict) -> bool:
     """Whether the usage says anything about the cache. OpenAI always sends prompt_tokens_details
     (input_tokens_details on the Responses API), cached_tokens 0 included; vLLM does with

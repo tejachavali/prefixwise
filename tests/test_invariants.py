@@ -4,19 +4,24 @@ Each case builds a real request body (tools with JSON schemas, a system prompt t
 timestamp, a multi-turn conversation with tool calls and results) in Anthropic's or OpenAI's
 shape, fingerprints it exactly as the proxy does, applies ONE known change for the next turn, and
 checks that the verdict names that change. Seeded, so a failure reproduces: the case id names the
-seed. These are the rules docs/ALGORITHM.md states; a failure here is a bug in one or the other."""
+seed. These are the rules docs/ALGORITHM.md states; a failure here is a bug in one or the other.
+
+PREFIXWISE_INVARIANT_SEEDS=20 runs every generated test on 20 times as many seeds (the first
+seeds are the same ones, so a default run is a subset of a longer one)."""
 
 import copy
 import json
+import os
 import random
 
 import pytest
 
 from prefixwise.classifier import (MissCause, RequestSnapshot, classify, first_divergence, served_all)
 from prefixwise.fingerprint import Fingerprinter
-from prefixwise.ledger import avoidable_for_turn
+from prefixwise.ledger import avoidable_for_turn, held_for_turn
 from prefixwise.proxy import extract_blocks
 
+SEEDS = max(1, int(os.environ.get("PREFIXWISE_INVARIANT_SEEDS", "1")))  # a multiplier on every seed count below
 FP = Fingerprinter()
 MODELS = {"anthropic": "claude-sonnet-4-6", "openai": "gpt-5"}
 WORDS = ("search", "read", "write", "list", "grep", "fetch", "edit", "run", "plan", "test", "diff", "open")
@@ -209,7 +214,7 @@ def _cases(n):
         yield seed, rng, provider, body, mutation
 
 
-CASES = list(_cases(600))
+CASES = list(_cases(600 * SEEDS))
 
 
 # -- invariants -------------------------------------------------------------------------------
@@ -220,30 +225,46 @@ def test_one_change_is_named_and_a_full_read_is_never_a_miss(seed, rng, provider
     if applied is None:
         pytest.skip("change not applicable to this conversation")
     nxt, expected = applied
-    prev = _snap(body, provider, 20_000, 0)
+    # What the previous turn left in the cache, as the collector would know it: nothing known (no
+    # write count), its whole prompt (it wrote it), or, on Anthropic, known to be nothing (it
+    # carried cache_control, reported a write count, and read and wrote 0).
+    left = ("not known", "its prompt", "nothing")[seed % 3]
+    prev = _snap(body, provider, 20_000, 0, cache_written=20_000 if left == "its prompt" else 0,
+                 write_reported=provider == "anthropic" and left != "not known")
+    left_nothing = provider == "anthropic" and left == "nothing"
     engine = provider == "openai" and rng.random() < 0.3  # behind vLLM/SGLang: system before tools
     # 1. A miss (nothing read): the verdict is exactly the change made, with its legitimacy.
     miss = classify(prev, _snap(nxt, provider, 20_400, 0, engine=engine))
-    assert miss.cause is expected, (seed, mutation.__name__, miss.cause, miss.evidence)
-    assert miss.legit is (False if expected in WASTE else True if expected in LEGIT else None)
+    if left_nothing:
+        # ...unless the previous turn is known to have left nothing: then nothing was lost, and the
+        # change, kept as a secondary cause, is never waste (so no waste verdict has 0 avoidable).
+        assert miss.cause is MissCause.BELOW_MIN_PREFIX and miss.legit is None and expected in miss.secondary, (seed, miss)
+    else:
+        assert miss.cause is expected, (seed, mutation.__name__, miss.cause, miss.evidence)
+        assert miss.legit is (False if expected in WASTE else True if expected in LEGIT else None)
     # 2. The ledger's "first changed" column agrees with the cause about where the prefix broke.
     div = first_divergence(prev.blocks, _snap(nxt, provider, 1, 0).blocks, engine=engine)
     if expected in ROLE_OF:
         assert div is not None and ROLE_OF[expected] in div["role"], (seed, expected, div)
     # 3. A partial read (half of the prefix): still the change, not a hit.
     part = classify(prev, _snap(nxt, provider, 20_400, 10_000, engine=engine))
-    assert part.cause is expected and part.legit is miss.legit
+    assert part.cause is expected
+    assert part.legit is (False if expected in WASTE else True if expected in LEGIT else None)
     # 4. The cache served the whole reusable prefix: no miss is claimed, the change stays secondary.
     full = classify(prev, _snap(nxt, provider, 20_400, 20_000, engine=engine))
     assert full.cause is MissCause.NONE and expected in full.secondary and full.legit is None
-    # 5. Avoidable tokens: only for waste, never more than what was reusable minus what was read.
+    # 5. Avoidable tokens, computed as the collector computes them (capped at what the previous turn
+    # is known to have left): only for waste, never more than what was reusable minus what was
+    # read, and positive whenever the verdict is waste and less than the reusable prefix was read.
     for verdict, cached in ((miss, 0), (part, 10_000), (full, 20_000)):
-        avoid = avoidable_for_turn(verdict.legit, 20_400, cached, 20_000)
+        held = held_for_turn(prev, verdict.cause.value, cached)
+        assert held == (20_000 if left == "its prompt" else None)
+        avoid = avoidable_for_turn(verdict.legit, 20_400, cached, 20_000, held)
         assert 0 <= avoid <= 20_000 - cached
         assert (avoid > 0) == (verdict.legit is False and cached < 20_000)
 
 
-@pytest.mark.parametrize("seed", range(200))
+@pytest.mark.parametrize("seed", range(200 * SEEDS))
 def test_appending_is_never_a_change(seed):
     rng = random.Random(10_000 + seed)
     provider = rng.choice(["anthropic", "openai"])
@@ -257,7 +278,7 @@ def test_appending_is_never_a_change(seed):
     assert div is not None and "appended" in div["kind"]
 
 
-@pytest.mark.parametrize("seed", range(100))
+@pytest.mark.parametrize("seed", range(100 * SEEDS))
 def test_engine_evidence_decides_only_when_the_prompt_did_not_change(seed):
     rng = random.Random(20_000 + seed)
     body = _body(rng, "openai", rng.randint(2, 5), rng.randint(2, 4), None)
@@ -275,7 +296,7 @@ def test_engine_evidence_decides_only_when_the_prompt_did_not_change(seed):
         assert v.cause is expected
 
 
-@pytest.mark.parametrize("seed", range(100))
+@pytest.mark.parametrize("seed", range(100 * SEEDS))
 def test_model_switch_and_first_turn_win_and_classification_is_deterministic(seed):
     rng = random.Random(30_000 + seed)
     provider = rng.choice(["anthropic", "openai"])
@@ -320,7 +341,7 @@ def _first_changed_cause(prev_body, nxt_body, provider, engine):
     return None
 
 
-@pytest.mark.parametrize("seed", range(300))
+@pytest.mark.parametrize("seed", range(300 * SEEDS))
 def test_with_two_changes_the_earliest_one_is_named(seed):
     rng = random.Random(40_000 + seed)
     provider = rng.choice(["anthropic", "openai"])
@@ -365,7 +386,7 @@ def _reorder_keys(value, rng):
     return value
 
 
-@pytest.mark.parametrize("seed", range(300))
+@pytest.mark.parametrize("seed", range(300 * SEEDS))
 def test_hashes_ignore_exactly_what_they_should(seed):
     rng = random.Random(50_000 + seed)
     value = {"name": rng.choice(WORDS), "spec": _rand_json(rng)}
@@ -387,7 +408,7 @@ def test_hashes_ignore_exactly_what_they_should(seed):
     assert s3.masked != s1.masked
 
 
-@pytest.mark.parametrize("seed", range(100))
+@pytest.mark.parametrize("seed", range(100 * SEEDS))
 def test_a_mid_conversation_developer_message_is_growth_not_a_system_edit(seed):
     """OpenAI-style agents append developer or system reminders mid-conversation. The provider
     renders them where they were sent, so appending one is growth; only the leading system and
@@ -407,7 +428,7 @@ def test_a_mid_conversation_developer_message_is_growth_not_a_system_edit(seed):
     assert v.cause not in CHANGE_CAUSES, (seed, v)
 
 
-@pytest.mark.parametrize("seed", range(200))
+@pytest.mark.parametrize("seed", range(200 * SEEDS))
 def test_avoidable_never_exceeds_what_was_unread_of_the_shorter_prompt(seed):
     rng = random.Random(70_000 + seed)
     prev_p = rng.randint(1, 10**6)
@@ -421,3 +442,26 @@ def test_avoidable_never_exceeds_what_was_unread_of_the_shorter_prompt(seed):
             assert avoid <= max(0, held - cached)
         if legit is not False:
             assert avoid == 0
+        # A count of zero held is no cap (a turn known to have left nothing gets no waste verdict
+        # at all, section 2.2; a zero cap would make a waste verdict with nothing avoidable).
+        assert avoidable_for_turn(legit, curr_p, cached, prev_p, 0) == avoidable_for_turn(legit, curr_p, cached, prev_p)
+
+
+@pytest.mark.parametrize("seed", range(100 * SEEDS))
+def test_two_changes_after_a_turn_that_left_nothing_are_never_waste(seed):
+    """Invariant 6 through the collector's own cap, where it once broke: after an Anthropic turn
+    that carried cache_control and left nothing, no change yields a waste verdict with 0 avoidable
+    tokens, because no change yields a waste verdict."""
+    rng = random.Random(80_000 + seed)
+    body = _body(rng, "anthropic", rng.randint(2, 5), rng.randint(3, 5), "2026-11-12T09:00:00Z")
+    nxt = _append_turn(body)
+    for mutation in rng.sample(MUTATIONS, 2):
+        applied = mutation(rng, nxt, "anthropic")
+        nxt = applied[0] if applied else nxt
+    prev = _snap(body, "anthropic", 20_000, 0, write_reported=True)
+    for cached in (0, 6_000, 20_000):
+        v = classify(prev, _snap(nxt, "anthropic", 20_400, cached))
+        avoid = avoidable_for_turn(v.legit, 20_400, cached, 20_000, held_for_turn(prev, v.cause.value, cached))
+        assert (avoid > 0) == (v.legit is False and cached < 20_000), (seed, cached, v)
+        if cached == 0:
+            assert v.legit is not False, (seed, v)

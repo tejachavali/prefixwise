@@ -19,7 +19,7 @@ Avoidable: 14,000 tokens ($0.0805), 87.5% of prompt tokens. Fix these, biggest f
   1. The same tools were sent in a different order or format (7 requests, 14,000 tokens, $0.0805).
      Fix: Send tools in a fixed order with deterministic serialization (or let the proxy do it: prefixwise serve --fix canonical_tools).
      Prefixwise can do it for you: prefixwise run --fix canonical_tools (proven)
-Expected misses (not waste): 1 x first request of a session: nothing to reuse yet.
+Expected misses (not waste): 1 x first request of a session or a new conversation: nothing of its own to reuse yet.
 Cache writes never read: 14,000 tokens were written to the cache, and the next turn of the same conversation replaced the prefix before reading them (7 requests); the write surcharge on them cost $0.0175 above sending them uncached. Fixing the misses above saves this too; it is not counted twice.
 ```
 
@@ -125,7 +125,7 @@ Avoidable: 18,000 tokens ($0.0432), 45.0% of prompt tokens. Fix these, biggest f
   2. The same tools were sent in a different order or format (4 requests, 8,000 tokens, $0.0192).
      Fix: Send tools in a fixed order with deterministic serialization (or let the proxy do it: prefixwise serve --fix canonical_tools).
      Prefixwise can do it for you: prefixwise serve --fix canonical_tools (proven)
-Expected misses (not waste): 4 x first request of a session: nothing to reuse yet; 1 x switched model: each model has its own cache.
+Expected misses (not waste): 4 x first request of a session or a new conversation: nothing of its own to reuse yet; 1 x switched model: each model has its own cache.
 Cache writes never read: 18,000 tokens were written to the cache, and the next turn of the same conversation replaced the prefix before reading them (9 requests); the write surcharge on them cost $0.0090 above sending them uncached. Fixing the misses above saves this too; it is not counted twice.
 
 Details: prefixwise report --detail   Fixes: prefixwise fixes   Data: prefixwise export
@@ -261,7 +261,7 @@ One cause per request: the first thing, in prefix order, that broke reuse. Each 
 | Cause | Meaning | Waste? | Typical fix |
 |---|---|---|---|
 | `none` | Prefix reused; only new content was uncached | no | - |
-| `first_write` | First request of a session | no | - |
+| `first_write` | First request of a session, or of a new conversation in it. For a new conversation, whether it missed a prefix it shares with the previous one is left open unless that is known ([ALGORITHM.md](ALGORITHM.md), 2.2) | no | - |
 | `volatile_system` | Only dates, times, ids or numbers changed in the system prompt (a timestamp in any common format, whatever its format last turn) | **yes** | Move volatile values to the end of the prompt, in one fixed format; the evidence names which kinds the prompt carries, and whether it also carries a file path, which other sessions cannot share |
 | `system_edit` | The system prompt's wording changed | depends | Batch prompt edits; avoid per-turn rewording |
 | `tool_reserialize` | Same tools, different order or bytes (key order at any depth, or a schema's `required` or `type` list in another order) | **yes** | Sort tools; serialize deterministically; build `required` from a list, not a set |
@@ -273,14 +273,14 @@ One cause per request: the first thing, in prefix order, that broke reuse. Each 
 | `model_switch` | First call to a different model in the session | no | - |
 | `retry_replay` | Identical request within 60 s with nothing cached | **yes** | Check retry logic |
 | `breakpoint_misplaced` | Anthropic: no `cache_control` breakpoint, or one that stays early while the stable prompt grows past it (the tail after it is paid uncached every turn) | **yes** | Add `cache_control` after the stable prefix |
-| `below_min_prefix` | Prompt below the provider's minimum cacheable length (Anthropic per model; OpenAI's 1,024 for OpenAI model ids only; Gemini). Not claimed for other OpenAI-compatible APIs or self-hosted engines | depends | - |
-| `ttl_expired` | Gap since the last turn exceeded the cache TTL (stated, or, where the provider states none, as observed in your ledger, which `report` shows per model) | no | Longer TTL (e.g. Anthropic `ttl: "1h"`) if gaps are common |
+| `below_min_prefix` | Prompt below the provider's minimum cacheable length (Anthropic per model; OpenAI's 1,024 for OpenAI model ids only; Gemini). Not claimed for other OpenAI-compatible APIs or self-hosted engines. Also, on Anthropic's own API: the previous turn carried `cache_control` on a prefix too small to cache (it read and wrote nothing), so there was nothing to read | depends | Mark a prefix at least as long as the model's minimum |
+| `ttl_expired` | The cache entry was older than the cache TTL. With a stated TTL the age counts from when the previous turn was sent, so the time that turn took to answer is part of it; where the provider states no TTL, the lifetime observed in your ledger is used, in idle gaps (`report` shows it per model). On Anthropic with no `cache_control` at all, only past 1 hour, the longest a marker can ask for | no | Longer TTL (e.g. Anthropic `ttl: "1h"`) if gaps are common |
 | `routing_miss` | Prompt and timing fine, still nothing cached | no | Set a stable `prompt_cache_key` / session affinity |
 | `fork_boundary` | First turn of a forked session (`X-Prefixwise-Fork-Of`) | no | - |
 | `evicted` | Engine evicted this session's blocks | depends | More KV cache memory |
 | `unknown` | Not enough evidence; never guessed | - | Send TTL / session headers, or check engine events |
 
-Avoidable tokens for a waste turn = the part of the previous turn's prompt that could have been read from cache but was not: a partial hit counts only the part not read, appended content is never counted, and on Anthropic no more than the previous turn left in the cache (what it read plus what it wrote, up to its last breakpoint) is counted, so a tail that was never cached is not blamed on the change. A change the cache absorbed anyway (it still served the whole reusable prefix) is `none`; one in a request too short to cache, or after the entry had expired, is `below_min_prefix` or `ttl_expired`. The change is kept as a secondary cause either way.
+Avoidable tokens for a waste turn = the part of the previous turn's prompt that could have been read from cache but was not: a partial hit counts only the part not read, appended content is never counted, and on Anthropic no more than the previous turn left in the cache (what it read plus what it wrote, up to its last breakpoint) is counted, so a tail that was never cached is not blamed on the change. A change the cache absorbed anyway (it still served the whole reusable prefix) is `none`; one in a request too short to cache, after a turn whose marked prefix was too small to cache, or after the entry had expired, is `below_min_prefix` or `ttl_expired`. The change is kept as a secondary cause either way.
 
 ### How it knows, without keeping a prompt
 
@@ -300,7 +300,7 @@ The verdict is the first block, in the provider's prefix order (tools, then syst
 | tools: the multiset of `canonical` hashes differs | `tool_catalog_change` | a tool was added, removed or edited |
 | system: `raw` differs, `masked` equal | `volatile_system` | every character that changed was inside a date, time, id or number |
 | system: `masked` differs | `system_edit` | the wording changed |
-| messages: the previous turn's blocks are not a prefix of this turn's | `history_edit` (or `compaction_rewrite` with a compaction event) | earlier messages were rewritten, not appended to (a single-message previous request replaced by a new conversation is judged by what the cache read instead) |
+| messages: the previous turn's blocks are not a prefix of this turn's | `history_edit` (or `compaction_rewrite` with a compaction event) | earlier messages were rewritten, not appended to. Another conversation is not an edit: a new one after a single-message request, or a single message in a session with no conversation id, is judged by what the cache read; a request with no turn of its own to compare with (an earlier point of its conversation, a conversation the session no longer remembers) is judged by its own read ([ALGORITHM.md](ALGORITHM.md), 2.2 and 2.4) |
 | tool results: an earlier one differs or is gone | `tool_result_mutation` (or `compaction_rewrite`) | a tool's output was re-rendered or removed after it was sent |
 
 Short blocks (under about 256 bytes, such as a four-word user message) would be guessable from a bare hash, so with a per-install key (`PREFIXWISE_HMAC_KEY`) they are keyed hashes (HMAC) instead. The ledger stores the verdict, the role and index of the first changed block, counts and prices; no hash leaves the process, and exports never include them.
@@ -310,12 +310,12 @@ Short blocks (under about 256 bytes, such as a four-word user message) would be 
 
 | Detail | Under | What happened | What to do |
 |---|---|---|---|
-| `ttl_shortened` | `ttl_expired` | Every breakpoint asked for a 1-hour cache; Anthropic's usage shows the write was kept for 5 minutes, and more than 5 minutes passed | Check what downgrades the TTL (client version, settings, gateway) |
-| `lookback_exceeded` | `breakpoint_misplaced` | Prompt provably unchanged, gap within 5 minutes, but the previous write is 22+ positions back (Anthropic checks 20; a run of tool calls or results is one) | Add a breakpoint at the start of each turn |
+| `ttl_shortened` | `ttl_expired` | Every breakpoint asked for a 1-hour cache; Anthropic's usage shows the write was kept for 5 minutes, and this request was sent more than 5 minutes after that one was sent | Check what downgrades the TTL (client version, settings, gateway) |
+| `lookback_exceeded` | `breakpoint_misplaced` | Prompt provably unchanged, sent within 5 minutes of the previous request being sent, but the previous write is 22+ positions back (Anthropic checks 20; a run of tool calls or results is one) | Add a breakpoint at the start of each turn |
 | `markers_ignored` | any miss | `cache_control` on the last block, prompt of 8,192+ tokens, yet nothing written or read | Check that no gateway strips the markers, and that the endpoint caches |
 | `sent_before_cache_written` | first request | Sent within a second of another request (same model, key, tools, system) still waiting for its response | Stagger parallel requests (subagents, fan-outs) or warm the prefix first |
-| `volatile_prefix_at_start` | first request | Another session (a restart, or another user of the same prompt) completed a request moments earlier with the same model, key and tools and a system prompt that differs only in a date, time or id (a timestamp set at session start, a per-user id): it recomputed a prefix it could have shared. Says which kind differed. Any provider | Move the per-session value out of the system prompt to the end of the prompt; a timestamp can also be set once per day |
-| `shared_prefix_not_reused` | first request | Anthropic: another session had just written an entry for the same model, key, tools and system prompt, within reach of a breakpoint here, yet little was read | Check cache keys, TTLs and breakpoint placement between the two |
+| `volatile_prefix_at_start` | first request | Another session (a restart, or another user of the same prompt) sent a request, since answered, less than 5 minutes earlier with the same model, key and tools and a system prompt that differs only in a date, time or id (a timestamp set at session start, a per-user id): it recomputed a prefix it could have shared. Says which kind differed. Any provider | Move the per-session value out of the system prompt to the end of the prompt; a timestamp can also be set once per day |
+| `shared_prefix_not_reused` | first request | Anthropic: another session's request, sent less than 5 minutes earlier, wrote an entry for the same model, key, tools and system prompt, within reach of a breakpoint here, yet little was read | Check cache keys, TTLs and breakpoint placement between the two |
 | `thinking_stripped` | `history_edit` | On a model that keeps earlier thinking (Opus 4.5+, Sonnet 4.6+, Haiku 5.5, Fable, Mythos), the only change is removed thinking blocks | Keep thinking blocks in history (client or gateway setting) |
 | `cache_key_changed` | routing, expiry | OpenAI `prompt_cache_key` changed between turns | Keep one key per conversation |
 | `host_restored` | `none` (a hit) | Behind one self-hosted engine with `--kv-events`: blocks of the previous request were evicted from the GPU, yet this request read them (vLLM CPU offload, LMCache, SGLang HiCache restored them without recomputing) | A hit that cost a restore: the GPU cache alone is too small for the session; size it, or keep the offload tier |

@@ -30,7 +30,7 @@ import sqlite3
 import sys
 from dataclasses import astuple, dataclass, fields
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 
 @dataclass
@@ -90,6 +90,10 @@ class LedgerEntry:
     # Schema 8: 1 when this turn showed the cache still holding an unchanged prefix after its idle gap,
     # 0 when such a prefix came back short (prefixwise.lifetime learns lifetimes from them); None otherwise.
     lifetime_evidence: int | None = None
+    # Schema 9: seconds from when the compared turn was SENT to when this request was sent: the age of
+    # the cache entry this request could read, which a stated TTL is compared with. `gap_seconds` is
+    # the idle time (from that turn's end). None with no compared turn on this model, and on older rows.
+    cache_age_seconds: float | None = None
     schema_version: int = SCHEMA_VERSION
 
 
@@ -159,9 +163,25 @@ def avoidable_for_turn(legit: bool | None, prompt_tokens: int, cached_tokens: in
         # whole prompt would count appended content as waste.
         return 0
     reusable = min(prev_prompt_tokens, prompt_tokens)
-    if prev_held_tokens is not None:  # 0 is a count too: a turn that left nothing had nothing to lose
+    if prev_held_tokens:
         reusable = min(reusable, prev_held_tokens)
     return max(0, reusable - cached_tokens)
+
+
+def held_for_turn(prev, cause: str, cached_tokens: int) -> int | None:
+    """The cap `avoidable_for_turn` takes as `prev_held_tokens`, as the collector computes it: what
+    the compared turn (a RequestSnapshot, or None) left in the cache, where that is known (Anthropic,
+    or any provider that reported a write) and is not zero. None, no cap, otherwise, and for a
+    breakpoint left early (`breakpoint_misplaced` while the cache served all it held): there the
+    waste is the stable prefix the breakpoint left out. A turn known to have left nothing needs no
+    cap of zero: the classifier gives no waste verdict after it, except for a request with no
+    cache_control at all, whose waste is what a marked, stable prompt would have reused."""
+    if prev is None or not (prev.provider == "anthropic" or prev.cache_written):
+        return None
+    held = prev.cached_tokens + prev.cache_written
+    if held and cause == "breakpoint_misplaced" and cached_tokens >= held:
+        return None
+    return held or None
 
 
 def reuse_adjusted_reads(write_multiplier: float, read_multiplier: float) -> float:
@@ -189,7 +209,8 @@ _MIGRATIONS = {"task_id": "TEXT", "request_id": "TEXT", "completion_tokens": "IN
                "unread_write_tokens": "INTEGER", "unread_write_cost": "REAL",  # schema 6
                "cost_cache_read": "REAL", "cost_input": "REAL", "cost_cache_write": "REAL",
                "cost_output": "REAL",  # schema 7
-               "lifetime_evidence": "INTEGER"}  # schema 8
+               "lifetime_evidence": "INTEGER",  # schema 8
+               "cache_age_seconds": "REAL"}  # schema 9
 
 _COLUMNS = [f.name for f in fields(LedgerEntry)]
 

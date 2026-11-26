@@ -104,8 +104,12 @@ class Recorder:
                 ctx["span_end"] = ended_at
             if latency_ms is not None:  # the call is already over: it was sent latency_ms before it ended
                 ctx["span_start"] = (ended_at if ended_at is not None else time.time()) - latency_ms / 1000
-                if ctx.get("facts") is not None:  # sub-reasons time the gap from the send too
-                    ctx["facts"].sent_at = ctx["span_start"]
+            elif ended_at is not None:
+                # When it was sent is not known, only that it was not after it ended (prepare()
+                # stamped it now, which is later): the end time stands in.
+                ctx["span_start"] = ended_at
+            if ctx.get("span_start") is not None and ctx.get("facts") is not None:
+                ctx["facts"].sent_at = ctx["span_start"]  # sub-reasons time the age from the send too
             self.proxy.response_started(ctx)
             ctx["upstream_ms"] = latency_ms if latency_ms is not None else 0.0
             _, entry = self.proxy.finalize(ctx, 200, _plain(response))

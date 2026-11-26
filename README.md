@@ -40,7 +40,7 @@ Avoidable: 3,375 tokens ($0.0116), 12.5% of prompt tokens. Fix these, biggest fi
   1. The same tools were sent in a different order or format (2 requests, 3,375 tokens, $0.0116).
      Fix: Send tools in a fixed order with deterministic serialization (or let the proxy do it: prefixwise serve --fix canonical_tools).
      Prefixwise can do it for you: prefixwise run --fix canonical_tools (proven)
-Expected misses (not waste): 1 x first request of a session: nothing to reuse yet.
+Expected misses (not waste): 1 x first request of a session or a new conversation: nothing of its own to reuse yet.
 ```
 
 (Four lines of the output are left out here: the proxy's address, the `-- prefixwise: this run --` header, a note on 46 tokens written and never read, and the pointer to the ledger. The record has all of it.) `prefixwise report --ledger before.db --session latest` shows where it happened:
