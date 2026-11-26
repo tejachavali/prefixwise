@@ -390,10 +390,13 @@ def task_costs(ledger, since: float | None = None, until: float | None = None) -
             f"""SELECT COUNT(DISTINCT task_id) FROM entries{where}{' AND' if where else ' WHERE'} task_id IS NOT NULL
                 AND task_id != '' AND task_id NOT IN (SELECT task_id FROM tasks)""", args).fetchone()[0]
         cut = 0
-        if where:  # resolved tasks counted here that also have requests outside the window
+        if where:  # resolved tasks counted here that also have requests outside the window, with a
+            # verdict (a failed request is in none of the sums, so leaving it out changes nothing); a
+            # row with no time (written before 0.3.1) is outside every window
             cut = conn.execute(
                 f"""SELECT COUNT(DISTINCT task_id) FROM entries
-                    WHERE NOT ({' AND '.join(clauses)}) AND task_id IN (SELECT task_id FROM tasks)
+                    WHERE (recorded_at IS NULL OR NOT ({' AND '.join(clauses)})) AND ({metrics.OK})
+                    AND task_id IN (SELECT task_id FROM tasks)
                     AND task_id IN (SELECT task_id FROM entries{where})""", args + args).fetchone()[0]
     got = {bool(r[0]): r for r in by_outcome}
     zero = (None, 0, 0, 0, None, None)

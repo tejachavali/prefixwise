@@ -220,6 +220,21 @@ def test_with_a_window_the_lines_say_when_a_counted_task_has_requests_outside_it
     # a window that holds every request of its tasks says nothing about windows
     t = task_costs(led, since=now - 9000)
     assert (t["window_only"], t["tasks_cut"]) == (True, 0) and "window" not in "\n".join(_tasks(t))
+    # a task cut only by requests that failed cost the same either way: nothing to say
+    add(led, "t2", None, error="upstream_dropped", prompt=0, at=now - 7200)
+    assert task_costs(led, since=now - 3600)["tasks_cut"] == 1
+    # two cut: the plural
+    add(led, "t2", 0.20, at=now - 7200)
+    lines = _tasks(task_costs(led, since=now - 3600))
+    assert lines[1] == ("  2 of these tasks also have requests outside this window, which are not counted: "
+                        "they cost more than this.")
+    # a row with no time is outside every window
+    led.conn.execute("UPDATE entries SET recorded_at = NULL WHERE task_id = 't2' AND cost = 0.20")
+    led.conn.commit()
+    assert task_costs(led, since=now - 3600)["tasks_cut"] == 2
+    led.conn.execute("DELETE FROM entries WHERE task_id = 't2' AND cost = 0.20")
+    led.conn.execute("DELETE FROM entries WHERE task_id = 't2' AND error IS NOT NULL")
+    led.conn.commit()
     # the other end: requests after the window
     t = task_costs(led, until=now - 3600)
     assert (t["window_only"], t["resolved"], t["tasks_cut"]) == (True, 1, 1)
