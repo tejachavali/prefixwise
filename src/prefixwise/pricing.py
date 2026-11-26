@@ -337,8 +337,8 @@ class PriceTable:
             if not isinstance(rate, (int, float)):
                 return None
             take = min(left, n)
-            left, cost = left - take, cost + take * (rate - read)
-        return round((cost + left * (fresh - read)) / 1e6, 8)
+            left, cost = left - take, cost + take * max(0.0, rate - read)
+        return round((cost + left * max(0.0, fresh - read)) / 1e6, 8)
 
     def miss_rate(self, model: str, provider: str | None, prompt_tokens: int) -> float | None:
         """USD per token a miss costs above a hit for prefix tokens that are sent again: the rate

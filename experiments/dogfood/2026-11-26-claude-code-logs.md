@@ -130,7 +130,7 @@ before a long break). Showing what expected misses cost is tracked as a separate
 `90 x too long since the previous turn: the cache entry expired (on 82 of them, 32,363,890 tokens the
 cache had held were sent again, [dollars] more than reading them, 20% of the bill)`. The 90 are the 72
 and the 18 in the table above. Eight of them get no figure: Claude Code was upgraded in the gap, so
-the front of the prompt had changed and a live cache would not have served it either. That is why the
+the front of the prompt may have changed, and what a live cache would have served is not known. That is why the
 importer's 19.9% is under the table's 21% and 1.4%, which were worked out by hand from the raw logs
 and count all 90. The token count is what was not read: the front of the prompt was still read on
 many of these turns, as noted earlier in this record. The figure is gross: what was paid again, not

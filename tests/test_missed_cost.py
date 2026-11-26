@@ -12,7 +12,7 @@ from prefixwise.importers import import_claude_code
 from prefixwise.ledger import EXPECTED_MISS_CAUSES, Ledger, LedgerEntry, missed_for_turn
 from prefixwise.pricing import PriceTable
 
-from test_classifier_verdicts import A1, GO, OPUS, S, SYS, U1, claude, idle, marked, scripted
+from test_classifier_verdicts import A1, GO, OPUS, S, SYS, U1, claude, idle, last_marked, marked, scripted
 from test_import_claude_code import Log, build, ts, usage
 
 BASE = {"model": OPUS, "max_tokens": 9}
@@ -352,6 +352,49 @@ def test_the_import_gives_a_figure_only_when_nothing_else_changed_in_the_gap(tmp
     log.user(day); log.reply(day + 5, usage(w1h=100500))
     rows = import_rows(tmp_path / "summed", log)
     assert rows[1][1] is None, rows[1]
+    # the effort setting changed in the gap, on a model where effort is part of the prompt...
+    for model, figure in (("claude-opus-5", None), ("claude-opus-5-5", 100000)):  # ...and where it is not
+        log = Log()
+        log.user(1); log.reply(5, usage(w1h=100000), model=model, effort="high")
+        log.user(day); log.reply(day + 5, usage(w1h=100500), model=model, effort="low")
+        rows = import_rows(tmp_path / f"effort-{model}", log)
+        assert (rows[1][0], rows[1][1]) == ("ttl_expired", figure), (model, rows[1])
+    # Anthropic's own diagnosis names a change; an answer that is no verdict does not
+    for reason, figure in (("system_changed", None), ("tools_changed", None), ("messages_changed", None),
+                           ("previous_message_not_found", 100000)):
+        log = Log()
+        log.user(1); log.reply(5, usage(w1h=100000))
+        log.user(day); log.reply(day + 5, usage(w1h=100500), diagnostics={"cache_miss_reason": {"type": reason}})
+        rows = import_rows(tmp_path / reason, log)
+        assert (rows[1][0], rows[1][1]) == ("ttl_expired", figure), (reason, rows[1])
+
+
+def test_no_more_is_counted_than_this_requests_own_markers_cover(tmp_path):
+    """The previous turn marked the system prompt and the last message and left 30,000. This one marks
+    the system prompt only and wrote 3,000: a read stops at a marker, so a live cache could have
+    served 3,000 of it, not 30,000."""
+    b = {"model": OPUS, "max_tokens": 9, "system": marked()}
+    p = scripted([claude(write=30000), claude(write=3000, fresh=27300)])
+    p.handle("anthropic", {**b, "messages": last_marked([U1, A1, GO])}, S)
+    idle(p, 600)
+    e = p.handle("anthropic", {**b, "messages": [U1, A1, GO, A1, GO]}, S)[1]
+    assert (e.cause, e.missed_tokens) == ("ttl_expired", 3000), (e.cause, e.missed_tokens, e.evidence)
+    assert e.missed_cost == pytest.approx(3000 * (RATES["cache_write_5m"] - RATES["cache_read"]) / 1e6)
+    # the import: 100,000 left, 20,000 written again under this request's markers
+    log = Log()
+    log.user(1); log.reply(5, usage(w1h=100000))
+    log.user(86400); log.reply(86405, usage(w1h=20000, fresh=80500))
+    rows = import_rows(tmp_path, log)
+    assert (rows[1][0], rows[1][1]) == ("ttl_expired", 20000), rows[1]
+    assert missed_for_turn("ttl_expired", True, 30300, 1000, 30300, 30000, covered_tokens=3000) == 2000
+    assert missed_for_turn("ttl_expired", True, 30300, 0, 30300, 30000, covered_tokens=None) == 30000
+
+
+def test_a_price_file_with_a_read_rate_above_the_write_rate_gives_no_negative_figure():
+    odd = PriceTable(models={"m": {"input": 1.0, "output": 4.0, "cache_read": 3.0, "cache_write": 2.0}},
+                     as_of="2026-11-26", sources=["test"])
+    u = {"input_tokens": 100, "output_tokens": 5, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 1000}
+    assert odd.missed_cost("m", 1500, 1100, "anthropic", u) == 0.0
 
 
 def test_the_line_reads_right_with_one_priced_a_tiny_sum_and_large_counts():

@@ -183,7 +183,7 @@ EXPECTED_MISS_CAUSES = frozenset({"ttl_expired"})
 
 def missed_for_turn(cause: str | None, legit: bool | None, prompt_tokens: int, cached_tokens: int,
                     prev_prompt_tokens: int | None, prev_left_tokens: int | None, *,
-                    unchanged: bool = True) -> int | None:
+                    unchanged: bool = True, covered_tokens: int | None = None) -> int | None:
     """Tokens an expiry sent again that the previous turn had left in the cache, less what was read
     all the same. A figure is given only where it is true:
 
@@ -194,11 +194,18 @@ def missed_for_turn(cause: str | None, legit: bool | None, prompt_tokens: int, c
       read plus what it wrote). A turn that left nothing had nothing to expire, and where a provider
       does not report writes, what was held is a guess.
 
+    No more is counted than this request's own markers cover (`covered_tokens`: what it read plus
+    what it wrote, where its usage reports a write count). A read stops at a breakpoint, so a live
+    cache could not have served a request past its last one, whatever the previous turn had left.
+
     None otherwise."""
     if (legit is False or cause not in EXPECTED_MISS_CAUSES or not unchanged
             or not prev_prompt_tokens or not prev_left_tokens):
         return None
-    return max(0, min(prev_prompt_tokens, prompt_tokens, prev_left_tokens) - cached_tokens)
+    reach = min(prev_prompt_tokens, prompt_tokens, prev_left_tokens)
+    if covered_tokens is not None:
+        reach = min(reach, covered_tokens)
+    return max(0, reach - cached_tokens)
 
 
 def held_for_turn(prev, cause: str, cached_tokens: int) -> int | None:

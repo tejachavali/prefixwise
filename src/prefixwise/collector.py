@@ -517,7 +517,9 @@ class Collector:
         left = prev.cached_tokens + prev.cache_written if prev is not None and prev.write_reported else None
         entry.missed_tokens = missed_for_turn(entry.cause, result.legit, prompt_tokens, cached,
                                               prev.prompt_tokens if prev else None, left,
-                                              unchanged=unchanged_prompt)
+                                              unchanged=unchanged_prompt,
+                                              covered_tokens=cached + entry.cache_write_tokens
+                                              if write_reported(provider, usage) else None)
         if entry.missed_tokens is not None:
             entry.missed_cost = self.prices.missed_cost(priced_model, entry.missed_tokens, prompt_tokens,
                                                         provider, usage)
