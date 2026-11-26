@@ -240,11 +240,16 @@ def test_a_body_that_fails_to_read_fails_for_the_caller_as_it_would_have():
         stub.add_response("invoke_model", {"body": StreamingBody(Broken(b"x"), 1), "contentType": "application/json"})
         prefixwise.wrap(c, recorder=rec)
         result = c.invoke_model(modelId=MODEL, body=json.dumps(request))
-    assert isinstance(result["body"], StreamingBody)
+    body = result["body"]
+    assert isinstance(body, StreamingBody)
+    body.set_socket_timeout(5)
+    for read in (lambda: body.read(), lambda: next(iter(body.iter_chunks())), lambda: body.readlines(),
+                 lambda: body.readinto(bytearray(8)), lambda: next(body)):
+        with pytest.raises(OSError, match="connection reset"):
+            read()
     with pytest.raises(OSError, match="connection reset"):
-        result["body"].read()
-    with pytest.raises(OSError, match="connection reset"):
-        next(iter(result["body"].iter_chunks()))
+        with body as f:
+            f.read()
     assert [r[9] for r in rows(rec)] == ["not_recorded"]  # a row, so error rates stay honest
 
 
@@ -269,9 +274,13 @@ def test_another_aws_client_is_refused():
 def test_wrapping_does_not_import_litellm():
     import subprocess
     import sys
-    code = ("import sys, prefixwise, boto3, openai; prefixwise.wrap(openai.OpenAI(api_key='x')); "
+    # (litellm is blocked from importing at all: were it imported, it would try to fetch its prices)
+    code = ("import sys; sys.modules['litellm'] = None; import prefixwise, boto3, openai; "
+            "prefixwise.wrap(openai.OpenAI(api_key='x')); "
             "prefixwise.wrap(boto3.client('bedrock-runtime', region_name='us-east-1', aws_access_key_id='a', "
-            "aws_secret_access_key='b')); print('litellm' in sys.modules)")
+            "aws_secret_access_key='b')); "
+            "print(any(m.startswith('litellm') or m == 'prefixwise.litellm_callback' for m in sys.modules "
+            "if sys.modules[m] is not None))")
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
     assert out.stdout.strip() == "False"
 
@@ -292,9 +301,11 @@ def test_a_changed_image_reads_as_changed():
             c.converse(modelId=MODEL, system=SYS, messages=[image(b"\x89PNG two"), A1, U2])
     second = rows(rec)[1]
     assert second[4] not in ("none", "routing_miss", "ttl_expired"), second
-    body = converse_request({"modelId": MODEL, "messages": [image(b"x" * 10000)]})
-    assert json.dumps(body)  # all of it is JSON now
-    assert "sha256:" in json.dumps(body)  # a long blob is kept as its digest
+    import base64
+    small = converse_request({"modelId": MODEL, "messages": [image(b"tiny")]})
+    big = converse_request({"modelId": MODEL, "messages": [image(b"x" * 60000)]})
+    assert base64.b64encode(b"tiny").decode() in json.dumps(small)
+    assert len(json.dumps(big)) > 80000  # as base64, as Anthropic's API carries it: its size still shows
 
 
 def test_effort_and_output_format_are_read_from_output_config():
@@ -367,7 +378,7 @@ def test_the_body_handed_back_is_a_streaming_body():
         prefixwise.wrap(c, recorder=rec)
         body = c.invoke_model(modelId=MODEL, body=json.dumps(request))["body"]
         assert isinstance(body, StreamingBody)
-        body.set_socket_timeout  # noqa: B018 - the attribute exists
+        body.set_socket_timeout(5)  # nothing left to read: a no-op, not an AttributeError
         assert next(body) == data
         again = c.invoke_model(modelId=MODEL, body=json.dumps(request))["body"]
         assert b"".join(again.iter_chunks(7)) == data
@@ -427,3 +438,92 @@ def test_a_failure_to_read_the_call_warns_once_and_leaves_a_row(monkeypatch, cap
         c.converse(modelId=MODEL, messages=[U1])
     assert [r[9] for r in rows(rec)] == ["not_recorded"]
     assert not getattr(rec, "_warned", False)  # the Recorder's own warning is not used up
+
+
+def test_invoke_model_under_a_prompt_router_is_judged_by_the_model_that_ran():
+    router = "arn:aws:bedrock:us-east-1:111122223333:default-prompt-router/anthropic.claude:1"
+    request = {"anthropic_version": "bedrock-2023-05-31", "max_tokens": 16,
+               "system": [{"type": "text", "text": SYSTEM, "cache_control": {"type": "ephemeral"}}],
+               "messages": [{"role": "user", "content": "hi"}]}
+
+    def answer(model, write):
+        data = json.dumps({"id": "m", "type": "message", "role": "assistant", "model": model, "content": [],
+                           "stop_reason": "end_turn", "usage": {"input_tokens": 5, "output_tokens": 1,
+                                                                "cache_read_input_tokens": 0,
+                                                                "cache_creation_input_tokens": write}}).encode()
+        return {"body": StreamingBody(io.BytesIO(data), len(data)), "contentType": "application/json"}
+    rec = Recorder(":memory:")
+    c = client()
+    with Stubber(c) as stub:
+        stub.add_response("invoke_model", answer("claude-sonnet-4-5-20250929", 3000))
+        stub.add_response("invoke_model", answer("claude-haiku-4-5-20251001", 3000))
+        stub.add_response("invoke_model", answer("", 3000))  # names no model: not recorded
+        prefixwise.wrap(c, recorder=rec)
+        with prefixwise.session("r"):
+            for _ in range(3):
+                c.invoke_model(modelId=router, body=json.dumps(request))
+    out = rows(rec)
+    assert [r[1] for r in out] == ["claude-sonnet-4-5-20250929", "claude-haiku-4-5-20251001"]
+    assert out[1][4] == "model_switch"
+
+
+def test_a_router_trace_that_names_another_model_is_not_recorded():
+    router = "arn:aws:bedrock:us-east-1:111122223333:default-prompt-router/anthropic.claude:1"
+    rec = Recorder(":memory:")
+    c = client()
+    with Stubber(c) as stub:
+        stub.add_response("converse", {**reply(usage()), "trace": {"promptRouter": {
+            "invokedModelId": "arn:aws:bedrock:us-east-1::foundation-model/meta.llama3-70b-instruct-v1:0"}}})
+        prefixwise.wrap(c, recorder=rec)
+        c.converse(modelId=router, messages=[U1])
+    assert rows(rec) == []
+
+
+def test_the_lifetimes_asked_for_are_read_from_blocks_only():
+    from prefixwise.bedrock import _lifetimes
+    assert _lifetimes({"system": [{"text": "s"}, {"cachePoint": {"type": "default"}}]}) == {"5m"}
+    assert _lifetimes({"messages": [{"role": "user", "content": [{"text": "q"},
+                                                                 {"cachePoint": {"type": "default", "ttl": "1h"}}]}],
+                       "toolConfig": {"tools": [{"toolSpec": {"name": "t", "inputSchema": {"json": {
+                           "properties": {"cachePoint": {"type": "object"}}}}}}]}}) == {"1h"}
+
+
+def test_redacted_thinking_in_a_reply_is_carried_as_text():
+    from prefixwise.bedrock import converse_response
+    r = converse_response({**reply(usage()), "output": {"message": {"role": "assistant", "content": [
+        {"reasoningContent": {"redactedContent": b"\x00\x01secret"}}, {"text": "ok"}]}}}, MODEL)
+    assert json.dumps(r) and r["content"][0]["type"] == "redacted_thinking"
+
+
+def test_the_original_body_is_closed_after_it_is_read_and_when_a_failed_body_is_closed():
+    closed = []
+
+    class Tracked(io.BytesIO):
+        def close(self):
+            closed.append(True)
+            super().close()
+
+    request = {"anthropic_version": "bedrock-2023-05-31", "max_tokens": 16, "messages": [{"role": "user", "content": "hi"}]}
+    data = json.dumps({"id": "m", "type": "message", "role": "assistant", "model": "claude-sonnet-4-5-20250929",
+                       "content": [], "stop_reason": "end_turn", "usage": {"input_tokens": 5, "output_tokens": 1}}).encode()
+    c = client()
+    original = Tracked(data)  # (held, so only an explicit close can count)
+    with Stubber(c) as stub:
+        stub.add_response("invoke_model", {"body": StreamingBody(original, len(data)),
+                                           "contentType": "application/json"})
+        prefixwise.wrap(c, recorder=Recorder(":memory:"))
+        c.invoke_model(modelId=MODEL, body=json.dumps(request))
+    assert closed == [True]  # read to its end and released
+
+    class Broken(Tracked):
+        def read(self, *a):
+            raise OSError("reset")
+    closed.clear()
+    c = client()
+    with Stubber(c) as stub:
+        stub.add_response("invoke_model", {"body": StreamingBody(Broken(b"x"), 1), "contentType": "application/json"})
+        prefixwise.wrap(c, recorder=Recorder(":memory:"))
+        body = c.invoke_model(modelId=MODEL, body=json.dumps(request))["body"]
+    assert closed == []
+    body.close()
+    assert closed == [True]

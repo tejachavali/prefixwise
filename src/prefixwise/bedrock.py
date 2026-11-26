@@ -24,13 +24,14 @@ never raises into the call: a failure is reported once and leaves a `not_recorde
   carries no cache counts, the write is "not reported", not zero.
 - `invoke_model`: a body in Anthropic's format (`anthropic_version`). The response body is a
   stream the caller reads once; Prefixwise reads it to the end and gives the caller a new
-  StreamingBody with the same bytes. If that read fails, the caller meets the same error when it
-  reads. A body passed as a file object is not read and the call is not recorded.
+  StreamingBody with the same bytes (its socket timeout, with nothing left to read, does nothing).
+  If that read fails, every way of reading the body raises the same error for the caller. A body
+  passed as a file object is not read and the call is not recorded.
 
 Which model ran: a Claude model id, with or without a region prefix (`us.`, `eu.`, `global.`), or a
-system inference profile's ARN, which names it. A prompt router names the model it chose in the
-response's trace; without that the call is not recorded. On `invoke_model`, a model id that does
-not name Claude (an application inference profile's ARN) is read from the response's `model`.
+system inference profile's ARN, which names it. A prompt router or an application inference
+profile names no single model: on `converse` the model a router chose is read from the response's
+trace, on `invoke_model` from the response's `model`; without it the call is not recorded.
 
 Not recorded: `converse_stream`, `invoke_model_with_response_stream`, other models, calls that
 raise, `converse` under an application inference profile (nothing says which model ran), and
@@ -40,7 +41,6 @@ provisioned throughput (a `provisioned-model` ARN), which is billed by the hour,
 from __future__ import annotations
 
 import base64
-import hashlib
 import io
 import json
 import re
@@ -75,14 +75,11 @@ def _provisioned(model_id: str) -> bool:
 
 
 def _jsonable(value):
-    """The request with its bytes (images, documents, redacted thinking) as text, so a changed
-    image or document reads as changed. A long blob is kept as its digest: that is all a
-    comparison needs."""
+    """The request with its bytes (images, documents, redacted thinking) as base64 text, as
+    Anthropic's API carries them: a changed image or document reads as changed, and its size still
+    tells the cache-size estimate that it is not text."""
     if isinstance(value, (bytes, bytearray, memoryview)):
-        data = bytes(value)
-        if len(data) > 4096:
-            return "sha256:" + hashlib.sha256(data).hexdigest()
-        return base64.b64encode(data).decode()
+        return base64.b64encode(bytes(value)).decode()
     if isinstance(value, dict):
         return {k: _jsonable(v) for k, v in value.items()}
     if isinstance(value, (list, tuple)):
@@ -91,21 +88,19 @@ def _jsonable(value):
 
 
 def _lifetimes(kwargs: dict) -> set:
-    """The lifetimes the request's cache points ask for ("5m" when none is given)."""
+    """The lifetimes the request's cache points ask for ("5m" when none is given). Only blocks are
+    looked at, where a cache point can be: the system blocks, each message's content blocks and
+    the tools (not inside a tool's input or schema)."""
+    blocks = list(kwargs.get("system") or [])
+    for m in kwargs.get("messages") or []:
+        if isinstance(m, dict):
+            blocks.extend(m.get("content") or [])
+    blocks.extend((kwargs.get("toolConfig") or {}).get("tools") or [])
     found = set()
-
-    def walk(v):
-        if isinstance(v, dict):
-            point = v.get("cachePoint")
-            if isinstance(point, dict):
-                found.add(point.get("ttl") or "5m")
-            for x in v.values():
-                walk(x)
-        elif isinstance(v, list):
-            for x in v:
-                walk(x)
-    for key in ("system", "messages", "toolConfig"):
-        walk(kwargs.get(key))
+    for b in blocks:
+        point = b.get("cachePoint") if isinstance(b, dict) else None
+        if isinstance(point, dict):
+            found.add(point.get("ttl") or "5m")
     return found
 
 
@@ -187,18 +182,49 @@ def converse_model(model_id: str, response: dict) -> str | None:
 
 
 def _streaming_body(data: bytes):
+    """A botocore StreamingBody of bytes already read. Its socket timeout has nothing left to
+    bound: setting it does nothing."""
     from botocore.response import StreamingBody
-    return StreamingBody(io.BytesIO(data), len(data))
+
+    class ReadBody(StreamingBody):
+        def set_socket_timeout(self, timeout):
+            pass
+
+    return ReadBody(io.BytesIO(data), len(data))
+
+
+class _Raising(io.RawIOBase):
+    """A raw stream every read of which raises one error."""
+
+    def __init__(self, exc: BaseException):
+        super().__init__()
+        self._exc = exc
+
+    def readable(self):
+        return True
+
+    def readinto(self, b):
+        raise self._exc
+
+    def read(self, size=-1):
+        raise self._exc
+
+    def readline(self, size=-1):
+        raise self._exc
+
+    def readlines(self, hint=-1):
+        raise self._exc
 
 
 def _failed_body(exc: BaseException, original):
-    """A StreamingBody whose reads raise what Prefixwise's read of the original raised: the caller
-    meets the same error, when it reads, as it would have."""
+    """A StreamingBody every read of which (read, readinto, readlines, iteration, a `with` block)
+    raises what Prefixwise's read of the original raised: the caller meets the same error, when it
+    reads, as it would have. Closing it closes the original."""
     from botocore.response import StreamingBody
 
     class FailedBody(StreamingBody):
-        def read(self, amt=None):
-            raise exc
+        def set_socket_timeout(self, timeout):
+            pass
 
         def close(self):
             try:
@@ -206,14 +232,13 @@ def _failed_body(exc: BaseException, original):
             finally:
                 super().close()
 
-    return FailedBody(io.BytesIO(b""), 0)
+    return FailedBody(_Raising(exc), 0)
 
 
 def _warn(recorder, exc) -> None:
     if not getattr(recorder, "_bedrock_warned", False):
         recorder._bedrock_warned = True
-        print(f"prefixwise: could not record a Bedrock call ({type(exc).__name__}: {exc}); "
-              "the call itself was unaffected", file=sys.stderr)
+        print(f"prefixwise: could not record a Bedrock call ({type(exc).__name__}: {exc})", file=sys.stderr)
 
 
 def _not_recorded(recorder, model: str, agent_id, started) -> None:
@@ -284,9 +309,11 @@ def _patch_invoke(original, recorder, agent_id):
                     latency = (time.perf_counter() - started) * 1000
                     response = json.loads(data)
                     if isinstance(response, dict) and isinstance(response.get("usage"), dict):
-                        # A model id that does not name Claude (an application inference profile)
-                        # is judged and priced by the model the response names.
-                        if not names_claude(model) and response.get("model"):
+                        # A model id that names no single model (an application inference profile,
+                        # a prompt router) is judged and priced by the model the response names.
+                        if _router(model) or not names_claude(model):
+                            if not str(response.get("model") or "").lower().startswith("claude"):
+                                return result
                             model = str(response["model"])
                         request = {**body, "model": model}
                         response.setdefault("model", model)
