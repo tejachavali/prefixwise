@@ -232,7 +232,7 @@ def test_one_change_is_named_and_a_full_read_is_never_a_miss(seed, rng, provider
     left = ("not known", "its prompt", "nothing")[seed % 3]
     # (How many tokens the previous turn's markers covered, by the collector's estimate: under the
     # model's minimum of 1,024, far above it, or not known.)
-    marked = (300, 5_000, None)[(seed // 3) % 3]
+    marked = ((300, 300), (5_000, 5_000), None)[(seed // 3) % 3]
     prev = _snap(body, provider, 20_000, 0, cache_written=20_000 if left == "its prompt" else 0,
                  write_reported=provider == "anthropic" and left != "not known", marked_tokens=marked)
     left_nothing = provider == "anthropic" and left == "nothing"
@@ -244,7 +244,7 @@ def test_one_change_is_named_and_a_full_read_is_never_a_miss(seed, rng, provider
         # change, kept as a secondary cause, is never waste (so no waste verdict has 0 avoidable).
         # Below the minimum when the marked part was small (or its size is not known); not known
         # when it was far above the minimum: the markers were not honoured.
-        assert miss.cause is (MissCause.UNKNOWN if marked == 5_000 else MissCause.BELOW_MIN_PREFIX), (seed, miss)
+        assert miss.cause is (MissCause.UNKNOWN if marked == (5_000, 5_000) else MissCause.BELOW_MIN_PREFIX), (seed, miss)
         assert miss.legit is None and expected in miss.secondary and not miss.score, (seed, miss)
     else:
         assert miss.cause is expected, (seed, mutation.__name__, miss.cause, miss.evidence)

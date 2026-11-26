@@ -22,6 +22,7 @@ GO = {"role": "user", "content": "go"}
 S = {"x-prefixwise-session-id": "s"}
 OPUS = "claude-opus-5-5"
 T0 = 1_800_000_000.0
+AGENT = {"role": "system", "content": "You are a coding agent. " * 300}
 
 
 def scripted(usages, **kw):
@@ -565,53 +566,91 @@ def swarm(agents, turns=4, session="swarm"):
     return proxy, later
 
 
-@pytest.mark.parametrize("agents", [LANE_THREADS, LANE_THREADS + 1, LANE_THREADS + 4])
-def test_more_conversations_than_the_lane_remembers_do_not_turn_hits_into_waste(agents):
-    """Each conversation reads everything its own previous turn left. With nine interleaved, 26 of 27
-    such hits were `history_edit`, compared with another conversation's turn."""
+def test_the_lane_remembers_sixty_four_conversations():
+    assert LANE_THREADS == 64
+
+
+@pytest.mark.parametrize("agents", [8, 9, 12, LANE_THREADS])
+def test_interleaved_conversations_are_each_compared_with_their_own_previous_turn(agents):
+    """Each conversation reads everything its own previous turn left. The lane remembered 8
+    conversations: with nine interleaved, 26 of 27 such hits were `history_edit`, compared with
+    another conversation's turn. It remembers 64 now."""
     proxy, later = swarm(agents)
     assert {e.cause for e in later} == {"none"} and sum(e.avoidable_tokens for e in later) == 0
-    if agents > LANE_THREADS:
-        assert any("no longer remembered" in e.evidence for e in later)
-        own = [e for e in later if "judged by its own read" in e.evidence]
-        assert own and all(e.detail is None and e.divergence_role is None for e in own)
+    assert all("the cache served all of the reusable prefix" in e.evidence for e in later)
 
 
-def forgotten(usage, session=S, stamp=False):
-    """Conversation 0 comes back after the lane (8 conversations) has dropped it; the lane's latest
-    turn is another conversation's second turn. `stamp`: a per-request timestamp in the system prompt."""
-    proxy = scripted([claude(write=3000, fresh=0)] * (LANE_THREADS + 1) + [claude(read=0 if stamp else 3000, write=3300 if stamp else 300, fresh=0), usage])
-    sent = iter(range(60))
+def test_twelve_interleaved_conversations_that_share_an_instruction_are_found_by_their_openings():
+    """Unique documents and answers, the same instruction text after each answer: each conversation
+    is found by its opening message, so the shared message plays no part. (With 8 remembered, 33 of
+    these 36 full hits were `history_edit`.)"""
+    def conv(i, turns):
+        msgs = [{"role": "user", "content": f"document {i} " * 100}]
+        for k in range(1, turns):
+            msgs += [{"role": "assistant", "content": f"answer {i}.{k} " * 40}, {"role": "user", "content": "Continue with the next section."}]
+        return msgs
+    for headers in ({}, S):
+        usages = [gpt(2300 + 300 * (n - 1), 0 if (n, i) == (1, 0) else 1920 if n == 1 else (2000 + 300 * (n - 1)) // 128 * 128)
+                  for n in range(1, 5) for i in range(12)]
+        proxy = scripted(usages)
+        rows = [proxy.handle("openai", {"model": "gpt-5.6-terra", "messages": [AGENT] + conv(i, n)}, headers)[1]
+                for n in range(1, 5) for i in range(12)]
+        assert collections.Counter(r.cause for r in rows) == {"first_write": 1, "none": 47}
+        assert sum(r.avoidable_tokens for r in rows) == 0
+
+
+def forgotten(usage, session=S, stamp=False, second_turn=True):
+    """Conversation 0 comes back after 64 others: the lane has dropped it. The lane's latest turn is
+    another conversation's second turn (its first, with `second_turn` off). `stamp`: a per-request
+    timestamp in the system prompt."""
+    proxy = scripted([claude(write=3000, fresh=0)] * (LANE_THREADS + 1) + [claude(read=0 if stamp else 3000, write=3300 if stamp else 300, fresh=0)] * second_turn + [usage])
+    sent = iter(range(3600))
+    now = lambda: divmod(next(sent), 60)  # noqa: E731
     turn = lambda i, more=(): {"model": OPUS, "max_tokens": 9,  # noqa: E731
-                               "system": marked(SYS + (f" Now: 2026-11-26T09:00:{next(sent):02d}Z" if stamp else "")),
+                               "system": marked(SYS + (" Now: 2026-11-26T09:%02d:%02dZ" % now() if stamp else "")),
                                "messages": last_marked([{"role": "user", "content": f"topic {i}"}, *more])}
     for i in range(LANE_THREADS + 1):
         proxy.handle("anthropic", turn(i), session)
-    proxy.handle("anthropic", turn(LANE_THREADS, [{"role": "assistant", "content": "notes"}, {"role": "user", "content": "more"}]), session)
+    if second_turn:
+        proxy.handle("anthropic", turn(LANE_THREADS, [{"role": "assistant", "content": "notes"}, {"role": "user", "content": "more"}]), session)
     return proxy, proxy.handle("anthropic", turn(0, [A1, GO]), session)[1]
 
 
-def test_a_forgotten_conversation_that_missed_is_unknown_not_blamed():
-    _, entry = forgotten(claude(write=3400, fresh=0))
-    assert (entry.cause, entry.legit, entry.avoidable_tokens) == ("unknown", None, 0)
-    assert "no longer remembered" in entry.evidence and "0 of 3,400 prompt tokens came from the cache" in entry.evidence
-    _, hit = forgotten(claude(read=3000, write=400, fresh=0))
-    assert hit.cause == "none" and "judged by its own read" in hit.evidence
-    _, part = forgotten(claude(read=1000, write=2400, fresh=0))   # under half of its own prompt: not known
-    assert (part.cause, part.avoidable_tokens) == ("unknown", 0)
+@pytest.mark.parametrize("session", [S, {}])
+def test_beyond_sixty_four_conversations_the_oldest_is_compared_with_the_latest_turn(session):
+    """The limit, as it behaves: a conversation is known by its opening message, and the 65th
+    remembered one drops the least recently used. That conversation's next turn finds no turn of
+    its own and is compared with the lane's latest turn, another conversation's: `history_edit`,
+    as on main, with or without a session id."""
+    _, missed = forgotten(claude(write=3400, fresh=0), session)
+    assert (missed.cause, missed.legit, missed.avoidable_tokens) == ("history_edit", False, 3300)
+    _, hit = forgotten(claude(read=3000, write=400, fresh=0), session)   # it read all its own previous turn left
+    assert (hit.cause, hit.legit, hit.avoidable_tokens) == ("history_edit", False, 300)
+
+
+def test_beyond_the_limit_after_a_single_message_request_it_is_a_new_conversation():
+    """The same, when the lane's latest turn is a single message: the rule for a request that
+    follows a one-shot applies (a new conversation on the same tools and system prompt). It read
+    nothing of the system prompt the latest request cached at the marker both carry: a miss of
+    that shared prefix, judged by the routing rule."""
+    _, entry = forgotten(claude(write=3400, fresh=0), second_turn=False)
+    assert (entry.cause, entry.legit, entry.avoidable_tokens) == ("routing_miss", None, 0)
+    assert "a new conversation on the tools and system prompt the previous request cached" in entry.evidence
+    _, hit = forgotten(claude(read=3000, write=400, fresh=0), second_turn=False)
+    assert hit.cause == "none"
 
 
 def test_a_conversation_whose_previous_turn_is_not_at_hand_still_gets_the_lanes_causes():
     """Tools and the system prompt are the lane's: a change in them stands against any of its
-    turns, so it is named exactly as before, with the same avoidable tokens. (Every such row was
-    `unknown` once the lane had seen 8 openings.)"""
+    turns, so it is named exactly as on main, with the same avoidable tokens."""
     _, entry = forgotten(claude(write=3400, fresh=0), stamp=True)
     assert (entry.cause, entry.legit, entry.avoidable_tokens) == ("volatile_system", False, 3300)
 
 
-def test_twelve_users_with_a_timestamp_in_the_system_prompt_are_volatile_system_not_unknown():
+def test_twelve_users_with_a_timestamp_in_the_system_prompt_are_volatile_system():
     """12 users interleaved in one session with no id, a per-request timestamp in the system prompt,
-    nothing ever read: 36 `volatile_system` rows on main, 36 `unknown` once the lane was full."""
+    nothing ever read: every turn after the first is `volatile_system`, each compared with its own
+    conversation's previous turn."""
     users, turns = 12, 4
     proxy = scripted([claude(write=2500 + 300 * t, fresh=0) for t in range(turns) for _ in range(users)])
     got, n = [], 0
@@ -623,10 +662,12 @@ def test_twelve_users_with_a_timestamp_in_the_system_prompt_are_volatile_system_
                                                   "messages": chat(f"user{u}", t)}, {})[1])
     assert collections.Counter(e.cause for e in got) == {"first_write": 1, "volatile_system": 47}
     assert all(e.legit is False for e in got[1:])
-    assert sum(e.avoidable_tokens for e in got) == 138_200   # as on main: the shorter prompt of each pair, unread
+    assert sum(e.avoidable_tokens for e in got) == 128_300   # the shorter prompt of each pair, unread
 
 
 def test_a_reordered_tool_list_is_named_whatever_conversation_it_is_compared_with():
+    """A first turn is compared with another user's turn, a later one with its own previous turn;
+    the tools are the lane's either way."""
     tool = lambda name: {"name": name, "description": f"{name} things", "input_schema": {"type": "object", "properties": {}}}  # noqa: E731
     tools = [tool("search"), tool("read"), tool("write")]
     users, turns = 12, 3
@@ -635,18 +676,18 @@ def test_a_reordered_tool_list_is_named_whatever_conversation_it_is_compared_wit
     for t in range(1, turns + 1):
         for u in range(users):
             n += 1
-            order = tools if n % 2 else list(reversed(tools))
+            order = tools if (t + u) % 2 else list(reversed(tools))   # each user flips the order every turn
             got.append(proxy.handle("anthropic", {"model": OPUS, "max_tokens": 9, "tools": order, "system": marked(),
                                                   "messages": chat(f"user{u}", t)}, {})[1])
     assert collections.Counter(e.cause for e in got) == {"first_write": 1, "tool_reserialize": 35}
-    assert sum(e.avoidable_tokens for e in got) == 97_700   # as on main
+    assert sum(e.avoidable_tokens for e in got) == 11 * 2500 + 12 * (2500 + 2800)
 
 
 def test_a_compaction_sent_with_its_event_is_a_compaction_however_many_conversations_the_lane_holds():
-    proxy = scripted([claude(write=3000, fresh=0)] * LANE_THREADS + [claude(read=3000, write=600, fresh=0),
-                                                                    claude(read=2000, write=500, fresh=0)])
+    proxy = scripted([claude(write=3000, fresh=0)] * 8 + [claude(read=3000, write=600, fresh=0),
+                                                         claude(read=2000, write=500, fresh=0)])
     turn = lambda msgs, **kw: {"model": OPUS, "max_tokens": 9, "system": marked(), "messages": last_marked(msgs), **kw}  # noqa: E731
-    for i in range(LANE_THREADS):
+    for i in range(8):
         proxy.handle("anthropic", turn([{"role": "user", "content": f"topic {i}"}]), S)
     long = [{"role": "user", "content": "topic 7"}, {"role": "assistant", "content": "a long answer " * 200},
             {"role": "user", "content": "and then?"}]
@@ -657,21 +698,10 @@ def test_a_compaction_sent_with_its_event_is_a_compaction_however_many_conversat
     assert (entry.cause, entry.legit, entry.avoidable_tokens) == ("compaction_rewrite", True, 0)
 
 
-def rewritten_history(headers, before=0, aged=0.0):
-    """A conversation of two turns, then a request whose every message is another: a full rewrite.
-    `before` other conversations were opened in the session first, `aged` seconds earlier."""
-    proxy = scripted([claude(write=3000, fresh=0)] * before + [claude(write=3000, fresh=0), claude(read=3000, write=400, fresh=0),
-                                                              claude(read=2000, write=1500, fresh=0)])
+def rewritten_history(headers):
+    """A conversation of two turns, then a request whose every message is another: a full rewrite."""
+    proxy = scripted([claude(write=3000, fresh=0), claude(read=3000, write=400, fresh=0), claude(read=2000, write=1500, fresh=0)])
     turn = lambda msgs: {"model": OPUS, "max_tokens": 9, "system": marked(), "messages": last_marked(msgs)}  # noqa: E731
-    session = headers.get("x-prefixwise-session-id", "default")
-    for i in range(before):
-        proxy.handle("anthropic", turn([{"role": "user", "content": f"topic {i}"}]), headers)
-    if aged:
-        for lane in proxy.lane_threads.values():
-            for key, (snapshot, when, facts, rid) in list(lane.threads.items()):
-                lane.threads[key] = (snapshot, when - aged, facts, rid)
-                snapshot.sent_at -= aged
-        proxy.last_seen[session] -= aged
     proxy.handle("anthropic", turn([U1]), headers)
     proxy.handle("anthropic", turn([U1, A1, GO]), headers)
     other = [{"role": "user", "content": "something else entirely"}, {"role": "assistant", "content": "sure"},
@@ -679,26 +709,19 @@ def rewritten_history(headers, before=0, aged=0.0):
     return proxy, proxy.handle("anthropic", turn(other), headers)[1]
 
 
-def test_a_full_rewrite_in_a_named_session_is_still_a_history_edit():
-    """Nothing says the session mixes conversations: an unannounced rewrite of every message is
-    reported, with the tokens it cost."""
-    _, entry = rewritten_history(S)
+@pytest.mark.parametrize("headers", [S, {}])
+def test_a_request_of_several_messages_with_another_opening_is_a_history_edit(headers):
+    """An unannounced rewrite of every message is reported, with the tokens it cost, in a named
+    session and in one with no id alike, as on main. (A rule that took such a request for "another
+    conversation" where conversations mix hid trimmed histories, and is gone.)"""
+    proxy, entry = rewritten_history(headers)
     assert (entry.cause, entry.legit, entry.avoidable_tokens) == ("history_edit", False, 3400 - 2000)
-
-
-def test_a_session_that_names_no_conversation_is_evidence_of_another_conversation():
-    """The same request with no session id: another conversation, whose own previous turn is not at
-    hand. No change is claimed, no detail, no "first changed" block, no lifetime evidence."""
-    proxy, entry = rewritten_history({})
-    assert (entry.cause, entry.legit, entry.avoidable_tokens) == ("none", None, 0)   # read 2,000 of its 3,500
-    assert "the session names no conversation" in entry.evidence and "judged by its own read" in entry.evidence
-    assert entry.detail is None and entry.divergence_role is None and entry.divergence_index is None
-    assert lifetime_rows(proxy)[-1] is None
+    assert "judged by its own read" not in entry.evidence and entry.divergence_role == "messages"
 
 
 def test_an_edited_opening_is_an_edit_even_where_conversations_mix():
     """The first message differs and every message after it is the compared turn's: one
-    conversation whose opening was edited, not another conversation."""
+    conversation whose opening was edited."""
     proxy = scripted([claude(write=3000, fresh=0), claude(read=3000, write=400, fresh=0), claude(read=2000, write=1800, fresh=0)])
     turn = lambda msgs: {"model": OPUS, "max_tokens": 9, "system": marked(), "messages": last_marked(msgs)}  # noqa: E731
     proxy.handle("anthropic", turn([U1]), {})
@@ -709,50 +732,35 @@ def test_an_edited_opening_is_an_edit_even_where_conversations_mix():
     assert (entry.cause, entry.legit, entry.avoidable_tokens) == ("history_edit", False, 3400 - 2000)
 
 
-def test_a_crowded_lane_is_evidence_only_while_its_conversations_are_recent():
-    """Eight conversations in a named session within the hour: a request that matches none of them
-    may be one the lane dropped. Eight openings two hours ago are not evidence of that now."""
-    _, crowded = rewritten_history(S, before=LANE_THREADS)
-    assert crowded.cause == "none" and "no longer remembered" in crowded.evidence
-    _, stale = rewritten_history(S, before=LANE_THREADS, aged=7200)
-    assert (stale.cause, stale.legit, stale.avoidable_tokens) == ("history_edit", False, 1400)
-    _, roomy = rewritten_history(S, before=LANE_THREADS - 2)
-    assert roomy.cause == "history_edit"
-
-
 def test_in_a_named_session_a_single_message_unlike_the_latest_turn_is_still_an_edit():
-    """Only a request of several messages is taken for another conversation on the evidence of a
-    full lane. A single message could as well be the conversation compacted without its event, and
-    in a named session that stays reported, as on main."""
-    proxy = scripted([claude(write=3000, fresh=0)] * LANE_THREADS + [claude(read=3000, write=400, fresh=0),
-                                                                    claude(read=2000, write=1000, fresh=0)])
+    """A single message with another opening is a new conversation only in a session that names no
+    conversation. In a named one it could as well be the conversation compacted without its event,
+    and stays reported, as on main."""
+    proxy = scripted([claude(write=3000, fresh=0), claude(read=3000, write=400, fresh=0), claude(read=2000, write=1000, fresh=0)])
     turn = lambda msgs: {"model": OPUS, "max_tokens": 9, "system": marked(), "messages": last_marked(msgs)}  # noqa: E731
-    for i in range(LANE_THREADS):
-        proxy.handle("anthropic", turn([{"role": "user", "content": f"topic {i}"}]), S)
-    proxy.handle("anthropic", turn([{"role": "user", "content": "topic 7"}, A1, GO]), S)
+    proxy.handle("anthropic", turn([U1]), S)
+    proxy.handle("anthropic", turn([U1, A1, GO]), S)
     entry = proxy.handle("anthropic", turn([{"role": "user", "content": "one new message"}]), S)[1]
     assert (entry.cause, entry.legit, entry.avoidable_tokens) == ("history_edit", False, 1000)
 
 
 def test_no_detail_and_no_lifetime_evidence_on_a_row_judged_by_its_own_read():
-    """A conversation the lane does not remember, on OpenAI: the compared turn is another
-    conversation's, so its prompt_cache_key and its timing say nothing about this one. Such a row
-    got "prompt_cache_key differs from the previous turn's", and counted as evidence of how long
-    the cache lasts."""
+    """An earlier point of its conversation, on OpenAI: it was not compared with the turn at hand,
+    so that turn's prompt_cache_key and timing say nothing about it. No detail ("prompt_cache_key
+    differs from the previous turn's"), and no evidence of how long the cache lasts, hit or not."""
     system = {"role": "system", "content": "You are a support agent. " * 300}
-    conv = lambda who, n: [system, {"role": "user", "content": f"question from {who}"}] + [  # noqa: E731
-        m for i in range(1, n) for m in ({"role": "assistant", "content": f"answer {who}.{i}"},
-                                         {"role": "user", "content": f"follow-up {who}.{i}"})]
+    conv = lambda n: [system, {"role": "user", "content": "a question"}] + [  # noqa: E731
+        m for i in range(1, n) for m in ({"role": "assistant", "content": f"answer {i}"}, {"role": "user", "content": f"follow-up {i}"})]
     for read, cause in ((0, "unknown"), (1920, "none")):
-        proxy = scripted([gpt(2000, 0), gpt(2100, 1920), gpt(2200, read)])
-        send = lambda who, n: proxy.handle("openai", {"model": "gpt-5.6-terra", "prompt_cache_key": f"key-{who}",  # noqa: E731
-                                                      "messages": conv(who, n)}, {})[1]
-        send("a", 1), send("a", 2)
-        idle(proxy, 900, session="default")
-        entry = send("b", 3)   # b's earlier turns went through another edge, or before this collector started
+        proxy = scripted([gpt(2000, 0), gpt(2100, 1920), gpt(2000, read)])
+        send = lambda n, key: proxy.handle("openai", {"model": "gpt-5.6-terra", "prompt_cache_key": key,  # noqa: E731
+                                                      "messages": conv(n)}, S)[1]
+        send(1, "key-a"), send(2, "key-a")
+        idle(proxy, 900)
+        entry = send(1, "key-b")   # the first turn again, under another cache key
         assert (entry.cause, entry.detail, entry.legit) == (cause, None, None)
         assert "judged by its own read" in entry.evidence and "prompt_cache_key" not in entry.evidence
-        assert lifetime_rows(proxy) == [None, 1, None]   # a's hit counts; b's row, hit or not, does not
+        assert lifetime_rows(proxy) == [None, 1, None]   # the second turn's hit counts; the rewind, hit or not, does not
 
 
 def test_twelve_one_shots_with_no_session_id_are_never_unknown():
@@ -1063,10 +1071,7 @@ def test_a_late_responses_record_is_still_found_by_the_turn_that_continues_it():
     assert got[2].cause == "none" and "never saw" not in got[2].evidence
 
 
-# -- a conversation whose history is rewritten is still that conversation ------------------------
-
-AGENT = {"role": "system", "content": "You are a coding agent. " * 300}
-
+# -- a conversation whose history is rewritten is still reported -----------------------------------
 
 def trimmed(headers, system=AGENT, first=gpt(3300, 0), later=gpt(3300, 1408), turns=20, keep=6):
     """One agent that keeps only its last `keep` messages (a sliding window): every turn after the
@@ -1081,17 +1086,13 @@ def trimmed(headers, system=AGENT, first=gpt(3300, 0), later=gpt(3300, 1408), tu
 
 @pytest.mark.parametrize("headers", [{}, S])
 def test_a_sliding_window_is_a_history_edit_with_or_without_a_session_id(headers):
-    """Dropping the oldest messages shifts every block, so "the blocks after the opening match
-    position by position" took each trimmed turn for another conversation: 17 `unknown` rows and 0
-    avoidable tokens with no session id, and the same in a named session once 8 of its own rewrites
-    had "crowded" its lane. The kept messages are the compared turn's: it is that conversation, its
-    history rewritten, as on main."""
+    """Dropping the oldest messages gives every turn another opening. Each is compared with the
+    lane's latest turn, its own previous one, and is a `history_edit`, as on main. (Taken for
+    "another conversation" these were 17 `unknown` rows and 0 avoidable tokens.)"""
     proxy, rows = trimmed(headers)
     assert collections.Counter(r.cause for r in rows) == {"first_write": 1, "routing_miss": 2, "history_edit": 17}
     assert sum(r.avoidable_tokens for r in rows) == 32_164   # as on main
     assert not any("judged by its own read" in r.evidence or "another conversation" in r.evidence for r in rows)
-    (lane,) = proxy.lane_threads.values()
-    assert len(lane.threads) == 1   # one conversation, however many openings it has had
 
 
 @pytest.mark.parametrize("headers", [{}, S])
@@ -1106,7 +1107,7 @@ def test_a_trimmed_history_behind_a_large_system_prompt_is_not_a_hit(headers):
 
 @pytest.mark.parametrize("headers", [{}, S])
 @pytest.mark.parametrize("event", [False, True])
-def test_a_summary_followed_by_a_kept_tail_is_the_same_conversation(headers, event):
+def test_a_summary_followed_by_a_kept_tail_is_a_history_edit_or_a_compaction(headers, event):
     hist = [{"role": "user", "content": "task " + "detail " * 200}]
     for t in range(1, 6):
         hist += [{"role": "assistant", "content": f"step {t} " * 120}, {"role": "user", "content": f"output {t} " * 120}]
@@ -1120,25 +1121,83 @@ def test_a_summary_followed_by_a_kept_tail_is_the_same_conversation(headers, eve
         assert (entry.cause, entry.legit, entry.avoidable_tokens) == ("compaction_rewrite", True, 0)
     else:
         assert (entry.cause, entry.legit, entry.avoidable_tokens) == ("history_edit", False, 3300 - 1408)   # as on main
-    (lane,) = proxy.lane_threads.values()
-    assert len(lane.threads) == 1
 
 
-def test_one_agent_that_trims_for_twenty_turns_does_not_crowd_its_own_lane():
-    """After twenty trimmed turns in a named session the lane holds one conversation. A request that
-    shares nothing with it is then still an unannounced rewrite (`history_edit`), not "another
-    conversation" on the evidence of a full lane."""
-    proxy, _ = trimmed(S, turns=20)
-    proxy._forward = lambda *a, **kw: (200, {"id": "chatcmpl-x", "usage": gpt(3300, 1408)})
-    other = [{"role": "user", "content": "something else entirely"}, {"role": "assistant", "content": "sure"},
-             {"role": "user", "content": "carry on"}]
-    entry = proxy.handle("openai", {"model": "gpt-5.6-terra", "messages": [AGENT] + other}, S)[1]
-    assert (entry.cause, entry.legit, entry.avoidable_tokens) == ("history_edit", False, 3300 - 1408)
+def beside(others, headers, turns=12):
+    """Agent A keeps its last 6 messages; `others` agents beside it only append. One request each,
+    in turn; every request reads the system prompt and nothing more. Returns A's rows and the rest."""
+    def agent(name, keep):
+        hist = [{"role": "user", "content": f"{name} task " + "detail " * 200}]
+        for t in range(1, turns + 1):
+            yield hist[-keep:]
+            hist += [{"role": "assistant", "content": f"{name} step {t} " * 120}, {"role": "user", "content": f"{name} output {t} " * 120}]
+    agents = [agent("A", 6)] + [agent(f"B{i}", 99) for i in range(others)]
+    proxy, a, rest = scripted([gpt(3300, 1408)] * (turns * len(agents))), [], []
+    for _ in range(turns):
+        for i, messages in enumerate(agents):
+            entry = proxy.handle("openai", {"model": "gpt-5.6-terra", "messages": [AGENT] + next(messages)}, headers)[1]
+            (rest if i else a).append(entry)
+    return a, rest
 
 
-def test_repeated_compactions_with_their_event_do_not_crowd_the_lane_either():
-    """Each compaction replaces every message, so nothing recurs; sent with its event, in a lane
-    that holds that one conversation, it is still filed in that conversation's place."""
+@pytest.mark.parametrize("headers", [{}, S])
+@pytest.mark.parametrize("others", [0, 1, 8])
+def test_a_trimming_agent_beside_other_conversations_is_reported_on_every_trimmed_turn(others, headers):
+    """A trimmed turn has another opening, so it is not found by its opening and is compared with
+    the lane's latest turn, which beside other conversations is someone else's. It is a
+    `history_edit` all the same, each with the 1,892 tokens main counts: 9 trimmed turns of 12.
+    (Taken for "another conversation", they were `unknown` with 0 avoidable as soon as one other
+    conversation shared the lane.) The appending agents are compared with their own turns."""
+    a, rest = beside(others, headers)
+    assert [r.cause for r in a] == ["first_write", "routing_miss", "routing_miss"] + ["history_edit"] * 9
+    assert sum(r.avoidable_tokens for r in a) == 17_028 and {r.avoidable_tokens for r in a[3:]} == {1892}
+    assert {r.cause for r in rest} <= {"first_write", "routing_miss"} and sum(r.avoidable_tokens for r in rest) == 0
+
+
+@pytest.mark.parametrize("headers", [{}, S])
+def test_conversations_that_share_messages_and_one_first_seen_late_are_as_on_main(headers):
+    """Four conversations, each `[document, "Understood.", the same instruction, ...]`, all full
+    hits; the fourth is first seen at its second turn. A rule that filed a rewrite in the compared
+    turn's place let the late one take another's thread: 3 `history_edit` rows where main has 1.
+    Filing is main's again: the rows are main's (the first turns of the second and third
+    conversation read as edits of the one before, the known limit of a lane without ids for
+    conversations that open with several messages), and no later turn is blamed."""
+    def conv(i, n):
+        msgs = [{"role": "user", "content": f"document {i} " * 100}, {"role": "assistant", "content": "Understood."},
+                {"role": "user", "content": "Now summarise the document in three sentences."}]
+        for k in range(1, n):
+            msgs += [{"role": "assistant", "content": f"summary {i}.{k} " * 40}, {"role": "user", "content": "Shorter, please."}]
+        return msgs
+    order = [(0, 1), (1, 1), (2, 1), (3, 2), (0, 2), (1, 2), (2, 2), (3, 3), (0, 3), (1, 3), (2, 3), (3, 4)]
+    size = lambda i, n: 2300 + 250 * (n - 1) + 7 * i  # noqa: E731
+    usages, seen = [], set()
+    for i, n in order:
+        read = size(i, n - 1) if (i, n - 1) in seen or (i, n) == (3, 2) else 1920 if seen else 0
+        usages.append(gpt(size(i, n), read // 128 * 128))
+        seen.add((i, n))
+    proxy = scripted(usages)
+    rows = [proxy.handle("openai", {"model": "gpt-5.6-terra", "messages": [AGENT] + conv(i, n)}, headers)[1] for i, n in order]
+    assert [r.cause for r in rows] == ["first_write", "history_edit", "history_edit"] + ["none"] * 9   # as on main
+    assert sum(r.avoidable_tokens for r in rows) == 767
+
+
+def test_a_compaction_event_is_a_compaction_where_a_new_conversation_would_be_read():
+    """After a single-message request, or as a single message with no session id, another opening
+    is a new conversation; with a compaction event it is the compaction it says it is."""
+    for headers, first, second in (
+            (S, [{"role": "user", "content": "one question"}],
+             [{"role": "user", "content": "Summary of the question so far."}, {"role": "assistant", "content": "noted"}, {"role": "user", "content": "go on"}]),
+            ({}, [{"role": "user", "content": "a task"}, {"role": "assistant", "content": "working"}, {"role": "user", "content": "and?"}],
+             [{"role": "user", "content": "Summary of the task so far, in one message."}])):
+        for event, cause in ((True, "compaction_rewrite"), (False, "first_write")):
+            proxy = scripted([gpt(3300, 0), gpt(3300, 0)])
+            proxy.handle("openai", {"model": "gpt-5.6-terra", "messages": [AGENT] + first}, headers)
+            entry = proxy.handle("openai", {"model": "gpt-5.6-terra", "messages": [AGENT] + second,
+                                            **({"prefixwise_compaction_event": True} if event else {})}, headers)[1]
+            assert entry.cause == cause
+
+
+def test_repeated_compactions_with_their_event_are_each_a_compaction():
     proxy = scripted([gpt(3300, 0)] + [gpt(3300, 1408)] * 10)
     for n in range(10):
         msgs = [{"role": "user", "content": f"Summary number {n} of the work so far."}, {"role": "assistant", "content": f"noted {n}"},
@@ -1146,14 +1205,12 @@ def test_repeated_compactions_with_their_event_do_not_crowd_the_lane_either():
         entry = proxy.handle("openai", {"model": "gpt-5.6-terra", "messages": [AGENT] + msgs,
                                         **({"prefixwise_compaction_event": True} if n else {})}, S)[1]
         assert entry.cause == ("compaction_rewrite" if n else "first_write")
-    (lane,) = proxy.lane_threads.values()
-    assert len(lane.threads) == 1
 
 
 def test_a_compaction_event_in_a_lane_of_two_conversations_takes_nobodys_place():
     """Agent a compacts (a summary alone, with its event) while the lane's latest turn is agent
-    b's. It is a compaction whatever it was compared with, but it is not known to be b's: b's turn
-    stays in the lane, and b's next turn is compared with it."""
+    b's. It is a compaction whatever it was compared with; b's turn stays in the lane, and b's
+    next turn is compared with it."""
     proxy = scripted([gpt(3000, 0), gpt(3000, 1408), gpt(3300, 2944), gpt(2500, 1408), gpt(3600, 3200)])
     send = lambda msgs, **kw: proxy.handle("openai", {"model": "gpt-5.6-terra", "messages": [AGENT] + msgs, **kw}, S)[1]  # noqa: E731
     a = [{"role": "user", "content": "task for agent a " * 50}]
@@ -1209,9 +1266,8 @@ def test_another_conversations_first_turn_does_not_take_this_ones_place_in_the_l
 @pytest.mark.parametrize("headers", [S, {}])
 def test_two_conversations_that_share_a_message_do_not_take_each_others_place(headers):
     """Two users, each first seen in mid-conversation (after a restart), who both once answered
-    "yes". One shared message is not the end of the other's turn: each stays filed under its own
-    opening and is compared with its own previous turn, as on main (every row a hit). Filing by any
-    recurring message made each next turn a `history_edit` of the other's."""
+    "yes". Each is filed under its own opening and compared with its own previous turn, as on main
+    (every row a hit)."""
     system = {"role": "system", "content": "You are a support agent. " * 300}
 
     def conv(who, n):
@@ -1229,28 +1285,13 @@ def test_two_conversations_that_share_a_message_do_not_take_each_others_place(he
     assert len(lane.threads) == 2
 
 
-def test_a_full_lane_is_described_by_what_it_holds():
-    _, entry = rewritten_history(S, before=LANE_THREADS)
-    assert f"has turns under {LANE_THREADS} different opening messages on this model in the last hour" in entry.evidence
-    assert "holds" not in entry.evidence and "none of its messages is the compared turn's" in entry.evidence
-
-
-def test_a_forgotten_conversations_turn_after_a_one_shot_is_judged_by_its_own_read():
-    """The lane's latest turn is a single message (another conversation's first). A request of
-    several messages that shares none with it is not that conversation's "new conversation" with
-    "only the tools and system prompt" to reuse: its own previous turn is elsewhere."""
-    proxy = scripted([claude(write=3000, fresh=0)] * (LANE_THREADS + 1) + [claude(read=0, write=3400, fresh=0)])
-    turn = lambda i, more=(): {"model": OPUS, "max_tokens": 9, "system": marked(),  # noqa: E731
-                               "messages": last_marked([{"role": "user", "content": f"topic {i}"}, *more])}
-    for i in range(LANE_THREADS + 1):
-        proxy.handle("anthropic", turn(i), S)
-    entry = proxy.handle("anthropic", turn(0, [A1, GO]), S)[1]   # conversation 0 was dropped; the latest is a one-shot
-    assert (entry.cause, entry.legit, entry.avoidable_tokens) == ("unknown", None, 0)
-    assert "judged by its own read" in entry.evidence and "no longer remembered" in entry.evidence
-    # In a named session with room, the same request after a one-shot is still a new conversation.
-    proxy = scripted([claude(write=3000, fresh=0), claude(read=2000, write=1400, fresh=0)])
-    proxy.handle("anthropic", turn(1), S)
-    assert proxy.handle("anthropic", turn(0, [A1, GO]), S)[1].cause == "none"
+def test_a_trimming_agent_adds_a_remembered_conversation_with_every_trimmed_turn():
+    """A conversation is known by its opening message, and every trimmed turn has a new one: the
+    lane files each as one more conversation (the known cost of trimming: 64 trimmed turns fill a
+    lane)."""
+    proxy, _ = trimmed(S, turns=12)
+    (lane,) = proxy.lane_threads.values()
+    assert len(lane.threads) == 10   # the first three turns share an opening; each of the nine after has its own
 
 
 # -- 6, 7. rules that must look at what was, or could still be, in the cache ----------------------
@@ -1453,48 +1494,120 @@ def test_the_true_below_minimum_case_says_how_large_the_marked_part_is():
 
 
 def test_the_marked_part_is_weighed_against_twice_the_minimum():
-    """At twice the minimum or more by the estimate, the markers were not honoured; under that, or
-    with no estimate, the weaker claim that fits. None of them is waste or scored against the
-    provider's reason."""
+    """The estimate is a pair, at least and at most. At least twice the minimum: the markers were
+    not honoured. At most under twice the minimum: too small, or too close to tell. With no
+    estimate, or bounds on either side of that line, neither is claimed. None of them is waste."""
     body = {"model": OPUS, "system": SYS, "messages": [U1]}
     grown = blocks_of({**body, "messages": [U1, A1, GO]})
-    verdict = lambda marked_tokens: classify(  # noqa: E731
-        snap(blocks_of(body), 3000, 0, write_reported=True, marked_tokens=marked_tokens), snap(grown, 3100, 0))
-    assert verdict(1023).cause is MissCause.BELOW_MIN_PREFIX and "about 1,023 tokens" in verdict(1023).evidence
-    at = verdict(1024)   # Opus 5.5: minimum 512
-    assert at.cause is MissCause.UNKNOWN and at.legit is None and at.score is False and "not honoured" in at.evidence
-    blind = verdict(None)   # a record with no marker positions: no estimate, so no claim that markers were not honoured
-    assert blind.cause is MissCause.BELOW_MIN_PREFIX and "of a size that is not known" in blind.evidence
+    verdict = lambda marked: classify(  # noqa: E731
+        snap(blocks_of(body), 3000, 0, write_reported=True, marked_tokens=marked), snap(grown, 3100, 0))
+    small = verdict((1023, 1023))   # Opus 5.5: minimum 512
+    assert small.cause is MissCause.BELOW_MIN_PREFIX and "about 1,023 tokens" in small.evidence and "or not clearly above it" in small.evidence
+    at = verdict((1024, 1024))
+    assert at.cause is MissCause.UNKNOWN and at.legit is None and at.score is False
+    assert "on about 1,024 tokens" in at.evidence and "not honoured" in at.evidence
+    assert "on at least about 1,024 tokens" in verdict((1024, 3000)).evidence
+    assert "at most about 1,023 tokens" in verdict((0, 1023)).evidence
+    for unsure in (None, (500, 3000)):   # no estimate, or one that does not decide
+        blind = verdict(unsure)
+        assert blind.cause is MissCause.BELOW_MIN_PREFIX and "not honoured" not in blind.evidence
+        assert ("the part its markers covered, whose size is not known, was below the model's minimum cacheable size "
+                "(512 tokens), or was not cached") in blind.evidence
 
 
-def test_the_marked_share_of_a_request():
-    """The estimate behind those verdicts: the blocks up to the last marker, as a share of the
-    request's bytes."""
-    from prefixwise.details import body_facts, marked_share
+def test_the_tokens_a_request_marked():
+    """The estimate behind those verdicts: everything up to and including the block that carries
+    the last marker, as a share of the request's bytes, times its prompt tokens. Exact in bytes for
+    a marker on a tool or on the last system block; only bounds elsewhere."""
+    from prefixwise.details import body_facts, marked_tokens
     tool = lambda name, mark=False: {"name": name, "description": "d" * 400, "input_schema": {"type": "object"},  # noqa: E731
                                      **({"cache_control": {"type": "ephemeral"}} if mark else {})}
     text = lambda n, mark=False: {"type": "text", "text": "x" * n, **({"cache_control": {"type": "ephemeral"}} if mark else {})}  # noqa: E731
-    share = lambda body: marked_share(body_facts("anthropic", body), blocks_of(body))  # noqa: E731
     msgs = [{"role": "user", "content": "y" * 4000}]
-    assert share({"model": OPUS, "system": "x" * 1000, "messages": msgs}) is None                       # no marker
-    on_system = share({"model": OPUS, "system": [text(1000, True)], "messages": msgs})
-    assert 0.15 < on_system < 0.25
-    on_first_tool = share({"model": OPUS, "tools": [tool("a", True), tool("b")], "system": "x" * 1000, "messages": msgs})
-    on_last_tool = share({"model": OPUS, "tools": [tool("a"), tool("b", True)], "system": "x" * 1000, "messages": msgs})
-    assert 0 < on_first_tool < on_last_tool < 0.25
-    half_system = share({"model": OPUS, "system": [text(500, True), text(500)], "messages": msgs})
-    assert 0.05 < half_system < on_system
-    in_messages = share({"model": OPUS, "system": "x" * 1000, "messages": [
-        {"role": "user", "content": [text(2000, True)]}, {"role": "assistant", "content": "z" * 2000}, {"role": "user", "content": "go"}]})
-    assert on_system < in_messages < 1
-    assert share({"model": OPUS, "system": "x" * 1000, "messages": [{"role": "user", "content": [text(4000, True)]}]}) == 1.0
-    # A marker on the system prompt covers the tools before it too: exactly their bytes and its own.
+
+    def marked_of(body, prompt=2000):
+        return marked_tokens(body_facts("anthropic", body), blocks_of(body), prompt)
+
+    def sizes(body):
+        out = collections.Counter()
+        for b in blocks_of(body):
+            out[b.role] += b.byte_length
+        return out, sum(out.values())
+
+    assert marked_of({"model": OPUS, "system": "x" * 1000, "messages": msgs}) is None                 # no marker
     body = {"model": OPUS, "tools": [tool("a"), tool("b")], "system": [text(1000, True)], "messages": msgs}
-    sizes = collections.Counter()
-    for b in blocks_of(body):
-        sizes[b.role] += b.byte_length
-    assert share(body) == pytest.approx((sizes["tools"] + sizes["system"]) / sum(sizes.values()))
-    assert sizes["tools"] > 0 and share(body) > on_system
+    by_role, total = sizes(body)
+    exact = int(2000 * (by_role["tools"] + by_role["system"]) / total)     # the tools come before the system prompt
+    assert marked_of(body) == (exact, exact) and by_role["tools"] > 0
+    assert marked_of(body, prompt=0) is None                                                           # no usage
+    # The last marker counts, not the first: one on the first tool, one on the system prompt.
+    both = {**body, "tools": [tool("a", True), tool("b")]}
+    by_role, total = sizes(both)
+    assert marked_of(both) == (int(2000 * (by_role["tools"] + by_role["system"]) / total),) * 2
+    first_tool = {"model": OPUS, "tools": [tool("a", True), tool("b")], "system": "x" * 1000, "messages": msgs}
+    last_tool = {"model": OPUS, "tools": [tool("a"), tool("b", True)], "system": "x" * 1000, "messages": msgs}
+    one = blocks_of(first_tool)[0].byte_length                                 # a marker on a tool covers it and those before
+    by_role, total = sizes(first_tool)
+    assert marked_of(first_tool) == (int(2000 * one / total),) * 2 and one > 0
+    by_role, total = sizes(last_tool)
+    assert marked_of(last_tool) == (int(2000 * by_role["tools"] / total),) * 2
+    # A marker on an earlier system block: between the tools alone and the tools with the whole system prompt.
+    early = {"model": OPUS, "tools": [tool("a")], "system": [text(20, True), text(4000)], "messages": msgs}
+    by_role, total = sizes(early)
+    assert marked_of(early) == (int(2000 * by_role["tools"] / total), int(2000 * (by_role["tools"] + by_role["system"]) / total))
+    # A marker inside the conversation: between tools and system, and the whole request.
+    inside = {"model": OPUS, "system": "x" * 1000, "messages": [
+        {"role": "user", "content": [text(2000, True)]}, {"role": "assistant", "content": "z" * 2000}, {"role": "user", "content": "go"}]}
+    by_role, total = sizes(inside)
+    assert marked_of(inside) == (int(2000 * by_role["system"] / total), 2000)
+    # Bytes that are not text's (an image in base64): no estimate.
+    picture = {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "A" * 400_000}}
+    seen = {"model": OPUS, "system": [text(12_000, True)], "messages": [{"role": "user", "content": [picture, text(40)]}]}
+    assert marked_of(seen, prompt=4600) is None and marked_of(seen, prompt=200_000) is not None
+
+
+def after_nothing(system, messages, prompt, model=OPUS):
+    """A turn whose markers left nothing (0 read, 0 written), then the same conversation one turn on."""
+    proxy = scripted([claude(fresh=prompt), claude(fresh=prompt + 100)])
+    proxy.handle("anthropic", {"model": model, "max_tokens": 9, "system": system, "messages": messages}, S)
+    return proxy.handle("anthropic", {"model": model, "max_tokens": 9, "system": system, "messages": messages + [A1, GO]}, S)[1]
+
+
+def test_a_marker_on_a_small_first_block_of_the_system_prompt_is_not_called_unhonoured():
+    """The marker sits on a 20-token block; a 4,000-token block follows it, unmarked. Placing the
+    marker by its position among the system prompt's blocks made that "about 2,000 tokens, above the
+    minimum: its markers were not honoured". What it covered is not known from the sizes kept, so
+    neither is claimed."""
+    block = lambda text, mark=False: {"type": "text", "text": text, **({"cache_control": {"type": "ephemeral"}} if mark else {})}  # noqa: E731
+    entry = after_nothing([block("You are brief. " * 5, True), block("Reference material. " * 800)], [U1], 4100)
+    assert entry.cause == "below_min_prefix" and "not honoured" not in entry.evidence
+    assert "whose size is not known, was below the model's minimum cacheable size (512 tokens), or was not cached" in entry.evidence
+
+
+def test_the_last_marker_is_the_one_that_counts():
+    """A marker on the first tool and one on the system prompt: the marked part ends at the system
+    prompt, 2,000 tokens in, not at the tool."""
+    tools = [{"name": "search", "description": "search things", "input_schema": {"type": "object", "properties": {}},
+              "cache_control": {"type": "ephemeral"}}]
+    proxy = scripted([claude(fresh=6000), claude(fresh=6100)])
+    body = lambda msgs: {"model": OPUS, "max_tokens": 9, "tools": tools, "system": marked(), "messages": msgs}  # noqa: E731
+    context = [{"role": "user", "content": "context " * 4000}]
+    proxy.handle("anthropic", body(context), S)
+    entry = proxy.handle("anthropic", body(context + [A1, GO]), S)[1]
+    assert entry.cause == "unknown" and "Its markers were not honoured" in entry.evidence
+
+
+def test_with_an_image_in_the_prompt_the_size_of_the_marked_part_is_not_estimated():
+    """A 3,000-token marked system prompt and a 400 kB image: by bytes the system prompt is 3% of the
+    request, "about 150 tokens, below the minimum". Bytes of base64 say nothing about tokens, so
+    there is no estimate and the wording claims neither."""
+    picture = {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "A" * 400_000}}
+    look = [{"role": "user", "content": [picture, {"type": "text", "text": "What is in this picture?"}]}]
+    entry = after_nothing(marked(SYS + SYS[:5000]), look, 4600)
+    assert entry.cause == "below_min_prefix" and "about" not in entry.evidence
+    assert "whose size is not known, was below the model's minimum cacheable size (512 tokens), or was not cached" in entry.evidence
+    words = after_nothing(marked(SYS + SYS[:5000]), [{"role": "user", "content": "What is in this text? " * 400}], 4600)
+    assert words.cause == "unknown" and "not honoured" in words.evidence   # the same prompt in text: an estimate, far above the minimum
 
 
 def test_a_whole_prompt_marker_that_wrote_nothing_is_not_called_below_the_minimum():

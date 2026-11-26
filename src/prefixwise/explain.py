@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .classifier import RequestSnapshot, classify, first_divergence
-from .details import body_facts, last_block_marked, marked_share, shared_breakpoint
+from .details import body_facts, last_block_marked, marked_tokens, shared_breakpoint
 from .fingerprint import BlockFingerprint, Fingerprinter
 from .pricing import breakdown, cache_reported, write_reported
 from .records import PARAM_KEYS as _PARAM_KEYS, param_fingerprint
@@ -120,8 +120,7 @@ def _snapshot(turn: Turn, provider: str, fp: Fingerprinter) -> RequestSnapshot:
         # divergence in the request itself can explain a miss.
         prompt, cached, min_prefix = 1, 1, 0
     facts = body_facts(provider, turn.body)
-    share = marked_share(facts, blocks)
-    marked = int(prompt * share) if share is not None and turn.usage is not None and prompt > 0 else None
+    marked = marked_tokens(facts, blocks, prompt) if turn.usage is not None else None
     return RequestSnapshot(model=str(turn.body.get("model", "unknown")), provider=provider,
                            blocks=blocks, prompt_tokens=prompt, cached_tokens=cached, cache_written=written,
                            gap_seconds=turn.gap_seconds, compaction_event=turn.compaction_event,

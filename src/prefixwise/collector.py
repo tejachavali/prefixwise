@@ -19,9 +19,9 @@ import threading
 import time
 from collections import OrderedDict
 
-from .classifier import (MAX_ANTHROPIC_TTL_SECONDS, REWRITTEN, UNSEEN_PARENT, Classification, MissCause,
-                         RequestSnapshot, another_opening, classify, first_divergence, keeps_tail, served_all)
-from .details import Facts, detail_for, last_block_marked, marked_share, shared_breakpoint
+from .classifier import (UNSEEN_PARENT, Classification, MissCause, RequestSnapshot, classify, first_divergence,
+                         served_all)
+from .details import Facts, detail_for, last_block_marked, marked_tokens, shared_breakpoint
 from .diagnostics import AgreementScorer
 from .ledger import Ledger, LedgerEntry, avoidable_for_turn, held_for_turn, unread_write
 from .lifetime import LEDGER_SQL, LifetimeTracker
@@ -39,8 +39,12 @@ MAX_BATCH = 1000
 # proxy serving many short sessions stays bounded in memory.
 MAX_SESSIONS = int(os.environ.get("PREFIXWISE_MAX_SESSIONS", "10000"))
 # Conversations remembered per (session, model) lane: parallel subagents sharing one session
-# are each compared with their own previous turn.
-LANE_THREADS = max(1, int(os.environ.get("PREFIXWISE_LANE_THREADS", "8")))
+# are each compared with their own previous turn. Each remembered conversation holds its latest
+# turn's fingerprints and facts, about 0.75 kB per tool, system block and message (measured: 37 kB
+# for a 20-message turn with 20 tools, 780 kB for a 1,000-message one). A conversation is known
+# by its opening message, so every request with an opening not seen before adds one: the 65th
+# drops the least recently used.
+LANE_THREADS = max(1, int(os.environ.get("PREFIXWISE_LANE_THREADS", "64")))
 _CONVERSATION = ("messages", "tool_results", "user")
 
 
@@ -338,11 +342,6 @@ class Collector:
             earlier = None if stitched else _earlier_point(prev.blocks, fps)
             parent_sent = getattr(prev, "sent_at", None)
             late = earlier is not None and bool(parent_sent) and started < parent_sent - CLOCK_SKEW
-            # A lane full of recent conversations: one it does not remember may have been dropped to
-            # make room. Only conversations with a turn in the last hour count, so a lane that saw
-            # many openings long ago is not crowded now.
-            recent = sum(1 for thread in state.threads.values() if started - thread[1] <= MAX_ANTHROPIC_TTL_SECONDS)
-            crowded = LANE_THREADS if recent >= LANE_THREADS else 0
         else:
             # First turn on this model: FIRST_WRITE for a new session, else
             # MODEL_SWITCH (the classifier compares models first).
@@ -350,7 +349,7 @@ class Collector:
             gap_seconds = max(0.0, started - self.last_seen[session_id]) if session_id in self.last_seen else None
             cache_age = None  # another model's turn: no cache entry of this model to age
             concurrent = late = False
-            earlier, parent_sent, crowded = None, None, 0
+            earlier, parent_sent = None, None
         unknown_parent = concurrent_verdict = False
         lifetime_evidence = None  # set below when this turn shows how long the cache held (prefixwise.lifetime)
         if stitched:
@@ -384,26 +383,10 @@ class Collector:
         curr.sent_at = started
         curr.new_thread, curr.interleaved = new_thread, interleaved
         curr.shared_session = rec.session_shared or rec.session_is_user
-        curr.lane_crowded = crowded
         facts = rec.facts
         curr.last_block_marked = last_block_marked(facts)
-        share = marked_share(facts, rec.blocks)
-        curr.marked_tokens = int(prompt_tokens * share) if share is not None and prompt_tokens > 0 else None
+        curr.marked_tokens = marked_tokens(facts, rec.blocks, prompt_tokens)
         curr.shared_breakpoint = not stitched and state is not None and shared_breakpoint(parent_facts, facts)
-        # The same conversation with another opening message (a sliding window dropped the oldest
-        # messages, a summary replaced them, the first message was edited): it was compared with the
-        # lane's latest turn, and the end of that turn is still in it, so it goes on from that turn.
-        # It is filed in that turn's place, under its new opening, and does not add a remembered
-        # conversation: a lane is crowded by conversations, not by one conversation's rewrites. (A
-        # compaction sent with its event counts the same way while the lane holds that one
-        # conversation.) One recurring message is not enough for this: two conversations that both
-        # hold a "yes" would take each other's place turn after turn.
-        # (Another opening means its own turn was not remembered, so the compared turn is the lane's
-        # latest. A subagent of another type, with its own system prompt, never takes a place.)
-        moved_opening = bool(
-            state is not None and not stitched and not new_thread
-            and another_opening(prev, curr) == REWRITTEN
-            and (keeps_tail(prev.blocks, fps) or (rec.compaction_event and prior_threads <= 1)))
         if rec.engine_verdict is not None:
             verdict = rec.engine_verdict
             curr.evicted_blocks, curr.resident_blocks = verdict[0], verdict[1]
@@ -434,7 +417,9 @@ class Collector:
         if unknown_parent:
             result = Classification(MissCause.UNKNOWN, None, UNSEEN_PARENT, native_reason=native_reason)
         elif early is not None and early.own_read:
-            result = early  # tools and system as they were: judged by its own read
+            # Tools and system as they were: judged by its own read. (Nothing was compared, so the
+            # row says nothing of how long the cache lasts: no lifetime evidence.)
+            result = early
         elif (concurrent and not stitched and not new_thread
               and curr.cached_tokens < 0.5 * (min(prev.prompt_tokens, prompt_tokens) if prev.prompt_tokens
                                              else prompt_tokens)):
@@ -455,8 +440,6 @@ class Collector:
             result = early if early is not None else classify(prev, curr, native_reason=native_reason)
             if learn and prev is not None and gap_seconds is not None and prompt_tokens > 0 and curr.cache_reported:
                 lifetime_evidence = (1 if result.cause is MissCause.NONE else 0 if result.cold_unchanged else None)
-            if result.own_read:
-                lifetime_evidence = None  # nothing was compared: it says nothing of how long the cache lasts
             if interleaved:
                 result.evidence = (f"{result.evidence}; compared with this conversation's last turn "
                                    "(another conversation in this session came between)")
@@ -563,8 +546,6 @@ class Collector:
             self.last_snapshot[session_id] = curr
             if state is None:
                 state = _Lane()
-            if moved_opening:
-                state.threads.pop(prior_latest, None)
             state.threads[identity[0]] = (curr, now, facts, response_id)
             state.threads.move_to_end(identity[0])
             while len(state.threads) > LANE_THREADS:

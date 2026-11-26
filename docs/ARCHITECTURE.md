@@ -209,20 +209,18 @@ The classifier (`classify(prev, curr)`) compares a request with **the previous t
 conversation**: the same session and model (a lane, so a side call to a small model never masks a
 cause on the main thread), and the same thread within it. A thread is known by its opening
 message; the proxy remembers each conversation's latest turn (up to `PREFIXWISE_LANE_THREADS`,
-default 8, per lane; one conversation costs one snapshot, as before), so parallel subagents
+default 64, per lane; one conversation costs one snapshot, about 0.75 kB per message), so parallel subagents
 interleaving in one session are each compared with their own last turn, however long the others
 ran in between, and the provider's diagnostics are chained to that same turn (a Responses turn
 sent with `previous_response_id` belongs to its parent's conversation and is compared with the turn
-it names). Known limits: conversations that open with the identical message are treated as one,
-and past 8 conversations in a lane the least recently used one is forgotten. A request that has no
-turn of its own to be compared with is not blamed for a change in its conversation: an earlier
-point of its own conversation (its messages open the compared turn's: a record delivered late, a
-rewind), or, where the session names no conversation or the lane is full of recent ones, a request
-of several messages none of which is the compared turn's. It is judged by its own read (`none` if
-at least half of its prompt came from the cache, else `unknown`); a change in its tools or system
-prompt is still named. A request that keeps any message of the compared turn under another opening
-(a sliding window, a summary and a kept tail) is that conversation with its history rewritten, and
-takes its place in the lane. The specification
+it names). Known limits: conversations that open with the identical message are treated as one;
+past 64 conversations in a lane the least recently used one is forgotten; a request whose opening
+is not remembered (a forgotten or never-seen conversation, a trimmed history) is compared with the
+lane's latest turn, and each such request adds a remembered conversation. An earlier point of its
+own conversation (its messages open the compared turn's: a record delivered late, a rewind) is not
+blamed for a change in its conversation: it is judged by its own read (`none` if at least half of
+its prompt came from the cache, else `unknown`); a change in its tools or system prompt is still
+named. The specification
 is [ALGORITHM.md](ALGORITHM.md); this is its outline. The
 first rule that fires wins; later ones are kept as secondary causes. In order:
 
@@ -239,7 +237,7 @@ first rule that fires wins; later ones are kept as secondary causes. In order:
    - system: `volatile_system` if only a date, time or id changed (masked hashes equal), else
      `system_edit`;
    - messages: `history_edit`, or `compaction_rewrite` when the client signalled a compaction.
-     Another opening message with no compaction event is another conversation, not an edit, when
+     Another opening message with no compaction event is a new conversation, not an edit, when
      the previous request was a single message, or this one is a single message in a session that
      names no conversation: it is judged by what the cache read (`none`, or `first_write`; on
      Anthropic, when the previous request cached the tools and system prompt at a marker this one

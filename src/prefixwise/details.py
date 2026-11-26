@@ -285,13 +285,23 @@ def last_block_marked(f: Facts) -> bool:
     return bool(f.breakpoints and f.n_pos and max(f.breakpoints) == f.n_pos - 1)
 
 
-def marked_share(f: Facts, blocks) -> float | None:
-    """The share of a request's bytes that its cache_control covered: the blocks (fingerprints, in
-    Anthropic's order: tools, system, conversation) up to its last marker. Exact for a marker on a
-    tool or on the last block of the system prompt; a marker on an earlier system block, or inside
-    the conversation, is placed by its position among the system prompt's blocks, or among the
-    conversation's content blocks (the sizes of those are not kept one by one). An estimate either
-    way, since tokens are not bytes. None with no marker or no blocks."""
+TEXT_BYTES_PER_TOKEN = 16  # text and JSON run at 2 to 8 bytes a token; an image or a PDF at hundreds
+
+
+def marked_tokens(f: Facts, blocks, prompt_tokens: int) -> tuple[int, int] | None:
+    """(at least, at most): how many tokens this request's cache_control covered, that is everything
+    up to and including the block that carries its LAST marker, in Anthropic's order (tools, system,
+    conversation). Estimated as that part's share of the request's bytes (the fingerprints'
+    sizes) times its prompt tokens. The two numbers are equal where the bytes are known: a marker
+    on a tool, or on the last block of the system prompt. Elsewhere only bounds are: the system
+    prompt is one fingerprint and a message's content blocks are not sized one by one, so a marker
+    on an earlier system block covers between the tools alone and the tools with the whole system
+    prompt, and one inside the conversation between the tools and system prompt and the whole
+    request.
+
+    None, no estimate, with no marker, no usage, or a request whose bytes are not text's: over
+    TEXT_BYTES_PER_TOKEN bytes a token means images or documents (base64), whose size in bytes says
+    nothing about their tokens."""
     if not f.breakpoints or not f.n_pos:
         return None
     last = max(f.breakpoints)
@@ -299,16 +309,17 @@ def marked_share(f: Facts, blocks) -> float | None:
     system = sum(b.byte_length for b in blocks if b.role in ("system", "system_dynamic"))
     conversation = sum(b.byte_length for b in blocks if b.role not in ("tools", "system", "system_dynamic"))
     total = sum(tools) + system + conversation
-    if total <= 0:
+    if total <= 0 or total > TEXT_BYTES_PER_TOKEN * prompt_tokens:  # (no usage, 0 tokens, is no estimate either)
         return None
-    part = lambda done, of: min(1.0, max(0.0, done / of)) if of > 0 else 1.0  # noqa: E731
     if last < len(tools):
-        covered = sum(tools[:last + 1])
+        low = high = sum(tools[:last + 1])
+    elif last == f.sys_end - 1:
+        low = high = sum(tools) + system
     elif last < f.sys_end:
-        covered = sum(tools) + system * part(last - len(tools) + 1, f.sys_end - len(tools))
+        low, high = sum(tools), sum(tools) + system
     else:
-        covered = sum(tools) + system + conversation * part(last - f.sys_end + 1, f.n_pos - f.sys_end)
-    return covered / total
+        low, high = sum(tools) + system, total
+    return int(prompt_tokens * low / total), int(prompt_tokens * high / total)
 
 
 def shared_breakpoint(prev: Facts | None, curr: Facts) -> bool:

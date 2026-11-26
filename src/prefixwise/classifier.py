@@ -150,10 +150,6 @@ class RequestSnapshot:
     # The session names no single conversation (no conversation id came with the request): it
     # holds every conversation that named none, so a new opening message is a new conversation.
     shared_session: bool = False
-    # The lane is full of recent conversations: it remembers this many (its limit), each with a
-    # turn within the last hour, so a conversation it does not remember may have been dropped to
-    # make room. 0 when it is not full.
-    lane_crowded: int = 0
     # The previous turn marked a block inside (or at the end of) tools+system, and this request
     # marks the same block: what that turn cached up to there, this request could read.
     shared_breakpoint: bool = False
@@ -162,10 +158,11 @@ class RequestSnapshot:
     write_reported: bool = False
     # cache_control on the request's last block: the marked prefix is the whole prompt.
     last_block_marked: bool = False
-    # An estimate of the tokens this request's cache_control covered: the blocks up to its last
-    # marker, by their share of the request's bytes, times its prompt tokens. None when it carried
-    # no marker or the share is not known.
-    marked_tokens: int | None = None
+    # (at least, at most): an estimate of the tokens this request's cache_control covered, that is
+    # everything up to and including the block with its last marker, by that part's share of the
+    # request's bytes times its prompt tokens (prefixwise.details.marked_tokens). None: no estimate
+    # (no marker, or bytes that are not text's).
+    marked_tokens: tuple[int, int] | None = None
     # False when the usage is a placeholder (offline `explain` without usage): rules that read
     # the cache's response must not fire.
     usage_known: bool = True
@@ -305,30 +302,36 @@ def _left_nothing(prev: RequestSnapshot, curr: RequestSnapshot) -> bool:
 def _after_nothing_left(prev: RequestSnapshot, curr: RequestSnapshot, secondary: list, native_reason: str | None,
                         changed: MissCause | None = None) -> Classification:
     """The verdict for a request that read nothing after a turn that left nothing (`_left_nothing`):
-    never waste, since nothing was in the cache to lose, to expire or to be missed. Why nothing was
-    there is named only as far as it is known. The previous turn's markers covered about
-    `prev.marked_tokens` tokens (an estimate from block sizes): when that is at least twice the
-    model's minimum cacheable size, the markers were not honoured and the cause is `unknown`;
-    below twice the minimum the marked part was too small to cache, or too close to the minimum for
-    an estimate to say otherwise: `below_min_prefix`. `changed`: a change this
-    request carries, which cost nothing and is kept as a secondary cause. With no estimate (a
-    record with no marker positions) it stays `below_min_prefix`, and the evidence says the size is
-    not known."""
+    never waste, since that turn left nothing in the cache to lose, to expire or to be missed. Why
+    it left nothing is named only as far as it is known, from the estimate of what its markers
+    covered (`prev.marked_tokens`, at least and at most):
+
+    - at least twice the model's minimum cacheable size: the markers were not honoured, `unknown`;
+    - at most under twice the minimum: too small to cache, or too close to the minimum for an
+      estimate to say otherwise, `below_min_prefix`;
+    - no estimate, or bounds on either side of that line: `below_min_prefix` too, in words that
+      claim neither.
+
+    `changed`: a change this request carries, which cost nothing and is kept as a secondary cause."""
     floor = _min_prefix(curr) or anthropic_min_prefix(curr.model)
-    marked = prev.marked_tokens
+    low, high = prev.marked_tokens if prev.marked_tokens is not None else (None, None)
     cost = f"; the {changed.value} after it cost nothing" if changed is not None else ""
     also = secondary + ([changed] if changed is not None else [])
-    if marked is not None and marked >= 2 * floor:
+    about = lambda n, bound: f"about {n:,}" if low == high else f"{bound} about {n:,}"  # noqa: E731
+    if low is not None and low >= 2 * floor:
         return Classification(MissCause.UNKNOWN, None,
-                              f"the previous turn carried cache_control on about {marked:,} tokens (estimated from the "
-                              f"size of its blocks), above the model's minimum cacheable size ({floor} tokens), yet "
-                              "the provider reported nothing read and nothing written, so that turn left nothing in "
-                              "the cache for this request to read. Its markers were not honoured (a gateway that "
-                              f"strips them, or a server that fills the write count with 0){cost}",
-                              also, native_reason, score=False)
-    size = (f"about {marked:,} tokens, estimated from the size of its blocks, was below the model's minimum "
-            f"cacheable size ({floor} tokens), or not clearly above it" if marked is not None else
-            f"of a size that is not known, is taken to be below the model's minimum cacheable size ({floor} tokens)")
+                              f"the previous turn carried cache_control on {about(low, 'at least')} tokens "
+                              f"(estimated from the size of its blocks), above the model's minimum cacheable size "
+                              f"({floor} tokens), yet the provider reported nothing read and nothing written, so "
+                              "that turn left nothing in the cache for this request to read. Its markers were not "
+                              f"honoured (a gateway that strips them, or a server that fills the write count with 0)"
+                              f"{cost}", also, native_reason, score=False)
+    if high is not None and high < 2 * floor:
+        size = (f"{about(high, 'at most')} tokens, estimated from the size of its blocks, was below the model's "
+                f"minimum cacheable size ({floor} tokens), or not clearly above it")
+    else:
+        size = f"was below the model's minimum cacheable size ({floor} tokens), or was not cached"
+        size = "whose size is not known, " + size
     return Classification(MissCause.BELOW_MIN_PREFIX, None,
                           "the previous turn left nothing in the cache (it carried cache_control, yet read and wrote "
                           f"0 tokens): the part its markers covered, {size}, so there was nothing to read{cost}",
@@ -472,10 +475,9 @@ def _first_change(prev: RequestSnapshot, curr: RequestSnapshot, secondary: list,
                   conversation: bool = True) -> Classification | None:
     """The cause named by the first part of the prompt that changed, or None if none did
     (a changed user turn only adds to `secondary`). notes["new_conversation"] is set when the
-    opening message differs because this is another conversation, not an edit of this one;
-    notes["foreign"] (with None returned) when it is another conversation whose own previous turn
-    is not the one at hand, and says why. Both are decided only after tools and system compared
-    equal: those are the lane's, and a change in them stands against any of its turns.
+    opening message differs because this is another conversation, not an edit of this one. That
+    is decided only after tools and system compared equal: those are the lane's, and a change in
+    them stands against any of its turns.
     `conversation=False` stops after the tools and system (an earlier point of the compared turn's
     conversation changed nothing in the conversation)."""
     prev_by_role = _blocks_by_role(prev.blocks)
@@ -518,34 +520,22 @@ def _first_change(prev: RequestSnapshot, curr: RequestSnapshot, secondary: list,
         return None
     role = pc[i].role
     if role == "messages":
-        relation = another_opening(prev, curr)
-        if relation == OTHER_CONVERSATION:
-            # Several messages, another opening, and not one message or tool result of the compared
-            # turn anywhere in it: not a rewrite of that turn's history but another conversation,
-            # whose own previous turn is not the one at hand (it was never seen, or the lane
-            # dropped it to make room).
-            if notes is not None:
-                notes["foreign"] = (
-                    "none of its messages is the compared turn's, and the session names no conversation: "
-                    "another conversation, whose own previous turn is not at hand"
-                    if curr.shared_session else
-                    "none of its messages is the compared turn's, and this session has turns under "
-                    f"{curr.lane_crowded} different opening messages on this model in the last hour, as many as "
-                    "it remembers: another conversation, whose own previous turn is no longer remembered "
-                    "(PREFIXWISE_LANE_THREADS raises the limit)")
-            return None
-        if relation == NEW_CONVERSATION:
+        p, c = prev_by_role.get("messages", []), curr_by_role.get("messages", [])
+        one_shot = len(p) == 1
+        if (not curr.compaction_event and p and c and p[0].raw != c[0].raw
+                and (one_shot or (len(c) == 1 and curr.shared_session))):
             # The opening message differs, and either the previous request was a one-shot (a single
             # message: an agent's "title this" side call, a classification), or this request is a
             # single message in a session that names no single conversation (traffic with no
             # session id all lands in one). Either way it is another conversation on the same tools
             # and system prompt, not an edit of this one's history: judge it by whether the cache
             # served the shared prefix, and never as an unchanged prompt that missed (classify()).
-            # In a session that does name a conversation, a rewritten first message stays an edit
-            # (or a compaction, with its event).
+            # Any other request with another opening (several messages, or a single one in a
+            # session that names a conversation) is a rewritten history: an edit, or a compaction
+            # with its event.
             if notes is not None:
                 notes["new_conversation"] = True
-            if len(prev_by_role.get("messages", [])) != 1:
+            if not one_shot:
                 return None  # the previous conversation's tool results are not this one's to keep
             secondary.append(MissCause.HISTORY_EDIT)
             pt, ct = prev_by_role.get("tool_results", []), curr_by_role.get("tool_results", [])
@@ -570,58 +560,6 @@ def _first_change(prev: RequestSnapshot, curr: RequestSnapshot, secondary: list,
                               "an earlier tool result changed or was removed without a compaction event",
                               secondary, native_reason)
     return None
-
-
-NEW_CONVERSATION, OTHER_CONVERSATION, REWRITTEN = "new conversation", "another conversation", "rewritten"
-
-
-def blocks_recur(prev_blocks: list[BlockFingerprint], blocks: list[BlockFingerprint]) -> bool:
-    """Does any message or tool result of the compared turn appear anywhere among this request's
-    (the same role, and equal as the walk compares blocks)? A sliding window that dropped the oldest
-    messages, or a summary followed by a kept tail, keeps some; another conversation keeps none."""
-    theirs = {(b.role, b.raw, b.canonical, b.masked) for b in prev_blocks if b.role in _WALKED}
-    return any((b.role, b.raw, b.canonical, b.masked) in theirs for b in blocks if b.role in _WALKED)
-
-
-def keeps_tail(prev_blocks: list[BlockFingerprint], blocks: list[BlockFingerprint]) -> bool:
-    """Does this request still carry the end of the compared turn's conversation: its last two
-    messages or tool results, adjacent and in that order (its only one, if it has one)? A history
-    trimmed from the front, or summarised with a tail kept, does; so does one whose first message
-    was edited. Stronger than `blocks_recur`, which one coincidence satisfies (two conversations
-    that both hold the message "yes"): this is what decides that a turn takes the compared turn's
-    place in its lane."""
-    key = lambda b: (b.role, b.raw, b.canonical, b.masked)  # noqa: E731
-    tail = [key(b) for b in prev_blocks if b.role in _WALKED][-2:]
-    mine = [key(b) for b in blocks if b.role in _WALKED]
-    return bool(tail) and any(mine[j:j + len(tail)] == tail for j in range(len(mine) - len(tail) + 1))
-
-
-def another_opening(prev: RequestSnapshot, curr: RequestSnapshot) -> str | None:
-    """What a request is whose opening message is not the compared turn's (None when it is the
-    same, or either has no message). Decided from the conversation alone, so the collector can
-    file the turn by the same answer the walk gives:
-
-    - REWRITTEN with a compaction event: a compaction is what it is, always.
-    - OTHER_CONVERSATION: several messages, none of the compared turn's messages or tool results
-      among them, and evidence that the lane mixes conversations (the session names none, or the
-      lane is full of recent ones). Its own previous turn is not at hand.
-    - NEW_CONVERSATION: the compared turn was a single message, or this request is a single
-      message in a session that names no conversation.
-    - REWRITTEN otherwise: the same conversation with its history rewritten from the first
-      message on. Whenever a block of the compared turn recurs in a request of several messages
-      it is this, in every kind of session."""
-    p = [b for b in prev.blocks if b.role == "messages"]
-    c = [b for b in curr.blocks if b.role == "messages"]
-    if not p or not c or p[0].raw == c[0].raw:
-        return None
-    if curr.compaction_event:
-        return REWRITTEN
-    if (len(c) > 1 and (curr.shared_session or curr.lane_crowded)
-            and not blocks_recur(prev.blocks, curr.blocks)):
-        return OTHER_CONVERSATION
-    if len(p) == 1 or (len(c) == 1 and curr.shared_session):
-        return NEW_CONVERSATION
-    return REWRITTEN
 
 
 def classify(prev: RequestSnapshot | None, curr: RequestSnapshot,
@@ -668,8 +606,6 @@ def classify(prev: RequestSnapshot | None, curr: RequestSnapshot,
         # The turn at hand is still its own conversation's, so reading all that turn left of what
         # this request repeats is a hit.
         return own_read(curr, earlier_point, native_reason, served_all_left=_served_all(prev, curr))
-    if changed is None and notes.get("foreign"):
-        return own_read(curr, notes["foreign"], native_reason)
     if (changed is not None and floor is not None and curr.usage_known
             and 0 < curr.prompt_tokens < floor and curr.cached_tokens == 0):
         # This request is itself too short to cache: no version of it could have been read
