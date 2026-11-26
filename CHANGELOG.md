@@ -1,6 +1,14 @@
 # Changelog
 
-## Unreleased
+## 0.12.8: 2026-11-26
+
+Fixes from three independent audits of 0.12.7 (#184): a first-time-user run of the docs, an adversarial review of the core, and a check of every verdict on a real Claude Code session of 10,517 calls. Each finding was reproduced before it was fixed, and each fix was reviewed by an independent reviewer told to break it. New: `prefixwise demo`, and what an expired cache cost in the report.
+
+**Before you upgrade:**
+- **CI:** `prefixwise check` now exits 1 when no request got a verdict. If your job can legitimately run no scenario, add `--allow-empty` (the GitHub Action has an `allow-empty` input).
+- **Ledger:** schema 9 adds `cache_age_seconds`, `missed_tokens` and `missed_cost`. A ledger is migrated when opened. If you send rows to ClickHouse, add the columns first (`docs/DATA.md` has the statements).
+- **Edges and a collector:** upgrade them together, the collector first. What an edge sends has changed (a new field, more request parameters compared, some hashes), so a conversation that spans the upgrade can show one change that did not happen.
+- **`PREFIXWISE_HMAC_KEY`:** with a key set, every hash and digest is now keyed, on every edge (it was blocks of 256 bytes or less, and `prefixwise serve` only). Hashes of longer blocks differ from 0.12.7's.
 
 - **The report says what an expired cache cost.** A miss with a legitimate cause is not waste, but it is on the bill, and the report had no number for it. On a real Claude Code session of 10,517 calls, 82 resumes after the cache had expired, with nothing else changed, sent 32 million tokens again that the cache had held: about 20% of that session's bill, with nothing in the report to show it.
   - The "Expected misses" line now carries, for expiries: the tokens the previous turn had left in the cache that were sent again, what they cost above reading them, and that cost's share of the bill. What cost most comes first. When the figure covers fewer requests than the line counts, or the dollars fewer than the tokens, it says on how many.
