@@ -55,12 +55,14 @@ class MissCause(str, Enum):
 # Sonnet 4.5, Opus 4.1, Opus 4 and Sonnet 4; 2,048 for Mythos Preview and Opus 4.7; 4,096 for
 # Opus 4.6, Opus 4.5 and Haiku 4.5. The Claude 3 models are from Anthropic's earlier table
 # (2,048 for the Haiku models, 1,024 for the others). First match wins.
+_MINOR = r"(?!\d)"  # the minor is this digit alone (a date may follow)
+_NO_MINOR = r"(?![-.]\d{1,2}(?!\d))"  # the major alone: no minor after it (a date, @date or [1m] may follow)
 _ANTHROPIC_MIN_PREFIX = [(re.compile(pattern), tokens) for pattern, tokens in (
-    (r"opus-4-[56](?!\d)|haiku-4-5(?!\d)", 4096),
-    (r"opus-4-7(?!\d)|mythos-preview", 2048),
-    (r"opus-4-[18](?!\d)|sonnet-4-[56](?!\d)", 1024),
-    (r"(opus|sonnet)-4(-\d{8})?(-v\d+(:\d+)?)?$", 1024),   # Opus 4 and Sonnet 4, with or without a date
-    (r"sonnet-5(-\d{8})?(-v\d+(:\d+)?)?$", 1024),          # Sonnet 5 itself; Sonnet 5.5 is 512
+    (rf"opus-4[-.][56]{_MINOR}|haiku-4[-.]5{_MINOR}", 4096),
+    (rf"opus-4[-.]7{_MINOR}|mythos-preview", 2048),
+    (rf"opus-4[-.][018]{_MINOR}|sonnet-4[-.][056]{_MINOR}", 1024),   # 4-0 is how some ids spell Opus 4 / Sonnet 4
+    (rf"(opus|sonnet)-4{_NO_MINOR}", 1024),                           # Opus 4 and Sonnet 4
+    (rf"sonnet-5{_NO_MINOR}", 1024),                                  # Sonnet 5 itself; Sonnet 5.5 is 512
     (r"haiku-3|3-5-haiku|3-haiku", 2048),
     (r"claude-3-|sonnet-3|opus-3", 1024),
 )]

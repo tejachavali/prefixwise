@@ -5,6 +5,7 @@ import json
 import pytest
 
 from prefixwise.cli import main
+from prefixwise.findings import findings, render
 from prefixwise.pricing import PriceTable, breakdown
 from prefixwise.proxy import PrefixwiseProxy
 
@@ -125,31 +126,80 @@ def test_matching_does_not_borrow_another_models_price():
     assert T.rates_for("anthropic.claude-sonnet-4-6-v1:0") is T.models["claude-sonnet-4-6"]
 
 
-def test_dated_snapshots_of_both_providers_are_priced_as_their_model():
-    """OpenAI answers gpt-5.6-terra as gpt-5.6-terra-2026-10-15; Anthropic's dates have no dashes."""
-    assert T.resolve("gpt-5.6-terra-2026-10-15") == ("gpt-5.6-terra", T.models["gpt-5.6-terra"], False)
-    assert T.resolve("claude-haiku-5-5-20261007")[0] == "claude-haiku-5-5"
-    assert T.rates_for("gpt-5.6-terra-pro-2026-10-15") is None   # another model, still not borrowed
-    assert T.rates_for("gpt-5.6-terra-2026-10") is None            # not a date
+def test_dated_snapshots_are_priced_as_their_model():
+    """Anthropic's dated id is the model itself. OpenAI answers an alias under a dated snapshot id; snapshots
+    of one alias have had different prices, so it is priced at the alias's rate and said to be approximate."""
+    assert T.resolve("claude-haiku-4-5-20251001") == ("claude-haiku-4-5", T.models["claude-haiku-4-5"], False)
+    assert T.resolve("gpt-5.6-terra-2026-10-15") == ("gpt-5.6-terra", T.models["gpt-5.6-terra"], True)
+    assert T.resolve("openai/gpt-5.6-terra-2026-10-15")[0] == "gpt-5.6-terra"
+    for other in ("gpt-5.6-terra-pro-2026-10-15",   # another model, still not borrowed
+                  "gpt-5.6-terra-2026-10", "gpt-5.6-terra-0000-00-00", "gpt-5.6-terra-2026-13-01",  # not dates
+                  "gpt-5.6-terra-latest"):
+        assert T.rates_for(other) is None, other
 
 
 def test_a_response_with_no_usage_has_no_cost():
-    for provider, usage in (("openai", {}), ("anthropic", {}), ("openai", {"prompt_tokens": 0, "completion_tokens": 0})):
-        assert T.request_cost("gpt-5.6-terra" if provider == "openai" else "claude-opus-5-5", provider, usage) is None
+    for provider, model, usage in (("openai", "gpt-5.6-terra", {}), ("anthropic", "claude-opus-5-5", {}),
+                                   ("openai", "gpt-5.6-terra", {"prompt_tokens": 0, "completion_tokens": 0}),
+                                   # no request has an empty prompt: output alone is not a usage report
+                                   ("openai", "gpt-5.6-terra", {"prompt_tokens": 0, "completion_tokens": 7})):
+        assert T.request_cost(model, provider, usage) is None, usage
     assert T.cost_fields("claude-opus-5-5", "anthropic", {})["cost"] is None
-    assert T.request_cost("claude-opus-5-5", "anthropic", {"input_tokens": 0, "output_tokens": 3}) == pytest.approx(60e-6)
+    # a prompt with no output (max_tokens 0, to warm a cache) is a real request
+    assert T.request_cost("claude-opus-5-5", "anthropic", {"input_tokens": 1000, "output_tokens": 0}) == pytest.approx(0.004)
 
 
-def test_the_response_model_falls_back_to_the_requested_one(tmp_path):
-    """A provider can answer under an id the table does not have (an alias, a new snapshot form)."""
+def _proxy_answering(model: str, usage: dict, path: str = ":memory:"):
     from prefixwise.proxy import PrefixwiseProxy
 
-    proxy = PrefixwiseProxy(upstream_url="http://unused.invalid", api_key="k")
-    usage = {"prompt_tokens": 3000, "completion_tokens": 5, "prompt_tokens_details": {"cached_tokens": 0}}
-    proxy._forward = lambda *a, **k: (200, {"id": "chatcmpl-1", "model": "gpt-5.6-terra-latest-build", "usage": usage})
-    body = {"model": "gpt-5.6-terra", "messages": [{"role": "user", "content": "hi"}]}
-    entry = proxy.handle("openai", body, {"x-prefixwise-session-id": "s"})[1]
-    assert entry.cost == pytest.approx(T.request_cost("gpt-5.6-terra", "openai", usage))
+    proxy = PrefixwiseProxy(ledger_path=path, upstream_url="http://unused.invalid", api_key="k")
+    reply = {"id": "chatcmpl-1", "usage": usage, **({"model": model} if model else {})}
+    proxy._forward = lambda *a, **k: (200, dict(reply))
+    return proxy
+
+
+USAGE = {"prompt_tokens": 3000, "completion_tokens": 500, "prompt_tokens_details": {"cached_tokens": 0}}
+ASK = {"model": "gpt-5.6-luna", "messages": [{"role": "user", "content": "hi"}]}
+SESSION = {"x-prefixwise-session-id": "s"}
+
+
+def test_the_model_that_answered_is_priced_never_the_one_asked_for():
+    """Behind a gateway's fallback routing another model can answer, at another price."""
+    for answered in ("gpt-5.6-sol-pro", "llama-3.3-70b"):
+        entry = _proxy_answering(answered, USAGE).handle("openai", dict(ASK), SESSION)[1]
+        assert entry.cost is None and entry.avoidable_cost is None, answered
+    entry = _proxy_answering("gpt-5.6-terra", USAGE).handle("openai", dict(ASK), SESSION)[1]
+    assert entry.cost == pytest.approx(T.request_cost("gpt-5.6-terra", "openai", USAGE))   # Terra's rate, not Luna's
+
+
+def test_no_usage_is_reported_as_no_usage_not_as_a_missing_price(tmp_path, capsys):
+    path = str(tmp_path / "l.db")
+    proxy = _proxy_answering("gpt-5.6-terra", {}, path)
+    for _ in range(3):
+        entry = proxy.handle("openai", {**ASK, "model": "gpt-5.6-terra"}, SESSION)[1]
+    assert entry.cost is None and entry.avoidable_cost is None
+    found = findings(proxy.ledger)
+    assert found["unpriced_models"] == [] and found["no_usage_requests"] == 3
+    text = render(found)
+    assert "No cost for 3 requests whose responses reported no usage." in text and "Not priced" not in text
+    assert main(["report", "--ledger", path, "--by", "model"]) == 0
+    out = capsys.readouterr().out
+    assert "no response reported usage" in out and "price table" not in out
+
+
+def test_rows_priced_before_a_model_had_its_own_rates_are_named(tmp_path):
+    """0.12.7 priced Fable 5.2 as Fable 5.1, 25% high, and said so. Those rows keep their stored cost;
+    with 5.2's own row in the table the report must still say how they were priced."""
+    from prefixwise.ledger import Ledger, LedgerEntry
+
+    led = Ledger(str(tmp_path / "l.db"))
+    row = dict(session_id="s", agent_id="a", provider="anthropic", model="claude-fable-5-2", cause="none",
+               prompt_tokens=1_000_000, cached_tokens=0, avoidable_tokens=0, avoidable_cost=0.0)
+    led.record(LedgerEntry(**row, cost=15.0, price_as_of="2026-11-09", request_id="old"))
+    led.record(LedgerEntry(**row, cost=12.0, price_as_of="2026-11-26", request_id="new"))
+    found = findings(led)
+    assert found["priced_at_an_earlier_rate"] == [("claude-fable-5-2", 1, "2026-11-26")]
+    assert "1 requests on claude-fable-5-2 (recorded before the table of 2026-11-26)" in render(found)
 
 
 def test_fable_and_mythos_5_2_have_their_own_rows():

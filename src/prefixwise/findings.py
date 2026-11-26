@@ -282,17 +282,32 @@ def findings(ledger, since: float | None = None, until: float | None = None,
     waste.sort(key=lambda x: -x["avoidable_tokens"])
     expected.sort(key=lambda x: -x["requests"])
     table = prices or PriceTable.load(None)
-    unpriced, approximate = [], []
-    for row in metrics.query(ledger, ["requests", "requests_priced"], by="model", **window):
+    unpriced, approximate, no_usage, earlier_rate = [], [], 0, []
+    for row in metrics.query(ledger, ["requests", "requests_priced", "prompt_tokens"], by="model", **window):
         model = row["model"]
         if not model or not row["requests"]:
             continue
         if not row["requests_priced"]:  # from the rows, as they were priced: not from today's table
-            unpriced.append(model)
+            if row["prompt_tokens"]:
+                unpriced.append(model)
+            else:  # no response reported usage: that is why there is no cost, whatever the table holds
+                no_usage += row["requests"]
             continue
         key, rates, approx = table.resolve(model)
         if approx:
             approximate.append((model, key))
+        elif rates and rates.get("priced_since"):
+            # Its own rates joined the table on that date. Rows priced before it used a related
+            # model's rate, and stored costs are kept as computed then (docs/DATA.md).
+            clauses, args = ["model = ?", "cost IS NOT NULL", "price_as_of < ?"], [model, rates["priced_since"]]
+            for col, op, val in (("recorded_at", ">=", since), ("recorded_at", "<", until)):
+                if val is not None:
+                    clauses.append(f"{col} {op} ?")
+                    args.append(val)
+            with ledger.reader() as conn:
+                n = conn.execute("SELECT COUNT(*) FROM entries WHERE " + " AND ".join(clauses), args).fetchone()[0]
+            if n:
+                earlier_rate.append((model, n, rates["priced_since"]))
     from .classifier import CACHE_NOT_REPORTED
     clauses, args = ["cause = 'unknown'", _starts_with("evidence")], [CACHE_NOT_REPORTED, CACHE_NOT_REPORTED]
     for col, op, val in (("recorded_at", ">=", since), ("recorded_at", "<", until)):
@@ -316,6 +331,7 @@ def findings(ledger, since: float | None = None, until: float | None = None,
             "ttl": ttl_advice(ledger, prices=table, **window),
             "unread_writes": unread_writes(ledger, **window),
             "unpriced_models": sorted(unpriced), "approximate_prices": sorted(approximate),
+            "no_usage_requests": no_usage, "priced_at_an_earlier_rate": sorted(earlier_rate),
             "bill": bill(ledger, **window),
             "cache_not_reported": not_reported,
             "unexplained_share": unexplained_share(ledger, since, until),
@@ -412,9 +428,16 @@ def render(f: dict, command: str = "serve", headline: bool = True) -> str:
         if f.get("approximate_prices"):
             lines.append("Priced at a related model's rate: " + "; ".join(f"{m} as {k}" for m, k in f["approximate_prices"])
                          + " (add the exact rates with --prices FILE).")
+        if f.get("priced_at_an_earlier_rate"):
+            lines.append("Priced before the model had its own rates, at a related model's: " + "; ".join(
+                f"{n:,} requests on {m} (recorded before the table of {since})"
+                for m, n, since in f["priced_at_an_earlier_rate"])
+                + ". Stored costs are kept as computed then.")
         if f.get("unpriced_models"):
             lines.append("Not priced: " + ", ".join(f["unpriced_models"])
-                         + " (not in the price table; `prefixwise prices` lists it, --prices FILE adds rates).")
+                         + " (not in the price table: `prefixwise prices` shows the table, --prices FILE adds rates).")
+        if f.get("no_usage_requests"):
+            lines.append(f"No cost for {f['no_usage_requests']:,} requests whose responses reported no usage.")
         if f["waste"]:
             waste_usd = ""
             if s["requests_priced"]:

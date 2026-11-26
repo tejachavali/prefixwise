@@ -2,7 +2,7 @@
   "as_of": "2026-11-26",
   "currency": "USD",
   "unit": "per 1M tokens",
-  "note": "Only rates read from a provider's own pricing page (OpenAI's read by Muse in a browser, since Claude's environment cannot reach it), with the API model id confirmed. Anthropic's rows were checked against its page again on 2026-11-26; OpenAI's are as read on 2026-11-07. Batch, fast mode and data-residency multipliers are not modelled. Override or extend with your own file: PREFIXWISE_PRICES=/path/prices.json or --prices.",
+  "note": "Only rates read from a provider's own pricing page (OpenAI's read by Muse in a browser, since Claude's environment cannot reach it). Each row's source says whether its API model id was confirmed. Anthropic's rows were checked against its page again on 2026-11-26; OpenAI's are as read on 2026-11-07. priced_since: the date a model got its own row; before it, the model was priced at a related model's rate. Batch, fast mode and data-residency multipliers are not modelled. Override or extend with your own file: PREFIXWISE_PRICES=/path/prices.json or --prices.",
   "models": {
     "claude-haiku-5-5": {
       "provider": "anthropic",
@@ -41,12 +41,13 @@
     },
     "claude-fable-5-2": {
       "provider": "anthropic",
-      "source": "https://platform.claude.com/docs/en/about-claude/pricing (read 2026-11-26; cache reads are 0.025x input on this model, per the page's footnote); the id is confirmed by traffic",
+      "source": "https://platform.claude.com/docs/en/about-claude/pricing (read 2026-11-26; cache reads are 0.025x input on this model, per the page's footnote); the id is as Claude Code sent it on 2026-11-26",
       "input": 8.0,
       "cache_write_5m": 10.0,
       "cache_write_1h": 16.0,
       "cache_read": 0.2,
-      "output": 40.0
+      "output": 40.0,
+      "priced_since": "2026-11-26"
     },
     "claude-fable-5-1": {
       "provider": "anthropic",
@@ -105,7 +106,8 @@
       "cache_write_1h": 16.0,
       "cache_read": 0.2,
       "output": 40.0,
-      "note": "limited availability"
+      "note": "limited availability",
+      "priced_since": "2026-11-26"
     },
     "claude-mythos-5-1": {
       "provider": "anthropic",

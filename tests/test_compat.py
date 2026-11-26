@@ -55,16 +55,30 @@ def test_anthropic_minimums_by_model():
     assert anthropic_min_prefix("claude-sonnet-4-6") == 1024
     assert anthropic_min_prefix("claude-opus-4-5-20251101") == 4096
     assert anthropic_min_prefix("some-new-claude") == 512  # the floor: never over-claims
-    # Anthropic's prompt-caching page, read 2026-11-26
-    for model, tokens in (("claude-fable-5-2", 512), ("claude-opus-5-5", 512), ("claude-opus-5", 512),
-                          ("claude-sonnet-5-5", 512), ("claude-sonnet-5", 1024), ("claude-sonnet-5-20260601", 1024),
-                          ("claude-opus-4-8", 1024), ("claude-sonnet-4-5", 1024), ("claude-sonnet-4-5-20250929", 1024),
-                          ("claude-opus-4-1", 1024), ("claude-opus-4-1-20250805", 1024), ("claude-opus-4-20250514", 1024),
-                          ("claude-sonnet-4-20250514", 1024), ("us.anthropic.claude-sonnet-4-20250514-v1:0", 1024),
-                          ("claude-opus-4-7", 2048), ("claude-mythos-preview", 2048),
-                          ("claude-opus-4-6", 4096), ("claude-haiku-4-5-20251001", 4096),
-                          ("claude-3-5-haiku-20241022", 2048), ("claude-3-7-sonnet-20250219", 1024)):
-        assert anthropic_min_prefix(model) == tokens, model
+    # Anthropic's prompt-caching page, read 2026-11-26 (it names the Claude API, Claude Platform on AWS,
+    # Google Cloud and Foundry); the ids are spellings seen from SDKs, clouds and routers. A value above
+    # the table would call a cacheable prompt too small, so every tier is pinned.
+    table = {
+        512: ["claude-fable-5-2", "claude-opus-5-5", "claude-opus-5", "claude-opus-5-20260301",
+             "claude-sonnet-5-5", "claude-sonnet-5-5-20261001", "anthropic/claude-sonnet-5.5",
+             "claude-haiku-5-5-20261007", "claude-sonnet-5-6", "some-new-claude"],
+        1024: ["claude-sonnet-5", "claude-sonnet-5-20260601", "claude-sonnet-5@20260601",
+              "claude-sonnet-5[1m]", "anthropic/claude-sonnet-5:beta", "claude-opus-4-8",
+              "claude-sonnet-4-6", "claude-sonnet-4-5", "claude-sonnet-4-5-20250929",
+              "claude-sonnet-4-5@20250929", "anthropic/claude-sonnet-4.5", "claude-opus-4-1",
+              "claude-opus-4-1-20250805", "anthropic.claude-opus-4-1-20250805-v1:0", "claude-opus-4",
+              "claude-sonnet-4", "claude-opus-4-20250514", "claude-sonnet-4-20250514",
+              "claude-opus-4@20250514", "claude-opus-4-0", "claude-sonnet-4-0",
+              "us.anthropic.claude-sonnet-4-20250514-v1:0", "us.anthropic.claude-sonnet-4-20250514-v1:0:1m",
+              "claude-3-7-sonnet-20250219", "claude-3-5-sonnet-latest"],
+        2048: ["claude-opus-4-7", "claude-mythos-preview", "anthropic/claude-opus-4.7",
+              "claude-3-5-haiku-20241022"],
+        4096: ["claude-opus-4-6", "claude-opus-4-5-20251101", "claude-haiku-4-5-20251001",
+              "anthropic/claude-opus-4.6", "anthropic/claude-haiku-4.5"],
+    }
+    for tokens, models in table.items():
+        for model in models:
+            assert anthropic_min_prefix(model) == tokens, model
 
 
 def test_short_previous_request_is_below_the_minimum_even_if_history_changed():

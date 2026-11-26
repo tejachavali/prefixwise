@@ -345,6 +345,8 @@ def cmd_report(args) -> int:
         print(f"Avoidable cost      {_fmt_usd(summary['avoidable_cost'])}")
         cpst = summary["cost_per_successful_task"]
         print(f"Cost per successful task  {_fmt_usd(cpst) if cpst is not None else '- (needs task outcomes, all requests priced)'}")
+    elif n and not summary.get("prompt_tokens"):
+        print("Cost                - (no response reported usage)")
     elif n:
         print("Cost                - (no request's model is in the price table; see `prefixwise prices`)")
     if not rows:
@@ -467,8 +469,10 @@ def cmd_prices(args) -> int:
     print(_table(rows, ["model", "provider", "input", "cache read", "cache write", "write 1h", "output",
                         "tiered", "valid until"]))
     print("\ncache write: Anthropic's 5-minute write, OpenAI's 30-minute write (the defaults).")
-    print("\nModels not listed are unpriced: their cost shows as '-', never estimated. Add rates with\n"
-          "PREFIXWISE_PRICES=/path/prices.json (same format as the built-in table; see `--json`).")
+    print("\nA model not listed has no cost ('-'). Two cases are priced at a listed model's rate, and the\n"
+          "report names them: a Claude id newer than the table (the nearest version of its family) and an\n"
+          "OpenAI dated snapshot (its alias). Add exact rates with PREFIXWISE_PRICES=/path/prices.json (same\n"
+          "format as the built-in table; see `--json`).")
     return 0
 
 
@@ -921,7 +925,8 @@ def cmd_import(args) -> int:
             print(f"  {r['agent']:<30} {r['requests']:>6,} requests  {hit:>4} from cache  {cost:>10}")
     with led.reader() as conn:
         unpriced = [m for (m,) in conn.execute(
-            "SELECT DISTINCT model FROM entries WHERE cost IS NULL AND recorded_at BETWEEN ? AND ? ORDER BY model",
+            "SELECT DISTINCT model FROM entries WHERE cost IS NULL AND prompt_tokens > 0 "
+            "AND recorded_at BETWEEN ? AND ? ORDER BY model",
             (window["since"], window["until"]))]
     if unpriced:
         print(f"\nNo prices for {', '.join(unpriced)}: add rates with PREFIXWISE_PRICES (see `prefixwise prices`).")

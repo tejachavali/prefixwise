@@ -394,11 +394,9 @@ class Collector:
                                     [], native_reason)
 
         div = first_divergence(prev.blocks, curr.blocks, engine=curr.engine) if prev is not None else None
-        # Priced as the model that answered. When that id is not in the table (a snapshot or alias the
-        # provider answered with), the model that was asked for is the same model at the same price.
+        # Priced as the model that answered, never as the one that was asked for: behind a gateway's
+        # fallback routing they can be different models at different prices.
         priced_model = str(rec.response_model or rec.model)
-        if rec.response_model and self.prices.rates_for(priced_model) is None:
-            priced_model = str(rec.model)
         # Waste is capped at what the previous turn left in the cache, except for a breakpoint left
         # early (the cache served all it held): there the waste is the stable prefix it left out.
         held = ((prev.cached_tokens + prev.cache_written) if prev is not None
@@ -427,6 +425,8 @@ class Collector:
         )
         entry.avoidable_cost = self.prices.avoidable_cost(priced_model, entry.avoidable_tokens, prompt_tokens,
                                                           provider, usage)
+        if entry.cost is None:  # no rates, or no usage: nothing about this request has a dollar figure
+            entry.avoidable_cost = None
         # The previous turn's cache write, left unread: only when that turn is this conversation's
         # own: the same opening message, its own interleaved turn, or a compaction (which rewrites
         # the opening) while no other conversation shares the lane. Not another conversation this
