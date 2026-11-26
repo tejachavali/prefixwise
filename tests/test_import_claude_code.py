@@ -358,6 +358,14 @@ def test_caches_are_per_model(tmp_path):
     got = named(tmp_path / "g", compaction_seen_from_each_model)
     assert [r["cause"] for r in got] == ["none", "model_switch", "model_switch", "unknown", "compaction_rewrite"]
 
+    def an_uncached_call_on_the_other_model_is_not_its_last_use(log):
+        log.user(0); log.reply(5, usage(read=WARM, w1h=440_000), model=FABLE)     # Fable leaves 500k
+        log.user(100); log.reply(105, usage(read=WARM, w1h=440_000))              # Opus takes the conversation over
+        log.user(4090); log.reply(4092, usage(fresh=3_000), model=FABLE)          # touches no cache
+        log.user(4100); log.reply(4105, usage(read=WARM, w1h=441_000))            # Opus, 4,000 s on: its own expiry
+    got = named(tmp_path / "h", an_uncached_call_on_the_other_model_is_not_its_last_use)
+    assert got[3]["cause"] == "ttl_expired" and got[3]["unread_write_tokens"] == 440_000
+
     def first_request_on_a_model(log):
         log.user(0); log.reply(5, usage(read=WARM, w1h=50_000))
         log.user(30); log.reply(35, usage(read=WARM, w1h=50_000), model=FABLE)     # 55% read: the rest is the switch's
@@ -430,6 +438,18 @@ def test_the_hit_test_is_against_what_was_left_in_the_cache(tmp_path):
     got = named(tmp_path / "g", a_call_that_cached_nothing_does_not_reset_the_clock)
     assert got[2]["cause"] == "ttl_expired" and "4000 s" in got[2]["evidence"]
     assert got[2]["unread_write_tokens"] == 440_000                        # the write that was lost
+
+    def an_expired_write_is_counted_once(log):
+        log.user(0); log.reply(5, usage(read=WARM, w1h=440_000))
+        log.user(4000); log.reply(4002, usage(fresh=3_000))               # used no cache: the 440k is not counted here
+        log.user(4010); log.reply(4015, usage(read=WARM, w1h=441_000))    # the request that lost it
+    got = named(tmp_path / "j", an_expired_write_is_counted_once)
+    assert [(r["cause"], r["unread_write_tokens"]) for r in got[1:]] == [("ttl_expired", None), ("ttl_expired", 440_000)]
+
+    def a_compaction_that_did_not_shrink_the_prompt(log):
+        log.user(0); log.reply(5, usage(read=WARM, w1h=25_000))
+        log.compact(60); log.user(65); log.reply(70, usage(read=WARM, w1h=30_000))   # 90k after, 85k held before
+    assert named(tmp_path / "k", a_compaction_that_did_not_shrink_the_prompt)[1]["cause"] == "compaction_rewrite"
 
     def nothing_was_ever_left_on_this_model(log):
         log.user(0); log.reply(5, usage(fresh=1_500), ttl="5m")

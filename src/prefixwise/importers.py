@@ -284,7 +284,8 @@ def _classify(prev: _Request | None, prev_lane: _Lane | None, same: _Lane | None
     # Less was read than was left. A compaction, an expiry or a model switch explains it even above
     # half: the front of the prompt can be in the cache independently of this conversation.
     if switched and expired and prev_lane is not None:
-        since_prev = (r.sent or r.done) - (prev.sent or prev.done)
+        there = prev_lane.req  # the other model's last request that used its cache
+        since_prev = (r.sent or r.done) - (there.sent or there.done)
         # The conversation was on the other model if that request carried a prompt of this one's
         # size. A small side call (a title, a classification) is not the conversation.
         carried = min(prev_lane.prompt, prompt) >= HIT_SHARE * max(prev_lane.prompt, prompt)
@@ -292,8 +293,9 @@ def _classify(prev: _Request | None, prev_lane: _Lane | None, same: _Lane | None
             # It was live there: staying would have hit.
             return "model_switch", True, (f"{switch}; {r.model}'s own cache, last used {since_use:.0f} s ago, "
                                           "had expired"), None
-    if compacted and exact and prompt < same.held:
-        # (A request on another model whose prompt did not shrink was not the one compacted.)
+    if compacted and (not switched or (exact and prompt < same.held)):
+        # (After a spell on another model, only a prompt smaller than what this model held was the
+        # one compacted: a side call on this model in between was not.)
         return "compaction_rewrite", True, "the conversation was compacted before this request", None
     upgraded = (f"Claude Code was upgraded ({was.version} -> {r.version})"
                 if was.version and r.version and was.version != r.version else None)
@@ -425,8 +427,9 @@ def import_claude_code(root: str | os.PathLike | None = None, ledger: Ledger | N
                     classifier_version=CLASSIFIER_VERSION)
                 entry.avoidable_cost = prices.avoidable_cost(r.model, avoidable, prompt, "anthropic", u)
                 # A compaction's summary call reads the previous write, and Claude Code does not log
-                # that call: the write was not left unread.
-                if prev_u is not None and prompt > 0 and cause != "compaction_rewrite":
+                # that call: the write was not left unread. A request that used no cache at all leaves
+                # its model's lane as it was, so the write is counted at the next request that does.
+                if prev_u is not None and prompt > 0 and cause != "compaction_rewrite" and read + write > 0:
                     pw = breakdown("anthropic", prev_u)
                     w5, w1, _ = unread_write(cause, read, pw.cache_write_5m, pw.cache_write_1h, 0,
                                              _int(prev_u.get("cache_read_input_tokens")))
