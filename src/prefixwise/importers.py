@@ -10,19 +10,27 @@ each API response there carries its usage: cache reads, and cache writes split i
 ledger row, and never stores message text. The prompt itself is not in the log, so a
 cause is claimed only from what the log shows changed in the cached prefix:
 
-  none               read at least half of what could be reused (also for a first request
-                     that reused an entry written elsewhere: a parent, a fork, a resume)
+  none               read what the previous request left in the cache (also for a first
+                     request that reused an entry written elsewhere: a parent, a fork, a
+                     resume, a sibling subagent); or read at least half of it when nothing
+                     in the log explains the rest
   first_write        the first request in a log, reading little
   model_switch       the served model changed (caches are per model)
   compaction_rewrite a compaction boundary since the previous request
-  system_edit        Claude Code was upgraded (the version changed), or its logged system
-                     prompt changed (compared by hash, never stored)
+  system_edit        its logged system prompt changed (compared by hash, never stored); or,
+                     when no expiry explains the miss, Claude Code was upgraded
   param_rendered     the effort setting changed, on models where that breaks the cache
-  ttl_expired        more time passed since the previous request than its write was kept
-                     (Anthropic reports 5-minute and 1-hour writes); `ttl_shortened` when
-                     that request asked for 1 hour and was kept 5 minutes
+  ttl_expired        more time passed since the previous request was sent than its write was
+                     kept (Anthropic reports 5-minute and 1-hour writes); `ttl_shortened`
+                     when that request asked for 1 hour and was kept 5 minutes
   (Anthropic's own)  a cache_miss_reason in the response, when the client asked for one
   unknown            nothing in the log explains it, and it says so
+
+A request that read less than what the previous one left, after a logged event that explains
+it (a model change, a compaction, a changed system prompt or effort, an expiry), gets that
+cause even when it read more than half: Claude Code's system prompt and tools are a prefix
+that many sessions keep warm, so a short conversation can lose all of its own history and
+still read most of its prompt.
 
 What Claude Code appends mid-conversation (deferred tool loads, MCP instruction updates,
 skill and agent listings, the date, file-change notices) comes after the cached prefix
@@ -48,6 +56,12 @@ from .ledger import Ledger, LedgerEntry, avoidable_for_turn, unread_write
 from .pricing import PriceTable, breakdown
 
 HIT_SHARE = 0.5  # as the proxy: a turn that read at least half of the reusable prefix is a hit
+# A turn that read this share of what the previous one left cached reused all of it: the log has
+# exact token counts, so a full reuse reads at least 100% (measured on 10,245 real hits).
+FULL_SHARE = 0.95
+# Attachments Claude Code writes when the response arrives, not when the request is sent (measured:
+# stamped within 50 ms of the response on 2,905 of 2,905). They say nothing about the send time.
+_AT_RESPONSE = {"deferred_tools_record"}
 # Appended after the cached prefix: context for an unexplained miss, never a cause.
 _APPENDED = {"deferred_tools_delta": "deferred tools loaded", "mcp_instructions_delta": "MCP instructions updated",
              "skill_listing": "skill listing", "agent_listing_delta": "agent listing updated", "date": "date notice"}
@@ -80,7 +94,7 @@ def _clean_usage(u: dict) -> dict:
 @dataclass
 class _Request:
     request_id: str
-    sent: float | None  # time of the last log entry before the response (the request's inputs)
+    sent: float | None  # when the request was sent: its last logged input, never before the previous response
     done: float  # response time
     model: str
     usage: dict
@@ -113,7 +127,7 @@ def _requests(path: Path) -> dict[str, list[_Request]]:
     streams: dict[str, list[_Request]] = {}
     by_id: dict[str, _Request] = {}
     pending: dict[str, list[str]] = {}
-    last_input: dict[str, float] = {}
+    last_input: dict[str, float] = {}  # latest input stamped since the stream's previous response
     system_hash: dict[str, str] = {}
     with open(path, encoding="utf-8", errors="replace") as fh:
         for line in fh:
@@ -147,7 +161,12 @@ def _requests(path: Path) -> dict[str, list[_Request]]:
                 diag = msg.get("diagnostics") if isinstance(msg.get("diagnostics"), dict) else {}
                 miss = diag.get("cache_miss_reason")
                 native = (miss.get("type") if isinstance(miss, dict) else miss) or None
-                r = _Request(ids[0], last_input.get(key), ts, model, usage, e.get("promptCacheRequested"),
+                # Sent after its last input and after the previous response ended. An input can be
+                # stamped earlier than that (a message queued while the previous response streamed).
+                before = streams.get(key)
+                sent = max((t for t in (last_input.pop(key, None), before[-1].done if before else None)
+                            if t is not None and t <= ts), default=None)
+                r = _Request(ids[0], sent, ts, model, usage, e.get("promptCacheRequested"),
                              e.get("version"), e.get("perTurnEffort") or e.get("effort"), system_hash.get(key),
                              str(native) if native else None, pending.pop(key, []))
                 for i in ids:
@@ -161,10 +180,12 @@ def _requests(path: Path) -> dict[str, list[_Request]]:
                         json.dumps(att["systemPrompt"], sort_keys=True).encode()).hexdigest()[:16]
                 elif att.get("type"):
                     pending.setdefault(key, []).append(str(att["type"]))
+                if att.get("type") in _AT_RESPONSE:
+                    continue
             elif kind == "system" and e.get("subtype") == "compact_boundary":
                 pending.setdefault(key, []).append("compact_boundary")
             if ts is not None and kind in ("user", "attachment", "system"):
-                last_input[key] = ts
+                last_input[key] = max(ts, last_input.get(key, ts))
     return streams
 
 
@@ -189,39 +210,58 @@ def _granted_ttl(usage: dict) -> float | None:
 
 
 def _classify(prev: _Request | None, prev_ttl: float | None, r: _Request, prompt: int, read: int,
-              prev_prompt: int | None, subagent: bool) -> tuple[str, bool | None, str, str | None]:
-    """(cause, legit, evidence, detail) from what the log shows."""
-    reusable = min(prev_prompt, prompt) if prev_prompt else prompt
-    if prompt > 0 and read >= HIT_SHARE * reusable:
-        return "none", None, ("read at least half of the reusable prompt from the cache" if prev is not None else
-                              "first request in this log, yet it read an existing cache entry "
-                              "(written by a parent session, a fork or a resume)"), None
-    iterations = r.usage.get("iterations")
-    if isinstance(iterations, list) and len(iterations) > 1:
-        return "unknown", None, "the response combined several model calls; its usage is their sum", None
+              prev_prompt: int | None, subagent: bool, held: int | None = None
+              ) -> tuple[str, bool | None, str, str | None]:
+    """(cause, legit, evidence, detail) from what the log shows. held: what the previous request
+    left in the cache (what it read plus what it wrote)."""
+    several = isinstance(r.usage.get("iterations"), list) and len(r.usage["iterations"]) > 1
     if prev is None:
+        if prompt > 0 and read >= HIT_SHARE * prompt:
+            return "none", None, ("first request in this log, yet it read an existing cache entry (written by a "
+                                  "parent session, a fork, a resume, or another subagent with the same prompt)"), None
+        if several:
+            return "unknown", None, "the response combined several model calls; its usage is their sum", None
         return "first_write", True, ("first request of a subagent: it does not share the parent's prefix"
                                      if subagent else "first request in this log"), None
+    # No more than the previous request left could be read, and no more than this prompt holds.
+    reusable = min(held, prompt) if held else min(prev_prompt, prompt) if prev_prompt else prompt
+    if prompt > 0 and read >= FULL_SHARE * reusable:
+        return "none", None, "read what the previous request left in the cache", None
+    partly = prompt > 0 and read >= HIT_SHARE * reusable
+    kept_half = ("none", None, "read at least half of what the previous request left in the cache, and the log "
+                               "shows nothing that explains the rest", None)
+    if several:
+        return kept_half if partly else (
+            "unknown", None, "the response combined several model calls; its usage is their sum", None)
+    # Less was read than was left. A logged event that explains it is the cause, even above half:
+    # the system prompt and tools are a prefix other sessions keep warm, so a short conversation
+    # can lose all of its own history and still read most of its prompt.
     if prev.model != r.model:
         return "model_switch", True, f"model {prev.model} -> {r.model}", None
     if "compact_boundary" in r.events:
         return "compaction_rewrite", True, "the conversation was compacted before this request", None
-    if prev.version and r.version and prev.version != r.version:
-        return "system_edit", True, f"Claude Code was upgraded ({prev.version} -> {r.version})", None
     if prev.system_hash and r.system_hash and prev.system_hash != r.system_hash:
         return "system_edit", None, "the system prompt Claude Code logged changed", None
     if prev.effort != r.effort and prev.effort and r.effort and not _EFFORT_SAFE.search(r.model):
         return "param_rendered", None, f"effort changed ({prev.effort} -> {r.effort})", None
+    upgraded = (f"Claude Code was upgraded ({prev.version} -> {r.version})"
+                if prev.version and r.version and prev.version != r.version else None)
     since_use = (r.sent or r.done) - (prev.sent or prev.done)  # the cache was last used when prev was sent
     if prev_ttl is not None and since_use > prev_ttl:
+        # An expiry explains the miss by itself. An upgrade in the same gap is context, not the cause:
+        # the cache was gone either way.
         why = f"{since_use:.0f} s since the previous request; its cache write was kept {prev_ttl:.0f} s"
         detail = None
         if prev.ttl_requested == "1h" and prev_ttl == 300.0:
             detail, why = "ttl_shortened", why + " although that request asked for a 1-hour cache"
-        return "ttl_expired", True, why, detail
+        return "ttl_expired", True, why + (f"; {upgraded} in between" if upgraded else ""), detail
+    if upgraded:
+        return "system_edit", True, upgraded + ", which can change its system prompt and tools", None
     if r.native and r.native not in NO_VERDICT and map_native_reason("anthropic", r.native) is not None:
         cause = map_native_reason("anthropic", r.native).value
         return cause, None, f"Anthropic's own diagnosis: {r.native}", None
+    if partly:
+        return kept_half
     seen = sorted({_APPENDED[e] for e in r.events if e in _APPENDED})
     context = (f"; the log shows {', '.join(seen)} before it, which Claude Code appends after the cached prefix"
                if seen else "")
@@ -269,14 +309,14 @@ def import_claude_code(root: str | os.PathLike | None = None, ledger: Ledger | N
                 read = _int(u.get("cache_read_input_tokens"))
                 write = _int(u.get("cache_creation_input_tokens"))
                 prompt = _int(u.get("input_tokens")) + read + write
-                cause, legit, why, detail = _classify(prev, prev_ttl, r, prompt, read, prev_prompt, subagent)
-                # This request's own cache lifetime: what its write was granted, else what it asked for.
-                own_ttl = _granted_ttl(u) or {"1h": 3600.0, "5m": 300.0}.get(r.ttl_requested or "")
-                gap = (r.sent or r.done) - prev.done if prev is not None else None
                 prev_u = prev.usage if prev is not None else None
                 held = None
                 if prev_u is not None:
                     held = _int(prev_u.get("cache_read_input_tokens")) + _int(prev_u.get("cache_creation_input_tokens"))
+                cause, legit, why, detail = _classify(prev, prev_ttl, r, prompt, read, prev_prompt, subagent, held)
+                # This request's own cache lifetime: what its write was granted, else what it asked for.
+                own_ttl = _granted_ttl(u) or {"1h": 3600.0, "5m": 300.0}.get(r.ttl_requested or "")
+                gap = (r.sent or r.done) - prev.done if prev is not None else None
                 avoidable = avoidable_for_turn(legit, prompt, read, prev_prompt, held)
                 prev, prev_prompt_before, prev_prompt = r, prev_prompt, prompt
                 prev_ttl = _granted_ttl(u) or prev_ttl
@@ -299,7 +339,7 @@ def import_claude_code(root: str | os.PathLike | None = None, ledger: Ledger | N
                     cache_write_tokens=parts.cache_write_5m + parts.cache_write_1h + parts.cache_write,
                     gap_seconds=gap, evidence=f"from the log: {why}", detail=detail, native_reason=r.native,
                     cache_ttl_seconds=own_ttl,
-                    classifier_version="log-2")
+                    classifier_version="log-3")
                 entry.avoidable_cost = prices.avoidable_cost(r.model, avoidable, prompt, "anthropic", u)
                 if prev_u is not None and prompt > 0:
                     pw = breakdown("anthropic", prev_u)

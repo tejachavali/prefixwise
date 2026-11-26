@@ -247,3 +247,89 @@ def test_odd_field_types_do_not_crash(tmp_path):
         log.user(0); log.reply(5, {"input_tokens": "lots", "output_tokens": "x", "cache_read_input_tokens": None,
                                    "cache_creation_input_tokens": 100, "cache_creation": "weird"})
     assert len(one_log(tmp_path, odd)) == 1
+
+
+def named(tmp_path, build_log):
+    """one_log, with each row as a dict of the columns these tests read."""
+    log = Log()
+    build_log(log)
+    log.write(tmp_path / "-p" / "s.jsonl")
+    led = Ledger()
+    import_claude_code(tmp_path, led)
+    cols = ("cause", "legit", "evidence", "gap_seconds")
+    with led.reader() as c:
+        c.row_factory = None
+        return [dict(zip(cols, r)) for r in
+                c.execute(f"SELECT {', '.join(cols)} FROM entries ORDER BY recorded_at, id")]
+
+
+def test_what_real_logs_showed(tmp_path):
+    """Wrong verdicts found on a real 10,517-call Claude Code session (2026-11-26), as fixtures.
+
+    Its system prompt and tools were a prefix of about 60,000 tokens that other sessions kept warm,
+    so it was read even on the first call and after a day idle."""
+    WARM = 60_000
+
+    def compaction_above_half(log):
+        # 900k was cached; the compacted prompt is about 100k and still reads the warm prefix: more
+        # than half of the new prompt, and none of the conversation.
+        log.user(0); log.reply(5, usage(read=890_000, w1h=10_000))
+        log.compact(60); log.user(65); log.reply(70, usage(read=WARM, w1h=40_000))
+        log.user(100); log.reply(105, usage(read=WARM + 40_000, w1h=500))  # then a hit again
+    assert [(r["cause"], r["legit"]) for r in named(tmp_path / "a", compaction_above_half)] == [
+        ("none", None), ("compaction_rewrite", 1), ("none", None)]  # the log starts on a resumed session
+
+    def model_switch_above_half(log):
+        log.user(0); log.reply(5, usage(read=WARM, w1h=50_000))
+        log.user(30); log.reply(35, usage(read=WARM, w1h=50_000), model="claude-fable-5-2")  # read 56% of what was left
+    got = named(tmp_path / "b", model_switch_above_half)
+    assert got[1]["cause"] == "model_switch" and "claude-opus-5-5 -> claude-fable-5-2" in got[1]["evidence"]
+
+    def upgrade_after_the_cache_expired(log):
+        log.user(0); log.reply(5, usage(read=WARM, w1h=440_000), version="2.1.320")
+        log.user(4000); log.reply(4005, usage(read=WARM, w1h=440_500), version="2.1.322")  # idle over an hour
+    got = named(tmp_path / "c", upgrade_after_the_cache_expired)
+    assert got[1]["cause"] == "ttl_expired" and got[1]["legit"] == 1
+    assert "4000 s since the previous request" in got[1]["evidence"]
+    assert "Claude Code was upgraded (2.1.320 -> 2.1.322) in between" in got[1]["evidence"]
+
+    def upgrade_inside_the_lifetime(log):
+        log.user(0); log.reply(5, usage(read=WARM, w1h=440_000), version="2.1.320")
+        log.user(600); log.reply(605, usage(read=500_000, w1h=500), version="2.1.322")   # a full hit: not a cause
+        log.user(900); log.reply(905, usage(read=WARM, w1h=441_000), version="2.1.323")  # a miss, nothing else logged
+    got = named(tmp_path / "d", upgrade_inside_the_lifetime)
+    assert [r["cause"] for r in got] == ["first_write", "none", "system_edit"]
+    assert "can change its system prompt and tools" in got[2]["evidence"]
+
+    def short_conversation_expired(log):
+        # A short conversation that sat idle loses its own 40k and still reads the warm 60%.
+        log.user(0); log.reply(5, usage(read=WARM, w5=40_000), ttl="5m")
+        log.user(400); log.reply(405, usage(read=WARM, w5=40_500), ttl="5m")
+    assert named(tmp_path / "e", short_conversation_expired)[1]["cause"] == "ttl_expired"
+
+    def partial_read_nothing_logged(log):
+        log.user(0); log.reply(5, usage(read=WARM, w1h=40_000))
+        log.user(30); log.reply(35, usage(read=WARM, w1h=40_500))  # 60% read, no event: not called a miss
+    got = named(tmp_path / "f", partial_read_nothing_logged)
+    assert got[1]["cause"] == "none" and "at least half" in got[1]["evidence"]
+
+
+def test_send_time_is_the_last_input_not_a_record_written_at_the_response(tmp_path):
+    """Claude Code writes a deferred_tools_record when the response arrives. Taking it for the send
+    time hid two real 5-minute expiries (gaps of 318 s read as 153 s and 292 s) on the same logs."""
+    def slow_previous_response(log):
+        log.user(0); log.attach(170, "deferred_tools_record")
+        log.reply(170, usage(w5=110_000), ttl="5m", split=False)   # sent at 0, took 170 s to answer
+        log.user(319); log.attach(325, "deferred_tools_record")
+        log.reply(325, usage(w5=110_500), ttl="5m", split=False)   # sent 319 s after the first: expired
+    got = named(tmp_path / "a", slow_previous_response)
+    assert got[1]["cause"] == "ttl_expired" and "319 s since the previous request" in got[1]["evidence"]
+
+    def queued_while_streaming(log):
+        log.user(0); log.reply(5, usage(w1h=20_000), split=False)
+        log.attach(3, "queued_command")                            # typed while the first response streamed
+        log.reply(8, usage(read=20_000, w1h=300), split=False)
+        log.reply(12, usage(read=20_300, w1h=300), split=False)    # no input logged at all
+    got = named(tmp_path / "b", queued_while_streaming)
+    assert [r["cause"] for r in got] == ["first_write", "none", "none"]
+    assert [r["gap_seconds"] for r in got[1:]] == [0.0, 0.0]       # never before the previous response
