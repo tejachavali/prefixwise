@@ -11,7 +11,7 @@ records a ledger entry, and forwards to the upstream when configured.
   API key and no cost.
 - ``PREFIXWISE_API_KEY``: upstream API key (never logged).
 - ``PREFIXWISE_LEDGER_PATH``: SQLite ledger path (default in-memory).
-- ``PREFIXWISE_HMAC_KEY``: per-install HMAC key for short blocks.
+- ``PREFIXWISE_HMAC_KEY``: per-install key; with it every block hash is an HMAC.
 
 Endpoints:
 - POST /v1/chat/completions  (OpenAI-compatible)

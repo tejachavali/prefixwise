@@ -185,8 +185,9 @@ def _prefix_keys(prefix_key: str, provider: str, model: str, credential: str, to
     tools_c = json.dumps(schema_sets(_strip_markers(tools)), sort_keys=True, default=str)
     system_c = json.dumps(_strip_markers(system), sort_keys=True, default=str)
     head = [provider, model, credential, tools_c]
-    keys = (_h(head + [system_c]), _h(head + [mask_volatiles(system_c)]),
-            _h(head + [mask_only(system_c, _TIME_KINDS)]), _h(head + [mask_only(system_c, _ID_KINDS)]))
+    keys = (_h(head + [system_c]), _h(head + [mask_volatiles(system_c, json_text=True)]),
+            _h(head + [mask_only(system_c, _TIME_KINDS, json_text=True)]),
+            _h(head + [mask_only(system_c, _ID_KINDS, json_text=True)]))
     with _PREFIX_KEYS_LOCK:
         _PREFIX_KEYS[prefix_key] = keys
         if len(_PREFIX_KEYS) > PREFIX_KEYS_CACHE:

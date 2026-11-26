@@ -982,7 +982,7 @@ def _import_gateway(log_path: str, ledger_path: str, args, since: float | None) 
     if bad:
         print(f"prefixwise: skipped {bad} line(s) without a request body, a response or a start time", file=sys.stderr)
     return {"logs": 1, "imported": st["imported"], "in_window": len(entries), "skipped_known": 0,
-            "duplicates": repeated, "unreadable": 0, "first": max(st["first"] or entries[0]["start"], since or 0),  # the window, not before it
+            "duplicates": sum(1 for t in repeated if since is None or t >= since), "unreadable": 0, "first": max(st["first"] or entries[0]["start"], since or 0),  # the window, not before it
             "last": st["last"] or entries[-1]["end"], "failed": st["failed"]}
 
 

@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import contextlib
 import datetime as _dt
+import hashlib
 import json
 import os
 import time as _time
@@ -151,16 +152,19 @@ def read_log(path: str | os.PathLike) -> tuple[list[dict], int]:
     return entries, bad
 
 
-def read_log_counts(path: str | os.PathLike) -> tuple[list[dict], int, int]:
-    """(entries, lines that could not be used, lines that repeat a request already read). Each entry:
-    start, end, provider, body, response, headers, status, line. A directory reads every *.jsonl /
-    *.json file in it, in name order. A request logged twice (a shipper that retried, two files that
-    overlap) is counted once: the second line with the same response id is left out. A response with
-    no id cannot be told from another, so it is always kept."""
+def read_log_counts(path: str | os.PathLike) -> tuple[list[dict], int, list[float]]:
+    """(entries, lines that could not be used, when each line that repeats a request already read
+    started). Each entry: start, end, provider, body, response, headers, status, line. A directory
+    reads every *.jsonl / *.json file in it, in name order. A request logged twice (a shipper that
+    retried, two files that overlap) is counted once. Two lines are the same request only when the
+    response id, the start time and the request body are all equal: an id alone is not enough (a
+    gateway's response cache answers later requests with the stored id, and some servers number their
+    responses from zero each run). Of two such lines, the one whose response reports usage is kept.
+    A response with no id cannot be told from another, so it is always kept."""
     p = Path(path)
     files = sorted(f for f in p.iterdir() if f.suffix in (".jsonl", ".json")) if p.is_dir() else [p]
-    entries, bad, repeated = [], 0, 0
-    seen_ids: set = set()
+    entries, bad, repeated = [], 0, []
+    seen: dict = {}  # (response id, start, hash of the body) -> index in entries
     for f in files:
         with open(f, encoding="utf-8") as fh:
             for n, line in enumerate(fh, 1):
@@ -179,11 +183,17 @@ def read_log_counts(path: str | os.PathLike) -> tuple[list[dict], int, int]:
                     bad += 1
                     continue
                 rid = response.get("id")
+                again = None
                 if isinstance(rid, str) and rid:
-                    if rid in seen_ids:
-                        repeated += 1
-                        continue
-                    seen_ids.add(rid)
+                    same = (rid, start, hashlib.sha256(
+                        json.dumps(body, sort_keys=True, default=str).encode("utf-8", "surrogatepass")).digest())
+                    again = seen.get(same)
+                    if again is not None:
+                        repeated.append(start)
+                        if entries[again]["response"].get("usage") or not response.get("usage"):
+                            continue  # the line already kept says as much or more
+                    else:
+                        seen[same] = len(entries)
                 end = parse_time(_get(raw, END_KEYS))
                 if end is None:
                     ms = _get(raw, LATENCY_MS_KEYS)
@@ -197,17 +207,21 @@ def read_log_counts(path: str | os.PathLike) -> tuple[list[dict], int, int]:
                 if first is None and isinstance(ttft, (int, float)) and not isinstance(ttft, bool):
                     first = start + float(ttft) / 1000.0
                 timed = _get(raw, END_KEYS + LATENCY_MS_KEYS + LATENCY_S_KEYS) is not None
-                entries.append({"start": start, "end": max(start, end), "body": body, "response": response,
-                                "provider": _provider(raw, body, response),
-                                "headers": {str(k).lower(): str(v) for k, v in headers.items()}
-                                if isinstance(headers, dict) else {},
-                                "status": status,
-                                # When the answer began: the cache entry existed from then on.
-                                "first": min(max(first, start), max(start, end)) if first is not None else max(start, end),
-                                # A log without durations says nothing about overlap: its requests are
-                                # replayed one after another, never as in flight together.
-                                "timed": timed,
-                                "line": f"{f.name}:{n}"})
+                entry = {"start": start, "end": max(start, end), "body": body, "response": response,
+                         "provider": _provider(raw, body, response),
+                         "headers": {str(k).lower(): str(v) for k, v in headers.items()}
+                         if isinstance(headers, dict) else {},
+                         "status": status,
+                         # When the answer began: the cache entry existed from then on.
+                         "first": min(max(first, start), max(start, end)) if first is not None else max(start, end),
+                         # A log without durations says nothing about overlap: its requests are
+                         # replayed one after another, never as in flight together.
+                         "timed": timed,
+                         "line": f"{f.name}:{n}"}
+                if again is not None:
+                    entries[again] = entry  # the same request, this time with its usage
+                else:
+                    entries.append(entry)
     return entries, bad, repeated
 
 

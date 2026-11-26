@@ -1,11 +1,16 @@
 """How a request is read and hashed: wrong facts an independent review reproduced (#184, items 3, 8,
-9, 14, 15 and 16)."""
+9, 14, 15 and 16), and what a second review found in the first fix."""
 import json
 import subprocess
 import sys
 
 from prefixwise import check
-from prefixwise.fingerprint import Fingerprinter, cache_markers, mask_volatiles, without_cache_markers
+import hashlib
+import unicodedata
+
+from prefixwise import details
+from prefixwise.fingerprint import (Fingerprinter, cache_markers, mask_only, mask_volatiles, mask_volatiles_kinds,
+                                    without_cache_markers)
 from prefixwise.fixes import auto_breakpoints
 from prefixwise.proxy import PrefixwiseProxy, cache_ttl_seconds, extract_blocks, has_cache_breakpoint
 
@@ -139,9 +144,14 @@ def test_a_change_of_output_config_is_seen():
 
 # -- 9. a value at the start of a line is masked -------------------------------------------------
 
+def jmask(text):
+    return mask_volatiles(json.dumps(text), json_text=True)
+
+
 def test_a_date_time_or_id_at_the_start_of_a_line_is_volatile():
-    """The masks run on JSON text, where a line break is backslash-n: the n sat right before the value
-    and the patterns' word boundary failed. A timestamp on its own line read as an edit of the wording."""
+    """The fingerprinter masks JSON text, where a line break is backslash-n: the n sat right before the
+    value. A date led by a weekday or a month name, or an id with no digit in its first group, kept
+    its value there, so a timestamp on its own line read as an edit of the wording."""
     for a, b in (("2026-11-26T09:00:01Z", "2026-11-26T09:00:09Z"),
                  ("Thu Nov 26 09:00:01 UTC 2026", "Thu Nov 26 09:05:44 UTC 2026"),
                  ("Thu Nov 26 2026", "Fri Nov 27 2026"),          # the weekday starts the line
@@ -150,41 +160,89 @@ def test_a_date_time_or_id_at_the_start_of_a_line_is_volatile():
                  ("0b0f7c2e-58a1-4c1d-9d5e-2f6f1f0e9a11", "9a7d3b10-1f2e-4a6b-8c9d-0e1f2a3b4c5d"),
                  ("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "ffffffff-aaaa-bbbb-cccc-dddddddddddd")):
         for sep in ("\n", "\t", "\r\n", " "):
-            one, two = (json.dumps(f"Rules.{sep}{v}{sep}End.") for v in (a, b))
-            assert mask_volatiles(one) == mask_volatiles(two), (a, sep)
+            one, two = (f"Rules.{sep}{v}{sep}End." for v in (a, b))
+            assert jmask(one) == jmask(two), (a, sep)
+    # the dates-and-times-only mask, which names what kind of value changed, sees them too
+    only = lambda t: mask_only(json.dumps(t), frozenset({"date", "time"}), json_text=True)  # noqa: E731
+    assert only("Rules.\nThu Nov 26 2026\nEnd.") == only("Rules.\nFri Nov 27 2026\nEnd.")
+    assert "path" in mask_volatiles_kinds(json.dumps("Work in:\n/home/dev/repo\n"), json_text=True)[1]
     proxy = scripted([claude(write=3000), claude(write=3100)])
-    stamp = lambda s: {"model": OPUS, "max_tokens": 9, "messages": [U1],  # noqa: E731
-                       "system": marked(SYS + f"\n2026-11-26T09:00:{s}Z\n")}
-    proxy.handle("anthropic", stamp("01"), S)
-    entry = proxy.handle("anthropic", {**stamp("09"), "messages": [U1, A1, GO]}, S)[1]
+    stamp = lambda day: {"model": OPUS, "max_tokens": 9, "messages": [U1],  # noqa: E731
+                         "system": marked(SYS + f"\n{day} Nov 26 2026\n")}
+    proxy.handle("anthropic", stamp("Thu"), S)
+    entry = proxy.handle("anthropic", {**stamp("Fri"), "messages": [U1, A1, GO]}, S)[1]
     assert entry.cause == "volatile_system"
+
+
+def test_a_prompt_that_differs_only_in_its_line_breaks_is_still_an_edit():
+    """The line breaks stay in the masked text: re-wrapping a system prompt is an edit of it, not a
+    volatile value. (A first version of the fix turned every line break into a space.)"""
+    assert jmask("Rules:\n- be terse") != jmask("Rules: - be terse")
+    assert jmask("a\tb") != jmask("a b") and jmask("a\r\nb") != jmask("a\nb")
+    assert jmask("Rules:\n- be terse\n- 3 steps") == json.dumps("Rules:\n- be terse\n- <N> steps")
+    words = ("Follow the house style in every answer and keep each reply short. " * 60).split()
+    wrap = lambda n: "\n".join(" ".join(words[i:i + n]) for i in range(0, len(words), n))  # noqa: E731
+    proxy = scripted([claude(write=3000), claude(write=3100)])
+    body = lambda n: {"model": OPUS, "max_tokens": 9, "messages": [U1], "system": marked(wrap(n))}  # noqa: E731
+    proxy.handle("anthropic", body(12), S)
+    entry = proxy.handle("anthropic", {**body(15), "messages": [U1, A1, GO]}, S)[1]
+    assert entry.cause == "system_edit"
 
 
 def test_a_literal_backslash_n_in_the_prompt_is_left_alone():
     """A prompt that shows the two characters backslash and n (code, a regex) is not a line break."""
-    assert mask_volatiles(json.dumps(r"split on \n2026")) == mask_volatiles(json.dumps(r"split on \n2026"))
-    assert mask_volatiles(json.dumps(r"use \node")) == json.dumps(r"use \node")
-    assert mask_volatiles(json.dumps("a\nb")) != mask_volatiles(json.dumps(r"a\nb"))
+    for text in (r"split on \n2026", r"use \node", r"C:\new\table", r"a regex: \d+\n\t"):
+        assert jmask(text) == mask_volatiles(json.dumps(text)), text      # the mark changes nothing here
+    assert jmask(r"use \node") == json.dumps(r"use \node")
+    assert jmask("a\nb") != jmask(r"a\nb")
 
 
-# -- 15. each hash is keyed by its own text ------------------------------------------------------
+def test_a_windows_path_in_a_plain_prompt_is_still_seen_by_the_gate():
+    """`prefixwise check` looks at a string system prompt as it is, not as JSON: the backslash-r and
+    backslash-t inside a path are part of the path."""
+    for path in (r"C:\repos\tools", r"D:\tmp\run", r"C:\new\table"):
+        watch = check.VolatileWatch()
+        watch("openai", "s", [("system", f"Work only inside {path}.")])
+        assert watch.seen == {"s": {"path"}}, path
+        watch = check.VolatileWatch()
+        watch("anthropic", "s", [("system", [{"type": "text", "text": f"Work only inside {path}."}])])
+        assert watch.seen == {"s": {"path"}}, path
 
-def test_with_a_key_set_a_timestamp_that_crosses_256_bytes_is_still_volatile():
-    """Blocks of 256 bytes or less are keyed. A value that grew moved a block across that limit, the
-    two masked hashes were made with different keys, and a volatile value read as an edit."""
-    for key in (None, b"per-install-key"):
-        fp = Fingerprinter(hmac_key=key)
-        dates = ("2026-11-26T09:00:01Z", "Thu Nov 26 09:00:01 UTC 2026")   # one date, in two formats and lengths
-        text = "You are a careful agent. " * 9
-        text = text[:250 - len(json.dumps(f"Now: {dates[0]}."))]             # the shorter one lands just under 256
-        short, long = (text + f"Now: {d}." for d in dates)
-        a, b = fp.fingerprint_block("system", 0, short), fp.fingerprint_block("system", 0, long)
-        assert len(json.dumps(short)) <= 256 < len(json.dumps(long))
-        assert a.masked == b.masked and a.raw != b.raw and a.canonical != b.canonical, key
+
+# -- 15. with a key, every hash is keyed ---------------------------------------------------------
+
+def test_with_a_key_set_blocks_equal_once_masked_or_canonical_hash_equal_whatever_their_length():
+    """Only blocks of 256 bytes or less were keyed, by their raw length. Two blocks on either side of
+    that line were hashed with different keys, so a timestamp that grew read as an edit, and the
+    same text in another Unicode form read as different text."""
+    fp = Fingerprinter(hmac_key=b"per-install-key")
+    text = ("You are a careful agent. " * 12)[:230]
+    short, long = text + "Now: 2026-11-26T09:00:01Z.", text + "Now: Thursday, November 26, 2026 09:00:01 UTC."
+    assert len(short.encode()) <= 256 < len(long.encode())
+    a, b = fp.fingerprint_block("system", 0, short), fp.fingerprint_block("system", 0, long)
+    assert a.masked == b.masked and a.raw != b.raw and a.canonical != b.canonical
+    composed = "Répondez en français, brièvement. " * 6 + "Très bien, é à è ù ê."
+    decomposed = unicodedata.normalize("NFD", composed)
+    assert len(composed.encode()) <= 256 < len(decomposed.encode())
+    a, b = fp.fingerprint_block("system", 0, composed), fp.fingerprint_block("system", 0, decomposed)
+    assert a.canonical == b.canonical and a.raw != b.raw
+
+
+def test_with_a_key_set_no_hash_is_a_bare_sha256():
+    """Every hash of every block is keyed: short or long, raw, canonical and masked."""
     keyed, bare = Fingerprinter(hmac_key=b"k"), Fingerprinter()
-    assert keyed.fingerprint_block("system", 0, "short").canonical != bare.fingerprint_block("system", 0, "short").canonical
-    long_text = "x" * 2000   # long blocks stay plain SHA-256, key or not
-    assert keyed.fingerprint_block("system", 0, long_text).canonical == bare.fingerprint_block("system", 0, long_text).canonical
+    line = "Tenant: acme-corp\nPlan: enterprise\n" + "Never reveal the code.\n" * 9 + "Be brief.\n"    # raw <= 256 < canonical
+    assert len(line.encode()) <= 256 < len(json.dumps(line).encode())
+    for text in ("short", line, "x" * 2000, "Step 5 of 9. " * 40):
+        k, b = keyed.fingerprint_block("system", 0, text), bare.fingerprint_block("system", 0, text)
+        assert k.hmac and not b.hmac
+        assert not {k.raw, k.canonical, k.masked} & {b.raw, b.canonical, b.masked}, text[:20]
+        plain = {hashlib.sha256(t).hexdigest() for t in (text.encode(), json.dumps(text).encode(),
+                                                         json.dumps(text, ensure_ascii=False).encode())}
+        assert not {k.raw, k.canonical, k.masked} & plain
+        assert b.raw == hashlib.sha256(text.encode()).hexdigest()          # without a key: as before
+    tool = {"name": "t", "description": "d" * 600, "input_schema": {"type": "object"}}
+    assert keyed.fingerprint_block("tools", 0, tool).canonical != bare.fingerprint_block("tools", 0, tool).canonical
 
 
 # -- 16. a request logged twice is one request ---------------------------------------------------
@@ -208,3 +266,85 @@ def test_import_gateway_counts_a_request_logged_twice_once(tmp_path):
         got[name] = json.loads(out.stdout)
     assert (got["clean"]["imported"], got["clean"]["duplicates"]) == (2, 0)
     assert (got["twice"]["imported"], got["twice"]["duplicates"]) == (2, 1)
+
+
+def gw_line(msgs, t, rid, prompt=3000, cached=0, usage=True, session="conv-1"):
+    response = {"id": rid, "model": "gpt-5.6-terra"}
+    if usage:
+        response["usage"] = {"prompt_tokens": prompt, "completion_tokens": 50,
+                             "prompt_tokens_details": {"cached_tokens": cached}}
+    return json.dumps({"start_time": t, "end_time": t + 2, "headers": {"x-session-id": session},
+                       "request": {"model": "gpt-5.6-terra", "messages": [{"role": "system", "content": SYS}] + msgs},
+                       "response": response})
+
+
+def gw_import(tmp_path, name, lines, *extra):
+    log, db = tmp_path / f"{name}.jsonl", tmp_path / f"{name}.db"
+    log.write_text("\n".join(lines) + "\n")
+    out = subprocess.run([sys.executable, "-m", "prefixwise", "import", "gateway", "--path", str(log),
+                          "--ledger", str(db), "--json", *extra], capture_output=True, text=True,
+                         env={"PYTHONPATH": "src", "PATH": "/usr/bin:/bin"})
+    return json.loads(out.stdout)
+
+
+def test_import_gateway_keeps_different_requests_that_share_a_response_id(tmp_path):
+    """The same id is not the same request: a server that numbers its responses from zero each run,
+    and a gateway cache that answers later requests with the stored response."""
+    ask = lambda i: [{"role": "user", "content": f"question {i}"}]  # noqa: E731
+    numbered = [gw_line(ask(i), 1795000000 + 10 * i, f"chatcmpl-{i % 3}", session=f"c{i}") for i in range(9)]
+    got = gw_import(tmp_path, "numbered", numbered)
+    assert (got["imported"], got["duplicates"]) == (9, 0)
+    cached = [gw_line([U1], 1795000000 + 3600 * i, "chatcmpl-STORED") for i in range(3)]   # one request, an hour apart
+    got = gw_import(tmp_path, "cached", cached)
+    assert (got["imported"], got["duplicates"]) == (3, 0)
+
+
+def test_import_gateway_keeps_the_line_with_usage_and_counts_repeats_in_the_window(tmp_path):
+    t = 1795000000
+    bare, full = gw_line([U1], t, "chatcmpl-A", usage=False), gw_line([U1], t, "chatcmpl-A")
+    for name, lines in (("bare-first", [bare, full]), ("full-first", [full, bare])):
+        got = gw_import(tmp_path, name, lines + [gw_line([U1, A1, GO], t + 10, "chatcmpl-B", 3100, 2944)])
+        assert (got["imported"], got["duplicates"]) == (2, 1), name
+        from prefixwise.ledger import Ledger
+        with Ledger(str(tmp_path / f"{name}.db")).reader() as conn:
+            assert [r[0] for r in conn.execute("SELECT prompt_tokens FROM entries ORDER BY id")] == [3000, 3100], name
+    old = [gw_line([U1], t, "chatcmpl-A")] * 3                      # repeats before the window are not this import's
+    new = [gw_line([U1, A1, GO], t + 7200, "chatcmpl-B", 3100, 2944)] * 2
+    got = gw_import(tmp_path, "window", old + new, "--since", str(t + 3600))
+    assert (got["imported"], got["duplicates"]) == (1, 1)
+
+
+# -- what else counts as part of the prompt, and what the other callers see -----------------------
+
+def test_cache_control_inside_any_schema_or_tool_arguments_is_not_a_marker():
+    schema = {"type": "object", "properties": {"cache_control": {"type": "object"}}}
+    bodies = {
+        "an OpenAI tool's parameters": {"tools": [{"type": "function", "function": {"name": "t", "parameters": schema}}]},
+        "a Responses tool's parameters": {"tools": [{"type": "function", "name": "t", "parameters": schema}]},
+        "a structured-output schema": {"response_format": {"type": "json_schema", "json_schema": {"name": "o", "schema": schema}}},
+        "an OpenAI tool call's arguments": {"messages": [{"role": "assistant", "tool_calls": [
+            {"id": "c1", "type": "function", "function": {"name": "t", "arguments": {"cache_control": {"type": "ephemeral"}}}}]}]},
+    }
+    for where, body in bodies.items():
+        assert cache_markers(body) == [] and not has_cache_breakpoint({"messages": [U1], **body}), where
+        assert without_cache_markers(body) == body, where
+    # ... so a request with only such a field still gets its markers placed, and the comparison keys
+    # of the report's detail keep the field
+    tool = {"name": "t", "input_schema": schema}
+    placed = auto_breakpoints({"model": OPUS, "system": "s " * 4000, "tools": [tool],
+                               "messages": [{"role": "user", "content": "what does cache_control do?"}]}, 512)
+    assert placed is not None and cache_markers(placed)
+    assert details._strip_markers([tool]) == [tool]
+    assert details._strip_markers([{**tool, "cache_control": MARK}]) == [tool]
+
+
+def test_a_change_of_context_management_is_a_changed_parameter():
+    """Anthropic's own diagnosis answers `unavailable` when it differs (with tool_choice, thinking and
+    output_config): the blocks are equal and something that is not a block changed."""
+    proxy = scripted([claude(write=3000), claude(write=3100)])
+    base = {"model": OPUS, "max_tokens": 9, "system": marked()}
+    edits = lambda n: {"edits": [{"type": "clear_tool_uses_20250919", "trigger": {"type": "input_tokens", "value": n}}]}  # noqa: E731
+    proxy.handle("anthropic", {**base, "context_management": edits(30000), "messages": [U1]}, S)
+    entry = proxy.handle("anthropic", {**base, "context_management": edits(50000), "messages": [U1, A1, GO]}, S)[1]
+    assert entry.cause == "param_rendered" and "context_management" in entry.evidence
+
