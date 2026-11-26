@@ -20,7 +20,8 @@ Hashes are stored, never raw prompts, by default.
 Privacy: a bare hash of a short or predictable block (a four-word user
 message, a boilerplate system line) is dictionary-guessable. When an
 HMAC key is supplied, every hash of every block is an HMAC with the
-per-install key (raw, canonical, and masked): no bare SHA-256 is made.
+per-install key (raw, canonical, and masked), and so is every other
+digest of prompt content a record carries (details.py, records.py).
 (Until 0.12.7 only blocks of 256 bytes or less were keyed. A length
 limit cannot be applied the same way to two blocks that are equal once
 canonical or masked but differ in raw length, so one of them was keyed
@@ -119,7 +120,13 @@ _BREAK_MARK = "\x00"
 
 
 def _mark_breaks(text: str) -> str:
-    return _ESCAPED_SPACE_RE.sub(r"\1\2" + _BREAK_MARK, text) if "\\" in text else text
+    if "\\" not in text:
+        return text
+    if "\\\\" not in text:  # no escaped backslash: every backslash-n, -r, -t is an escape (the usual case, and fast)
+        for esc in ("\\n", "\\r", "\\t"):
+            text = text.replace(esc, esc + _BREAK_MARK)
+        return text
+    return _ESCAPED_SPACE_RE.sub(r"\1\2" + _BREAK_MARK, text)
 
 
 def mask_volatiles_kinds(text: str, json_text: bool = False) -> tuple[str, tuple[str, ...]]:

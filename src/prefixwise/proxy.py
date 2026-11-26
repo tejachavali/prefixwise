@@ -64,7 +64,7 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from .classifier import MIN_PROVIDER_TTL_SECONDS, _blocks_by_role, _role_unchanged, anthropic_min_prefix, openai_model
-from .details import Facts, body_facts, keeps_thinking, usage_facts
+from .details import Facts, body_facts, cache_key_digest, keeps_thinking, usage_facts
 from .diagnostics import anthropic_diagnostics
 from .fingerprint import Fingerprinter, cache_markers, without_cache_markers
 from .fixes import apply_fixes, auto_breakpoints, cache_key_for, parse_fixes
@@ -1180,7 +1180,9 @@ class PrefixwiseProxy:
         # Caches are per model and per workspace (credentials), so both are in the prefix key.
         credential = hashlib.sha256((headers.get("x-api-key") or headers.get("authorization")
                                      or self.api_key or "").encode()).hexdigest()[:12]
-        facts = body_facts(provider, forward_body, model=str(body.get("model", "")), credential=credential)
+        hmac_key = self.fingerprinter.hmac_key
+        facts = body_facts(provider, forward_body, model=str(body.get("model", "")), credential=credential,
+                           hmac_key=hmac_key)
         facts.session_unprotected = unprotected
         facts.no_prefix_cache = self.no_prefix_cache and self.engine_for(provider) == "sglang"
         sent = time.time()
@@ -1202,7 +1204,8 @@ class PrefixwiseProxy:
                 if marked is not None:
                     unmarked, forward_body = forward_body, marked
                     fixes_applied = [*fixes_applied, "auto_breakpoints"]
-                    facts = body_facts(provider, forward_body, model=facts.model, credential=credential)
+                    facts = body_facts(provider, forward_body, model=facts.model, credential=credential,
+                                       hmac_key=hmac_key)
         request_id = str(uuid.uuid4())
         facts.sent_at = sent
         if facts.prefix_key:
@@ -1348,7 +1351,8 @@ class PrefixwiseProxy:
             compaction_event=bool(ctx["compaction_event"]), stream=bool(ctx.get("stream")),
             previous_response_id=(str(body["previous_response_id"]) if ctx.get("api") == "responses"
                                   and body.get("previous_response_id") else None),
-            blocks=fps, params={k: param_fingerprint(body.get(k)) for k in PARAM_KEYS if body.get(k) is not None},
+            blocks=fps, params={k: param_fingerprint(body.get(k), self.fingerprinter.hmac_key)
+                                for k in PARAM_KEYS if body.get(k) is not None},
             # the request the provider received: with auto_breakpoints on, the markers Prefixwise placed
             has_breakpoint=has_cache_breakpoint(ctx.get("forward_body") or body), ttl_seconds=ctx.get("ttl_seconds"), facts=facts,
             fixes_applied=list(ctx.get("fixes_applied") or []),
@@ -1502,7 +1506,8 @@ class PrefixwiseProxy:
             try:
                 fps = self.fingerprinter.fingerprint_blocks(extract_blocks(body, provider))
                 before, now = _blocks_by_role(prev.blocks), _blocks_by_role(fps)
-                params = {k: param_fingerprint(body.get(k)) for k in PARAM_KEYS if body.get(k) is not None}
+                params = {k: param_fingerprint(body.get(k), self.fingerprinter.hmac_key)
+                          for k in PARAM_KEYS if body.get(k) is not None}
                 if params == prev.params and all(_role_unchanged(r, before.get(r, []), now.get(r, []))
                                                  for r in ("tools", "system", "system_dynamic", "messages",
                                                            "tool_results")):
@@ -1677,7 +1682,8 @@ class PrefixwiseProxy:
             ctx["forward_body"], ctx["unmarked_body"] = ctx["unmarked_body"], None
             ctx["fixes_applied"] = [f for f in ctx.get("fixes_applied") or [] if f != "auto_breakpoints"]
             old = ctx["facts"]
-            facts = body_facts(ctx["provider"], ctx["forward_body"], model=old.model, credential=ctx.get("credential", ""))
+            facts = body_facts(ctx["provider"], ctx["forward_body"], model=old.model,
+                               credential=ctx.get("credential", ""), hmac_key=self.fingerprinter.hmac_key)
             for name in ("sent_at", "fanout_age", "shared_age", "shared_write_pos", "volatile_shared_age",
                          "volatile_shared_wrote", "volatile_shared_kind", "session_unprotected",
                          "no_prefix_cache"):
@@ -1706,7 +1712,7 @@ class PrefixwiseProxy:
                 ctx["fixes_applied"] = [f for f in ctx.get("fixes_applied") or [] if f != "cache_key"]
                 if ctx.get("facts") is not None:  # the record says what was sent: no key (or the client's)
                     key = ctx["forward_body"].get("prompt_cache_key")
-                    ctx["facts"].cache_key = (hashlib.sha256(str(key).encode()).hexdigest()[:32] if key else None)
+                    ctx["facts"].cache_key = cache_key_digest(key, self.fingerprinter.hmac_key)
         return undone or bool(rejected)
 
     def _markers_were_refused(self, ctx: dict) -> None:

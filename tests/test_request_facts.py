@@ -13,6 +13,7 @@ from prefixwise.fingerprint import (Fingerprinter, cache_markers, mask_only, mas
                                     without_cache_markers)
 from prefixwise.fixes import auto_breakpoints
 from prefixwise.proxy import PrefixwiseProxy, cache_ttl_seconds, extract_blocks, has_cache_breakpoint
+from prefixwise.records import param_fingerprint
 
 SYS = "You are a careful agent. " * 400
 U1 = {"role": "user", "content": "start"}
@@ -348,3 +349,85 @@ def test_a_change_of_context_management_is_a_changed_parameter():
     entry = proxy.handle("anthropic", {**base, "context_management": edits(50000), "messages": [U1, A1, GO]}, S)[1]
     assert entry.cause == "param_rendered" and "context_management" in entry.evidence
 
+
+
+# -- a third look: what the second review of the fix found ----------------------------------------
+
+def test_with_a_key_set_the_digests_in_a_record_are_keyed_too():
+    """A record also carries a digest of each message, of the tools and system prompt, of a cache key
+    and of each request parameter's value. They were bare SHA-256 whatever the key, so a short message
+    or a tool name in tool_choice could be guessed from the record a collector receives."""
+    body = {"model": OPUS, "max_tokens": 9, "system": "You are a bot.", "prompt_cache_key": "tenant-7",
+            "tool_choice": {"type": "tool", "name": "lookup"}, "messages": [{"role": "user", "content": "yes"}]}
+    bare = hashlib.sha256(json.dumps({"role": "user", "content": "yes"}).encode()).hexdigest()[:16]
+    plain, keyed = details.body_facts("anthropic", body), details.body_facts("anthropic", body, hmac_key=b"k")
+    assert plain.msgs == [bare] and keyed.msgs != [bare]                     # without a key: as before
+    for name in ("msgs", "nothink", "prefix_key", "prefix_key_canonical", "prefix_key_masked", "cache_key"):
+        assert getattr(plain, name) != getattr(keyed, name), name
+    choice = body["tool_choice"]
+    assert param_fingerprint(choice) == hashlib.sha256(
+        json.dumps(choice, sort_keys=True, separators=(",", ":")).encode()).hexdigest()[:32]
+    assert param_fingerprint(choice, b"k") != param_fingerprint(choice)
+    seen = {}
+    for key in (None, b"per-install-key"):
+        proxy = PrefixwiseProxy(mock=True, hmac_key=key)
+        ctx = proxy.prepare("anthropic", dict(body), dict(S))
+        seen[key] = (ctx["facts"].msgs, ctx["facts"].cache_key)
+    assert seen[None][0] == [bare] and seen[b"per-install-key"][0] != [bare]
+    assert seen[None][1] != seen[b"per-install-key"][1]
+    # equal requests still compare equal under one key: an appended turn is a hit, not an edit
+    proxy = scripted([claude(write=3000), claude(read=3000, write=100)], hmac_key=b"per-install-key")
+    base = {"model": OPUS, "max_tokens": 9, "system": marked(), "tool_choice": {"type": "auto"}}
+    proxy.handle("anthropic", {**base, "messages": [U1]}, S)
+    assert proxy.handle("anthropic", {**base, "messages": [U1, A1, GO]}, S)[1].cause == "none"
+
+
+def test_the_report_details_count_only_real_markers():
+    """A 1-hour marker and a schema property named cache_control: every marker asks for an hour."""
+    tool = {"name": "t", "input_schema": {"type": "object", "properties": {"cache_control": {"type": "object"}}}}
+    body = {"model": OPUS, "system": marked(ttl="1h"), "tools": [tool], "messages": [U1]}
+    assert details.body_facts("anthropic", body).all_1h
+
+
+def test_the_report_details_mask_a_date_at_the_start_of_a_line_too():
+    keys = lambda day: details._prefix_keys(f"k-{day}", "anthropic", OPUS, "", [],  # noqa: E731
+                                            f"Rules.\n{day} Nov 26 2026\nEnd.")
+    thu, fri = keys("Thu"), keys("Fri")
+    assert thu[0] != fri[0] and thu[1] == fri[1] and thu[2] == fri[2]        # canonical differs; masked equal
+
+
+def test_the_marks_never_reach_the_output_and_the_fast_path_agrees_with_the_slow_one():
+    from prefixwise import fingerprint
+    texts = ["Rules.\nThu Nov 26 2026\n\t42 items\r\nEnd.", r"C:\new\table and a real" + "\nline 7",
+             "no escapes at all 2026-11-26", r"a \\n literal then" + "\n9"]
+    for text in texts:
+        doc = json.dumps(text)
+        assert fingerprint._mark_breaks(doc) == fingerprint._ESCAPED_SPACE_RE.sub(
+            r"\1\2" + fingerprint._BREAK_MARK, doc), text
+        for out in (jmask(text), mask_only(doc, frozenset({"date", "time"}), json_text=True),
+                    mask_only(doc, frozenset({"id"}), json_text=True)):
+            assert "\x00" not in out and json.loads(out) is not None, text
+    assert mask_only(json.dumps("a\nThu Nov 26 2026"), frozenset({"date"}), json_text=True) == json.dumps("a\n<DATE>")
+
+
+def test_the_gate_sees_a_path_at_the_start_of_a_line_in_a_block_list():
+    watch = check.VolatileWatch()
+    watch("anthropic", "s", [("system", [{"type": "text", "text": "Work only inside:\n/home/dev/repo\n"}])])
+    assert watch.seen == {"s": {"path"}}
+
+
+def test_import_gateway_same_id_and_start_with_another_body_is_another_request(tmp_path):
+    t = 1795000000
+    ask = lambda q: [{"role": "user", "content": q}]  # noqa: E731
+    got = gw_import(tmp_path, "bodies", [gw_line(ask("one"), t, "chatcmpl-0", session="a"),
+                                         gw_line(ask("two"), t, "chatcmpl-0", session="b")])
+    assert (got["imported"], got["duplicates"]) == (2, 0)
+
+
+def test_import_gateway_counts_a_repeat_by_when_its_request_ended(tmp_path):
+    """The window is the requests that ended at or after --since; a repeat of one of them is in it,
+    even when the request started before."""
+    t = 1795000000
+    long_one = json.dumps({**json.loads(gw_line([U1], t - 10, "chatcmpl-L")), "end_time": t + 50})
+    got = gw_import(tmp_path, "straddle", [long_one, long_one], "--since", str(t))
+    assert (got["imported"], got["duplicates"]) == (1, 1)

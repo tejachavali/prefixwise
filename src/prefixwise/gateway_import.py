@@ -152,9 +152,9 @@ def read_log(path: str | os.PathLike) -> tuple[list[dict], int]:
     return entries, bad
 
 
-def read_log_counts(path: str | os.PathLike) -> tuple[list[dict], int, list[float]]:
-    """(entries, lines that could not be used, when each line that repeats a request already read
-    started). Each entry: start, end, provider, body, response, headers, status, line. A directory
+def read_log_counts(path: str | os.PathLike) -> tuple[list[dict], int, list[int]]:
+    """(entries, lines that could not be used, and for each line that repeats a request already read,
+    the index in entries of the request it repeats). Each entry: start, end, provider, body, response, headers, status, line. A directory
     reads every *.jsonl / *.json file in it, in name order. A request logged twice (a shipper that
     retried, two files that overlap) is counted once. Two lines are the same request only when the
     response id, the start time and the request body are all equal: an id alone is not enough (a
@@ -189,7 +189,7 @@ def read_log_counts(path: str | os.PathLike) -> tuple[list[dict], int, list[floa
                         json.dumps(body, sort_keys=True, default=str).encode("utf-8", "surrogatepass")).digest())
                     again = seen.get(same)
                     if again is not None:
-                        repeated.append(start)
+                        repeated.append(again)
                         if entries[again]["response"].get("usage") or not response.get("usage"):
                             continue  # the line already kept says as much or more
                     else:

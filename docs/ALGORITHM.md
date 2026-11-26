@@ -45,7 +45,9 @@ those, by an end-user id (`metadata.user_id`, OpenAI `user`).
 **Each block has three hashes** (SHA-256 over the block as parsed and re-serialized, so whitespace
 and escaping in the original bytes are not seen). With a per-install key set (`PREFIXWISE_HMAC_KEY`),
 every hash of every block is a keyed hash (HMAC) instead, so a short or predictable block cannot be
-guessed from its hash. (Until 0.12.7 only blocks of 256 bytes or less were keyed. A length limit
+guessed from its hash. The other digests a record carries (of each message, of the tools and
+system prompt together, of a `prompt_cache_key`, of each request parameter's value) are keyed the
+same way. (Until 0.12.7 only blocks of 256 bytes or less were keyed. A length limit
 cannot treat alike two blocks that are equal once canonical or masked but differ in raw length, so
 they compared as different.) The three hashes:
 
