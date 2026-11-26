@@ -179,7 +179,7 @@ sequenceDiagram
 | `log.py` | the record log: `RedisBackend` (an edge appends each record to its session's partition of a Redis Stream) and `LogConsumer` (a collector reads its partitions in order through a consumer group, acknowledges after the row is written, replays at start to rebuild its state) |
 | `sinks.py` | ledger sinks: a copy of every committed row to a JSONL file or ClickHouse (`INSERT ... FORMAT JSONEachRow` on the bounded sender), never on the ledger's critical path |
 | `collector.py` | the control plane: per-conversation state (lanes, bounded by `PREFIXWISE_MAX_SESSIONS`, default 10,000), classification, sub-reasons, pricing, the ledger write; `ingest(record)` and `ingest_failure(record)` take records in (serialized by one lock); `chain_parent` and `stitched_opening` answer the edge's two request-time questions |
-| `fingerprint.py` | splits a request into blocks in the provider's prefix order; `raw` (exact bytes), `canonical` (sorted keys, NFC, fixed separators) and `masked` (dates, ids, numbers masked) hashes; HMAC for short, guessable blocks |
+| `fingerprint.py` | splits a request into blocks in the provider's prefix order; `raw` (exact bytes), `canonical` (sorted keys, NFC, fixed separators) and `masked` (dates, ids, numbers masked) hashes; HMAC for all of them when a key is set |
 | `classifier.py` | `RequestSnapshot` → one `MissCause`, `legit` (waste or expected), evidence text, secondary causes |
 | `details.py` | sub-reasons (`ttl_shortened`, `lookback_exceeded`, `markers_ignored`, `sent_before_cache_written`, `shared_prefix_not_reused`, `thinking_stripped`, `cache_key_changed`, `host_restored`), each with strict preconditions |
 | `diagnostics.py` | maps Anthropic's 6 and OpenAI's 9 native miss reasons onto the taxonomy; scores agreement (provider "no verdict" answers are not scored) |
@@ -329,7 +329,7 @@ design and limits: [ENGINES.md](ENGINES.md).
 - **The client's request is the client's.** Prefixwise adds only tracked diagnostic fields and
   removes them if an upstream refuses them; rewrites happen only with an explicit opt-in fix.
   It never changes routing (it sends no session-affinity header).
-- **No prompt text.** Hashes (HMAC for short blocks), counts and Prefixwise's own words.
+- **No prompt text.** Hashes (HMAC when a key is set), counts and Prefixwise's own words.
 - **Bounded memory.** Per-session state, block indexes and in-flight checks all have caps.
 - **Stdlib core.** The proxy, classifier and ledger need only Python 3.10+. Extras are opt-in:
   `[engines]` (pyzmq, msgspec), `[otel]` (OpenTelemetry SDK and OTLP exporter); the SDK

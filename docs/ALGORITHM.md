@@ -57,18 +57,33 @@ cache lasts, and the provider's own reason is not scored against it.
 
 **Each block has three hashes** (SHA-256 over the block as parsed and re-serialized, so whitespace
 and escaping in the original bytes are not seen). With a per-install key set (`PREFIXWISE_HMAC_KEY`),
-blocks of 256 bytes or less, which a bare hash could give away, are keyed hashes (HMAC) instead;
-without one they are plain SHA-256 like the rest:
+every hash of every block is a keyed hash (HMAC) instead, so a short or predictable block cannot be
+guessed from its hash. The other digests a record carries (of each message, of the tools and
+system prompt together, of a `prompt_cache_key`, of each request parameter's value) are keyed the
+same way. (Until 0.12.7 only blocks of 256 bytes or less were keyed. A length limit
+cannot treat alike two blocks that are equal once canonical or masked but differ in raw length, so
+they compared as different.) The three hashes:
 
 | Hash | Over | Equal means |
 |---|---|---|
 | raw | the content as sent, serialized | the provider saw the same content in the same form |
 | canonical | the content with keys sorted at every depth, fixed separators, NFC unicode, and JSON Schema set-arrays (`required`, a list `type`) sorted | the same content, possibly serialized differently |
-| masked | the canonical form with dates, times, UUIDs, hex ids, numbers and any token containing a digit (`v2`, `gpt4`) replaced by placeholders | the same words: only volatile values differ |
+| masked | the canonical form with dates, times, UUIDs, hex ids, numbers and any token containing a digit (`v2`, `gpt4`) replaced by placeholders; line breaks and tabs stay as they are | the same words on the same lines: only volatile values differ |
+
+**Cache markers are not part of a block.** A `cache_control` says where to cache, not what the prompt
+is, and the usual pattern moves it to the newest message every turn, so it is left out of every hash.
+A `cache_control` object is a marker wherever it sits in the request (the APIs and the gateways put
+one on the request, a tool or its `function`, a system block, a message, a content block), except
+inside the prompt's own data: a tool's schema (`input_schema`, `parameters`), a structured-output
+schema (`json_schema`, `schema`), and a tool call's `input` or `arguments`. There it is content and
+is hashed. Text that contains the word is not a marker. The same rule decides whether a request
+carries a breakpoint at all and which lifetime its markers ask for. (A tool call in a format with
+another field name, such as Bedrock's `toolUse.input`, is not recognised as data: a `cache_control`
+object inside it still counts as a marker.)
 
 No prompt text is kept. The hashes live in memory for the lane's next turn; when a remote collector
 (`--collector`) or a record log (Redis) is configured, they travel with the turn's record to it,
-so set `PREFIXWISE_HMAC_KEY` there too if short blocks must not be guessable.
+so set `PREFIXWISE_HMAC_KEY` on every edge (the same key, since hashes made with different keys never match) if blocks must not be guessable.
 
 **Usage** is the provider's report: `prompt` tokens, `cached` tokens read from the cache, and,
 where reported, tokens `written` to it. From these:

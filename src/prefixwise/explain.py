@@ -154,11 +154,29 @@ def explain_pair(prev: Turn | None, curr: Turn, provider: str | None = None,
                        secondary=[c.value for c in result.secondary], diff=text)
 
 
+# What makes a JSON object a request this module can read: a field the block extractor takes a
+# prompt from, on Anthropic's Messages API, OpenAI's Chat Completions and the Responses API. A
+# body with only a system prompt and tools is one. A Gemini `contents` body or a legacy completions
+# `prompt` body is not read: its prompt would be left out and two different requests would compare
+# as unchanged.
+_PROMPT_KEYS = ("messages", "input", "instructions", "system", "tools")
+
+
 def _turn_from_record(rec: dict) -> Turn:
     """A record is a bare request body, or {"request"|"body": ..., "usage": ..., ...}."""
     if not isinstance(rec, dict):
         raise ValueError("each record must be a JSON object")
     body = rec.get("request") or rec.get("body")
+    sent = body if body is not None else rec
+    readable = isinstance(sent, dict) and any(k in sent for k in _PROMPT_KEYS)
+    # ... and not one whose prompt is in a field that is not read, even beside one that is (a Gemini
+    # body with tools, a completions-style prompt with a system field).
+    unread = isinstance(sent, dict) and ("contents" in sent or ("prompt" in sent and not ("messages" in sent
+                                                                                       or "input" in sent)))
+    if not readable or unread:
+        raise ValueError('not a request Prefixwise can read: expected the body of an Anthropic Messages, OpenAI Chat '
+                         'Completions or Responses request (an object with "messages", "input", "instructions", '
+                         '"system" or "tools"), or {"request": <body>, "usage": ...}')
     if body is None:
         return Turn(body=rec, session_id=str(rec.get("session_id") or "default"))
     usage = rec.get("usage") or (rec.get("response") or {}).get("usage")
@@ -177,9 +195,19 @@ def load_turns(path: str | Path) -> list[Turn]:
     try:
         data = json.loads(stripped)
     except ValueError:
-        data = [json.loads(line) for line in text.splitlines() if line.strip()]
+        try:
+            data = [json.loads(line) for line in text.splitlines() if line.strip()]
+        except ValueError as exc:
+            raise ValueError(f"{path} is not JSON or JSON Lines ({exc})") from None
     records = data if isinstance(data, list) else [data]
-    return [_turn_from_record(r) for r in records]
+    turns = []
+    for i, r in enumerate(records, 1):
+        try:
+            turns.append(_turn_from_record(r))
+        except ValueError as exc:
+            where = f"{path}, record {i}" if len(records) > 1 else str(path)
+            raise ValueError(f"{where}: {exc}") from None
+    return turns
 
 
 def explain_session(turns: list[Turn], provider: str | None = None, diff: bool = False) -> list[Explanation]:

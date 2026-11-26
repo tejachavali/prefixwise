@@ -18,6 +18,7 @@ collector refuses a version it does not know rather than guess.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 from dataclasses import asdict, dataclass, field, fields
 
@@ -29,6 +30,9 @@ RECORD_VERSION = 1
 # Prompt-affecting request parameters the classifier compares (RequestSnapshot.params). A change
 # in one of these re-renders the prompt without changing any block.
 PARAM_KEYS = ("tool_choice", "thinking", "reasoning", "output_format",
+              # Anthropic's current home of the effort level and the structured-output format
+              # (output_format is the older field), and its context-editing settings
+              "output_config", "context_management",
               # Chat Completions structured outputs: the schema is rendered into the prompt
               "response_format",
               # SGLang leaves extra_key out of its KV-event hashes, so a change must be seen here
@@ -51,12 +55,15 @@ PARAM_KEYS = ("tool_choice", "thinking", "reasoning", "output_format",
               "documents", "continue_final_message")
 
 
-def param_fingerprint(value) -> str:
+def param_fingerprint(value, key: bytes | None = None) -> str:
     """A request parameter's value, as a record carries it: a digest of its canonical JSON. The
     classifier and the sub-reasons only ask whether a value changed, and a value can hold text
-    (a tool name in tool_choice, a schema in text.format), so the value itself never leaves."""
-    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
-                          .encode()).hexdigest()[:32]
+    (a tool name in tool_choice, a schema in text.format), so the value itself never leaves. With
+    the per-install key the digest is keyed, so a short value cannot be guessed from it."""
+    data = json.dumps(value, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8", "surrogatepass")
+    if key:
+        return hmac.new(key, data, hashlib.sha256).hexdigest()[:32]
+    return hashlib.sha256(data).hexdigest()[:32]
 
 
 class RecordError(ValueError):

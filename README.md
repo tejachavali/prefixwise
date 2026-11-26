@@ -4,7 +4,9 @@
 [![PyPI](https://img.shields.io/pypi/v/prefixwise)](https://pypi.org/project/prefixwise/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-**Your agent resends its whole conversation every turn, and one changed byte near the top means the provider charges full price for everything after it. Prefixwise tells you which byte, what it cost, and fixes the common causes for you.**
+**Your agent resends its whole conversation every turn, and one changed byte near the top means the provider charges full price for everything after it. Prefixwise tells you which block changed, what it cost, and fixes the common causes for you.**
+
+Prompt caching: a provider keeps the start of a prompt it has just seen, and charges about a tenth of the input price to read it again, as long as that start is byte-for-byte the same. Prefixwise is for multi-turn agents on the Anthropic and OpenAI APIs, vLLM and SGLang. A single-shot call has nothing to reuse and nothing for it to find.
 
 Providers and engines report *how many* tokens missed the prompt cache, not *why*. Prefixwise sits between your agent and the model and does four things:
 
@@ -13,16 +15,24 @@ Providers and engines report *how many* tokens missed the prompt cache, not *why
 - **Prevent.** `prefixwise check` fails CI when a code change would break the cache.
 - **Auto-detect.** It recognises vLLM and SGLang behind a URL and, when the engine publishes KV events, subscribes to them on its own.
 
-It stores hashes and counts, never your prompts.
+It stores hashes and counts, never your prompts. No dependencies, Python 3.10 or newer, MIT. Alpha: the verdicts are tested (see [Results](#results)); the command line may still change between minor versions.
+
+## Try it
 
 ```bash
 pip install prefixwise
-prefixwise run -- claude             # any agent with an API key: claude, codex, opencode, your own
-prefixwise report --session latest   # the session turn by turn
-prefixwise run --optimize -- claude  # the same agent, with the proven fixes applied
+prefixwise demo
 ```
 
-No API key (Claude Code or Codex on a subscription)? `prefixwise import claude-code` reads the logs already on your machine.
+`prefixwise demo` needs no key and no network. A scripted agent breaks the cache three ways against a built-in mock provider, each miss is named and priced, and the same agent runs again with the fixes on. About five seconds. Then, on your own traffic, start from what you have:
+
+| You have | Run |
+|---|---|
+| Claude Code or Codex already used on this machine | `prefixwise import claude-code` (or `import codex`): reads the logs on disk, no key, nothing leaves the machine |
+| An agent and an API key | `prefixwise run -- claude` (or `codex`, `opencode`, your own command), then `prefixwise report --session latest` for the session turn by turn |
+| The same, and you want the fixes applied | `prefixwise run --optimize -- claude` |
+
+An agent finds the proxy through `ANTHROPIC_BASE_URL` or `OPENAI_BASE_URL`, which `prefixwise run` sets for it; `prefixwise serve` prints the two values to set by hand. An agent signed in with a subscription cannot be routed through a proxy: use `import`.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/figures/architecture-dark.svg">
@@ -43,7 +53,7 @@ Avoidable: 3,375 tokens ($0.0116), 12.5% of prompt tokens. Fix these, biggest fi
 Expected misses (not waste): 1 x first request of a session or a new conversation: nothing of its own to reuse yet.
 ```
 
-(Four lines of the output are left out here: the proxy's address, the `-- prefixwise: this run --` header, a note on 46 tokens written and never read, and the pointer to the ledger. The record has all of it.) `prefixwise report --ledger before.db --session latest` shows where it happened:
+(The output is cut to the lines about the miss, and was recorded on 0.11; the record has all of it, and today's report adds where the bill went and what fixing the misses would bring.) `prefixwise report --ledger before.db --session latest` shows where it happened:
 
 ```
 Session run-20261110-010636: 8 requests, 26,932 prompt tokens, cache hit rate 74.6%, 3,375 avoidable, cost $0.0356   (claude-sonnet-4-6)
@@ -89,7 +99,7 @@ Every number is from a live run against real models, and each links to its recor
 
 ## Ways in
 
-Each takes about thirty seconds. All write the same ledger and print the same report.
+All write the same kind of ledger and print the same report. An import keeps its own ledger file (`prefixwise-claude-code.db`, `prefixwise-codex.db`, `prefixwise-gateway.db`), so read it with `prefixwise report --ledger <that file>`.
 
 | You have | Do this |
 |---|---|
@@ -116,7 +126,7 @@ Nineteen causes, each marked as waste or as a legitimate miss. The ones people m
 | `ttl_expired` | The gap since the last turn outlived the cache | A longer TTL, if the reads pay for it |
 | `evicted` | A self-hosted engine dropped the session's blocks | More KV memory, or an offload tier |
 
-Beyond the report: `prefixwise explain --diff a.json b.json` shows what changed between two requests, `prefixwise fixes` ranks fixes by dollars, and every non-streaming response carries an `X-Prefixwise-Cause` header (for a stream, look the request up by its id). All causes and details: [guide](docs/GUIDE.md#what-it-tells-you).
+Beyond the report: `prefixwise explain --diff a.json b.json` shows what changed between two requests, `prefixwise fixes` ranks fixes by the tokens they would save, and every non-streaming response carries an `X-Prefixwise-Cause` header (for a stream, look the request up by its id). All causes and details: [guide](docs/GUIDE.md#what-it-tells-you).
 
 ## Fix
 
@@ -133,6 +143,8 @@ Off by default. If the upstream rejects a request carrying markers Prefixwise pl
 ```bash
 prefixwise check -- pytest tests/agent_scenarios      # exit 2 on a cache regression
 ```
+
+The command is whatever runs your agent; it gets the mock's address in `ANTHROPIC_BASE_URL` and `OPENAI_BASE_URL`. A run in which no request got a verdict exits 1 ("nothing checked"), not 0; `--allow-empty` (or the Action's `allow-empty: true`) is for a job that may run no scenario.
 
 The costly regressions pass every functional test: a tool list built from a set, a timestamp added to the system prompt, a marker moved. `prefixwise check` runs your agent's scenarios against a local mock provider, with no API calls, and fails on four: tools in a changed order, a volatile system prompt, a misplaced marker, a mutated tool result. As a GitHub Action:
 

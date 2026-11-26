@@ -87,6 +87,7 @@ extended-thinking docs (Nov 2026), Claude Code / Codex / opencode / LiteLLM issu
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import re
 from dataclasses import dataclass, field
@@ -95,7 +96,7 @@ import threading
 from collections import OrderedDict
 
 from .classifier import MARKERS_MIN_PROMPT  # twice the largest minimum cacheable prefix of any Claude model
-from .fingerprint import mask_only, mask_volatiles, schema_sets
+from .fingerprint import cache_markers, mask_only, mask_volatiles, schema_sets, without_cache_markers
 
 LOOKBACK_POSITIONS = 20  # Anthropic: positions checked per breakpoint, the breakpoint itself first
 LOOKBACK_CLAIM = LOOKBACK_POSITIONS + 2  # claim only this far out: block counting may differ slightly
@@ -155,29 +156,32 @@ class Facts:
     no_prefix_cache: bool = False
 
 
-def _h(obj) -> str:
-    return hashlib.sha256(json.dumps(obj, sort_keys=False, default=str).encode()).hexdigest()[:16]
+def _digest(data: bytes, key: bytes | None, length: int) -> str:
+    """A digest for comparing only: keyed with the per-install key when there is one, so that what
+    it was made from (a short message, a cache key, a salt) cannot be guessed from it."""
+    if key:
+        return hmac.new(key, data, hashlib.sha256).hexdigest()[:length]
+    return hashlib.sha256(data).hexdigest()[:length]
+
+
+def cache_key_digest(cache_key, key: bytes | None = None) -> str | None:
+    """A request's `prompt_cache_key` as a record carries it: only ever compared for equality."""
+    return _digest(str(cache_key).encode("utf-8", "surrogatepass"), key, 32) if cache_key else None
+
+
+def _h(obj, key: bytes | None = None) -> str:
+    return _digest(json.dumps(obj, sort_keys=False, default=str).encode("utf-8", "surrogatepass"), key, 16)
 
 
 def _strip_markers(value):
-    if isinstance(value, dict):
-        return {k: _strip_markers(v) for k, v in value.items() if k != "cache_control"}
-    if isinstance(value, list):
-        return [_strip_markers(v) for v in value]
-    return value
+    """Without its cache markers; a `cache_control` inside a tool's schema or a tool call's input is
+    content and stays (fingerprint.without_cache_markers)."""
+    return without_cache_markers(value)
 
 
 def _cache_controls(value, out: list) -> None:
-    if isinstance(value, dict):
-        cc = value.get("cache_control")
-        if isinstance(cc, dict):
-            out.append(cc)
-        for k, v in value.items():
-            if k != "cache_control":
-                _cache_controls(v, out)
-    elif isinstance(value, list):
-        for v in value:
-            _cache_controls(v, out)
+    """The cache markers of a request, where the APIs define one (fingerprint.cache_markers)."""
+    cache_markers(value, out)
 
 
 _PREFIX_KEYS: OrderedDict = OrderedDict()  # prefix_key -> the four comparison keys; an agent resends its prefix
@@ -186,7 +190,8 @@ PREFIX_KEYS_CACHE = 4096
 _TIME_KINDS, _ID_KINDS = frozenset({"date", "time"}), frozenset({"id"})
 
 
-def _prefix_keys(prefix_key: str, provider: str, model: str, credential: str, tools, system) -> tuple:
+def _prefix_keys(prefix_key: str, provider: str, model: str, credential: str, tools, system,
+                 key: bytes | None = None) -> tuple:
     """(canonical, masked, masked dates/times only, masked ids only) for tools+system, memoised by the
     raw prefix key: masking a large system prompt costs milliseconds and the same prefix comes back
     every turn. Tools are canonical in every key; only the system prompt is masked."""
@@ -198,8 +203,9 @@ def _prefix_keys(prefix_key: str, provider: str, model: str, credential: str, to
     tools_c = json.dumps(schema_sets(_strip_markers(tools)), sort_keys=True, default=str)
     system_c = json.dumps(_strip_markers(system), sort_keys=True, default=str)
     head = [provider, model, credential, tools_c]
-    keys = (_h(head + [system_c]), _h(head + [mask_volatiles(system_c)]),
-            _h(head + [mask_only(system_c, _TIME_KINDS)]), _h(head + [mask_only(system_c, _ID_KINDS)]))
+    keys = (_h(head + [system_c], key), _h(head + [mask_volatiles(system_c, json_text=True)], key),
+            _h(head + [mask_only(system_c, _TIME_KINDS, json_text=True)], key),
+            _h(head + [mask_only(system_c, _ID_KINDS, json_text=True)], key))
     with _PREFIX_KEYS_LOCK:
         _PREFIX_KEYS[prefix_key] = keys
         if len(_PREFIX_KEYS) > PREFIX_KEYS_CACHE:
@@ -207,8 +213,11 @@ def _prefix_keys(prefix_key: str, provider: str, model: str, credential: str, to
     return keys
 
 
-def body_facts(provider: str, body: dict, model: str = "", credential: str = "") -> Facts:
-    """The request-side facts (the response fills in the rest)."""
+def body_facts(provider: str, body: dict, model: str = "", credential: str = "",
+               hmac_key: bytes | None = None) -> Facts:
+    """The request-side facts (the response fills in the rest). hmac_key: the per-install key; with
+    it every digest made here (of a message, the tools and system prompt, a cache key, a salt) is
+    keyed, like the block hashes."""
     f = Facts(provider=provider, model=model or str(body.get("model") or ""))
     tools = body.get("tools") or []
     f.server_tools = any(isinstance(t, dict) and t.get("type") and t.get("type") != "custom"
@@ -222,14 +231,14 @@ def body_facts(provider: str, body: dict, model: str = "", credential: str = "")
                        if isinstance(m, dict) and m.get("role") in ("system", "developer")), None)
     salt = body.get("cache_salt")
     if salt:  # vLLM and SGLang isolate caches by it: another salt could never have shared the prefix
-        salted = hashlib.sha256(str(salt).encode("utf-8", "surrogatepass")).hexdigest()[:12]
+        salted = _digest(str(salt).encode("utf-8", "surrogatepass"), hmac_key, 12)
         credential = f"{credential}:{salted}"
     if tools or system:
-        f.prefix_key = _h([provider, f.model, credential, _strip_markers(tools), _strip_markers(system)])
+        f.prefix_key = _h([provider, f.model, credential, _strip_markers(tools), _strip_markers(system)], hmac_key)
         (f.prefix_key_canonical, f.prefix_key_masked, f.prefix_key_masked_time,
-         f.prefix_key_masked_id) = _prefix_keys(f.prefix_key, provider, f.model, credential, tools, system)
+         f.prefix_key_masked_id) = _prefix_keys(f.prefix_key, provider, f.model, credential, tools, system, hmac_key)
     key = body.get("prompt_cache_key")  # only ever compared for equality: carried as a digest
-    f.cache_key = hashlib.sha256(str(key).encode("utf-8", "surrogatepass")).hexdigest()[:32] if key else None
+    f.cache_key = cache_key_digest(key, hmac_key)
     controls: list = []
     _cache_controls(body, controls)
     f.all_1h = bool(controls) and all(c.get("ttl") == "1h" for c in controls)
@@ -263,8 +272,8 @@ def body_facts(provider: str, body: dict, model: str = "", credential: str = "")
             last_type = btype
             if isinstance(b, dict) and "cache_control" in b:
                 f.breakpoints.append(pos - 1)
-        f.msgs.append(_h(_strip_markers(m)))
-        f.nothink.append(_h([m.get("role"), m.get("type"), kept]))
+        f.msgs.append(_h(_strip_markers(m), hmac_key))
+        f.nothink.append(_h([m.get("role"), m.get("type"), kept], hmac_key))
     f.n_pos = pos
     if body.get("cache_control") and pos:  # automatic caching: the breakpoint is the last block
         f.breakpoints.append(pos - 1)

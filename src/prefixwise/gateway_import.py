@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import contextlib
 import datetime as _dt
+import hashlib
 import json
 import os
 import time as _time
@@ -146,11 +147,24 @@ def _provider(entry: dict, body: dict, response: dict) -> str:
 
 
 def read_log(path: str | os.PathLike) -> tuple[list[dict], int]:
-    """(entries, lines that could not be used). Each entry: start, end, provider, body, response,
-    headers, status, line. A directory reads every *.jsonl / *.json file in it, in name order."""
+    """(entries, lines that could not be used). See read_log_counts."""
+    entries, bad, _ = read_log_counts(path)
+    return entries, bad
+
+
+def read_log_counts(path: str | os.PathLike) -> tuple[list[dict], int, list[int]]:
+    """(entries, lines that could not be used, and for each line that repeats a request already read,
+    the index in entries of the request it repeats). Each entry: start, end, provider, body, response, headers, status, line. A directory
+    reads every *.jsonl / *.json file in it, in name order. A request logged twice (a shipper that
+    retried, two files that overlap) is counted once. Two lines are the same request only when the
+    response id, the start time and the request body are all equal: an id alone is not enough (a
+    gateway's response cache answers later requests with the stored id, and some servers number their
+    responses from zero each run). Of two such lines, the one whose response reports usage is kept.
+    A response with no id cannot be told from another, so it is always kept."""
     p = Path(path)
     files = sorted(f for f in p.iterdir() if f.suffix in (".jsonl", ".json")) if p.is_dir() else [p]
-    entries, bad = [], 0
+    entries, bad, repeated = [], 0, []
+    seen: dict = {}  # (response id, start, hash of the body) -> index in entries
     for f in files:
         with open(f, encoding="utf-8") as fh:
             for n, line in enumerate(fh, 1):
@@ -168,6 +182,18 @@ def read_log(path: str | os.PathLike) -> tuple[list[dict], int]:
                 if not isinstance(body, dict) or not isinstance(response, dict) or start is None:
                     bad += 1
                     continue
+                rid = response.get("id")
+                again = None
+                if isinstance(rid, str) and rid:
+                    same = (rid, start, hashlib.sha256(
+                        json.dumps(body, sort_keys=True, default=str).encode("utf-8", "surrogatepass")).digest())
+                    again = seen.get(same)
+                    if again is not None:
+                        repeated.append(again)
+                        if entries[again]["response"].get("usage") or not response.get("usage"):
+                            continue  # the line already kept says as much or more
+                    else:
+                        seen[same] = len(entries)
                 end = parse_time(_get(raw, END_KEYS))
                 if end is None:
                     ms = _get(raw, LATENCY_MS_KEYS)
@@ -181,18 +207,22 @@ def read_log(path: str | os.PathLike) -> tuple[list[dict], int]:
                 if first is None and isinstance(ttft, (int, float)) and not isinstance(ttft, bool):
                     first = start + float(ttft) / 1000.0
                 timed = _get(raw, END_KEYS + LATENCY_MS_KEYS + LATENCY_S_KEYS) is not None
-                entries.append({"start": start, "end": max(start, end), "body": body, "response": response,
-                                "provider": _provider(raw, body, response),
-                                "headers": {str(k).lower(): str(v) for k, v in headers.items()}
-                                if isinstance(headers, dict) else {},
-                                "status": status,
-                                # When the answer began: the cache entry existed from then on.
-                                "first": min(max(first, start), max(start, end)) if first is not None else max(start, end),
-                                # A log without durations says nothing about overlap: its requests are
-                                # replayed one after another, never as in flight together.
-                                "timed": timed,
-                                "line": f"{f.name}:{n}"})
-    return entries, bad
+                entry = {"start": start, "end": max(start, end), "body": body, "response": response,
+                         "provider": _provider(raw, body, response),
+                         "headers": {str(k).lower(): str(v) for k, v in headers.items()}
+                         if isinstance(headers, dict) else {},
+                         "status": status,
+                         # When the answer began: the cache entry existed from then on.
+                         "first": min(max(first, start), max(start, end)) if first is not None else max(start, end),
+                         # A log without durations says nothing about overlap: its requests are
+                         # replayed one after another, never as in flight together.
+                         "timed": timed,
+                         "line": f"{f.name}:{n}"}
+                if again is not None:
+                    entries[again] = entry  # the same request, this time with its usage
+                else:
+                    entries.append(entry)
+    return entries, bad, repeated
 
 
 def ended(e: dict) -> float:
@@ -224,7 +254,7 @@ def replay(entries: list[dict], ledger_path: str, *, engine: str | None = None, 
         # Every setting explicit (empty, not None), so no PREFIXWISE_* variable of a live deployment
         # (a remote collector, an engine, KV events, fixes) leaks into the replay.
         proxy = PrefixwiseProxy(ledger_path=ledger_path, mock=False, upstream_url="http://gateway-log.invalid",
-                                hmac_key=hmac_key, engine=engine or "", kv_events="", fixes=(), otel="",
+                                hmac_key=hmac_key or b"", engine=engine or "", kv_events="", fixes=(), otel="",
                                 collector_url="", prices=prices)
         ctxs: dict[int, dict] = {}
         try:
