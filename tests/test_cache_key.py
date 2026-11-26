@@ -92,10 +92,10 @@ def test_a_rejected_key_is_not_in_the_record():
     assert "cache_key" not in ctx["fixes_applied"]
 
 
-def test_a_user_id_alone_still_gets_a_key_and_the_key_is_keyed_when_a_secret_is_set():
+def test_no_key_on_a_user_id_alone_and_the_key_is_keyed_when_a_secret_is_set():
     p, sent = _proxy()
-    p.handle("openai", _turn(0, user="end-user-7"))  # only OpenAI's `user`: that user's conversations share a key
-    assert sent[-1]["prompt_cache_key"] == cache_key_for("end-user-7")
+    r, _ = p.handle("openai", _turn(0, user="end-user-7"))  # a person, not a conversation
+    assert "prompt_cache_key" not in sent[-1] and "cache_key" not in r["fixes_applied"]
     assert cache_key_for("alice", b"secret") != cache_key_for("alice")
     assert cache_key_for("alice", b"secret") == cache_key_for("alice", b"secret")
     keyed = PrefixwiseProxy(mock=True, fixes=["cache_key"], hmac_key=b"secret")

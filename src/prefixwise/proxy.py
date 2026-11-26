@@ -240,6 +240,22 @@ def _short_id(value) -> str | None:
     return value if isinstance(value, str) and value and len(value) <= MAX_ID_CHARS else None
 
 
+def _claude_code_session(user_id) -> str | None:
+    """The conversation id Claude Code packs into Anthropic's metadata.user_id. Claude Code (2.1.x, read
+    from its published build) sends user_id as a JSON string: {"device_id", "account_uuid",
+    "session_id", "parent_session_id"?, ...}. Only session_id names the conversation; the device and
+    account ids are never used, so they never reach the ledger. Anything else (a plain end-user id) is
+    None."""
+    if not isinstance(user_id, str) or not user_id.startswith("{"):
+        return None
+    try:
+        data = json.loads(user_id)
+    except ValueError:
+        return None
+    sid = data.get("session_id") if isinstance(data, dict) else None
+    return _short_id(sid) if isinstance(sid, str) else None
+
+
 # Body fields Prefixwise reads but upstream APIs do not accept. Stripped
 # before forwarding (OpenAI rejects unknown fields with a 400), except a client's own
 # session_id to OpenRouter, which routes by it (_takes_session_id). vLLM, and
@@ -933,15 +949,19 @@ class PrefixwiseProxy:
         client_key = client_key if client_key and len(client_key) <= MAX_ID_CHARS else None
         # Known conversation ids first (Codex's own headers among them); the generic x-session-id after
         # them, since its meaning is up to each client; a user id last.
+        metadata_user = (body.get("metadata") or {}).get("user_id") if isinstance(body.get("metadata"), dict) else None
         given = (headers.get("x-prefixwise-session-id") or body.get("session_id")
                  or headers.get("thread-id") or headers.get("session-id")  # Codex
+                 or _short_id(headers.get("x-claude-code-session-id"))  # Claude Code, on every request
+                 or _claude_code_session(metadata_user)  # Claude Code, in the body (through a gateway that drops headers)
                  or client_key)
         # An end-user id last: Anthropic's metadata.user_id, OpenAI's user. Not a prompt_cache_key:
         # a key that changes mid-conversation is the miss cache_key_changed names, and as a session
         # name it would read as a new conversation. Not in `prefixwise check`, whose scenarios are
         # named through default_session and must not merge on a shared user id.
         user_id = None if self.check_mode else (
-            (body.get("metadata") or {}).get("user_id") or _short_id(body.get("user")))
+            (None if _claude_code_session(metadata_user) else _short_id(metadata_user))
+            or _short_id(body.get("user")))
         session_is_user = not given and bool(user_id)
         session_id = str(given or user_id or self.default_session)
         task_id = headers.get("x-prefixwise-task-id") or body.get("task_id")
@@ -1050,10 +1070,12 @@ class PrefixwiseProxy:
         # to a cache machine by the start of its prompt, combined with this key when set; measured, its
         # Responses API without the key mostly read nothing even for one conversation alone, and read the
         # prefix with it (fixes.py, FIX_STATUS). OpenAI's own models only (another server may refuse the
-        # field); never over a key the client set; never for requests with no session id.
+        # field); never over a key the client set; never without a conversation id.
         if ("cache_key" in self.fixes and provider == "openai" and engine is None
                 and openai_model(str(body.get("model", ""))) and "prompt_cache_key" not in body
-                and session_id != self.default_session):
+                and session_id != self.default_session and not session_is_user):
+            # Not on an end-user id alone: one person's parallel sessions and subagents would share one
+            # key, pinned to one cache slot (LiteLLM declines to key on a plain user id for that reason).
             if inject("prompt_cache_key", cache_key_for(session_id, self.fingerprinter.hmac_key)):
                 fixes_applied = [*fixes_applied, "cache_key"]
         # Caches are per model and per workspace (credentials), so both are in the prefix key.
