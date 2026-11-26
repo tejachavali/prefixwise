@@ -75,12 +75,19 @@ def _limit(p: dict, default: int) -> int:
     return max(1, min(n, MAX_PAGE))
 
 
+# What GET /api/v1 lists: the read endpoints below, in the order a reader would try them.
+ENDPOINTS = ("/summary", "/findings", "/fixes", "/breakdown?by=cause", "/timeseries?bucket=day", "/requests",
+             "/requests/<id>", "/sessions/latest/turns", "/sessions/<id>/turns", "/metrics", "/prices")
+
+
 def get(proxy, path: str, query: str) -> tuple[int, dict]:
     """Answer a GET under /api/v1. Returns (status, JSON payload)."""
     led = proxy.ledger
     p = _params(query)
     sub = path[len(PREFIX):].rstrip("/") or "/"
     try:
+        if sub == "/":
+            return 200, {"version": VERSION, "endpoints": [PREFIX + e for e in ENDPOINTS]}
         if sub == "/metrics":
             return 200, {"version": VERSION, "metrics": metrics.catalog(),
                          "dimensions": sorted(metrics.DIMENSIONS), "filters": sorted(metrics.FILTERS)}

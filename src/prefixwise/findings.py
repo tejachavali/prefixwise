@@ -529,6 +529,10 @@ f"{n:,} request{'' if n == 1 else 's'} on {m} (recorded before the table of {sin
     if f["failures"]:
         parts = [f"{x['requests']} x {x['error']}" for x in f["failures"]]
         lines.append("Failed requests (no verdict): " + ", ".join(parts) + ".")
+        if any(x["error"] == "prefixwise_proxy_error" for x in f["failures"]):
+            lines.append("  prefixwise_proxy_error: Prefixwise got no usable answer from the upstream (it could not be "
+                         "reached, timed out, or broke off). The client was sent the reason in a 502; check the "
+                         "upstream URL the proxy printed when it started.")
     if f.get("rejected_credentials"):
         lines.append("The provider rejected the credentials (401/403). Prefixwise passes your agent's own API key "
                      "through; an agent signed in with a subscription instead of an API key (for example Codex "

@@ -4,13 +4,16 @@ Everything the README held before it was shortened (2026-11-10), kept whole: eve
 record, every way in, every cause and detail, the command and environment reference, self-hosted
 engines, production notes and limits. The [README](../README.md) is the short version.
 
-**Your agent resends its whole conversation every turn, and one changed byte near the top means the provider charges full price for everything after it. Prefixwise tells you which byte, what it cost, and what to change.**
+**Your agent resends its whole conversation every turn, and one changed byte near the top means the provider charges full price for everything after it. Prefixwise tells you which block changed, what it cost, and what to change.**
 
 ```bash
 pip install prefixwise
-prefixwise import claude-code        # Claude Code on a subscription: reads ~/.claude/projects, nothing leaves your machine
-prefixwise run -- claude             # or any agent with an API key: claude, codex, opencode, your own
+prefixwise demo                      # no key, no network: three misses named, priced and fixed on a built-in mock
+prefixwise run -- claude             # any agent with an API key: claude, codex, opencode, your own
 prefixwise report --share            # a block you can paste
+
+prefixwise import claude-code        # Claude Code on a subscription: reads ~/.claude/projects, nothing leaves your machine
+prefixwise report --ledger prefixwise-claude-code.db --share   # an import keeps its own ledger file
 ```
 
 ```
@@ -96,7 +99,7 @@ loses everything after them; Qwen3's template puts tools after the system prompt
 
 ## Quickstart
 
-Ways in, each about thirty seconds; all write the same ledger and the same report.
+Ways in; all write the same kind of ledger and the same report. An import keeps its own ledger file (`prefixwise-<source>.db`), read with `--ledger`.
 
 | You have | Do this | Prompts leave your machine? |
 |---|---|---|
@@ -162,8 +165,21 @@ Ctrl-C goes to the agent as usual. If you already set `ANTHROPIC_BASE_URL` or `O
 ### Gate it in CI
 
 ```bash
-prefixwise check -- pytest tests/agent_scenarios      # exit 2 on a cache regression, 0 otherwise, 1 if the command fails
+prefixwise check -- pytest tests/agent_scenarios      # exit 2 on a cache regression, 0 otherwise
+                                                      # exit 1 if the command fails, or if no request got a verdict
 ```
+
+A scenario is any test that runs your agent's loop and lets the SDK take its base URL from the environment: `prefixwise check` puts the mock's address in `ANTHROPIC_BASE_URL` and `OPENAI_BASE_URL`. [`examples/agent_scenarios/test_refactor.py`](../examples/agent_scenarios/test_refactor.py) is one in thirty lines, with a tool list that changes order each turn:
+
+```
+$ prefixwise check -- pytest examples/agent_scenarios
+FAIL  tool_reserialize  scenario=examples/agent_scenarios/test_refactor.py::test_refactor  turn=2  first changed block: tools[0]
+      tool multiset of canonical hashes equal; sequence or raw bytes differ
+      fix: Send tools in a fixed order with deterministic serialization (or let the proxy do it: prefixwise serve --fix canonical_tools). [proven]
+FAIL: 2 findings in 1 scenario, 2 eligible of 3 requests (mock usage: token counts are synthetic; the causes are real)
+```
+
+(The second finding, turn 3, and the token line are left out.) A run in which no request got a verdict is not a pass: an agent with its base URL written into the code would pass the gate for ever. It prints `NOTHING CHECKED` and exits 1; `--allow-empty` turns that back into a pass for a job that may legitimately run no scenario. `--bodies FILE...` judges saved request bodies instead of running a command: each file is one scenario, so the turns to compare go in one JSON Lines file (`prefixwise explain A.json B.json` is different: there the two files are the two turns).
 
 The costly regressions are code changes that pass every functional test: a tool list built from a set (its order drifts), a timestamp added to the system prompt, a `cache_control` marker moved or dropped, an earlier tool result re-rendered. `prefixwise check` runs your agent's scenarios against a local mock provider (no API calls, nothing leaves the machine), compares each turn with its conversation's previous turn exactly as in production, and fails on `tool_reserialize`, `volatile_system`, `breakpoint_misplaced` and `tool_result_mutation` (`--strict` adds `history_edit`, `system_edit`, `param_rendered`; `--fail-on` names any set). The mock answers a turn that offers tools with a tool call (placeholder arguments the agent must accept; `tool_choice` honoured; never two in a row, so no loop), so an agent's loop runs a second turn, the one the gate judges; it holds each conversation's first response for a second so a per-second timestamp changes between turns, and warns about a date or time it sees in a system prompt that did not change within the run. Under pytest, each test's node id is the scenario name (a bundled plugin), so a finding reads `scenario=tests/test_agent.py::test_refactor`, and `--allow FILE` passes known findings by (scenario, cause, first changed block) while you fix them. With a baseline from production (`prefixwise export --baseline`, read from `.prefixwise-baseline.json`), each finding gets a monthly projection, labelled as the estimate it is; without one, tokens. `--bodies FILE...` judges saved request bodies instead (`prefixwise explain`'s format). As a GitHub Action:
 
@@ -332,7 +348,10 @@ Each detail is claimed only when all of its conditions hold; otherwise there is 
 |---|---|
 | `prefixwise serve [--upstream URL] [--mock] [--optimize] [--fix canonical_tools\|auto_breakpoints\|cache_key] [--engine vllm\|sglang\|none] [--kv-events ENDPOINT\|auto] [--full-attention] [--collector URL] [--sink URL] [--otel] [--host H] [--port P] [--ledger FILE]` | Run the proxy. `--engine`/`--kv-events`/`--full-attention`: see Self-hosted engines (detected from `--upstream` when not given; `none` for a router or a hosted API). `--collector`, `--sink`: [docs/ARCHITECTURE.md](ARCHITECTURE.md). Ledger defaults to `./prefixwise.db`. `--optimize` applies every proven fix; `--fix` applies one by name, opt-in and reversible (see below). |
 | `prefixwise run [--mock] [--optimize] [--fix NAME] [--engine vllm\|sglang\|none] [--full-attention] [--ledger FILE] [--port P] [--otel] -- <agent>` | Run an agent through Prefixwise and report on that run when it exits. A vLLM or SGLang behind the agent's base URL is detected (its KV events too); `--engine` says it explicitly. |
-| `prefixwise check [--fail-on CAUSES] [--strict] [--allow FILE] [--baseline FILE] [--json] [--json-file FILE] [--first-turn-delay S] -- <command>` / `check --bodies FILE...` | CI gate: run the agent's scenarios through a local mock and exit 2 on a cache regression that is a code bug (tool order, a timestamp in the system prompt, a dropped breakpoint, a mutated tool result). `prefixwise export --baseline` writes the production baseline for its monthly projection. |
+| `prefixwise check [--fail-on CAUSES] [--strict] [--allow FILE] [--allow-empty] [--baseline FILE] [--json] [--json-file FILE] [--first-turn-delay S] -- <command>` / `check --bodies FILE...` | CI gate: run the agent's scenarios through a local mock and exit 2 on a cache regression that is a code bug (tool order, a timestamp in the system prompt, a dropped breakpoint, a mutated tool result). `prefixwise export --baseline` writes the production baseline for its monthly projection. |
+| `prefixwise demo [--step] [--live] [--provider anthropic\|openai] [--keep DIR]` | A scripted agent breaks the cache three ways against a built-in mock (no key, no network), each miss is named and priced, and the agent runs again fixed. `--step` waits for Enter between acts; `--live` uses your API key and real calls. |
+| `prefixwise import claude-code\|codex\|gateway [--path P] [--since 7d] [--ledger FILE]` | Read logs already on disk (Claude Code, Codex, or a gateway's JSON Lines request log) into their own ledger, `prefixwise-<source>.db`, and report. No proxy, no key. |
+| `prefixwise collect [--host H] [--port P] [--ledger FILE]` | One ledger for several edges: proxies started with `--collector URL`, and `wrap` or LiteLLM with `PREFIXWISE_COLLECTOR`. |
 | `prefixwise prices [--json]` | The dated price table behind dollar costs, and where each rate came from. |
 | `prefixwise prune --older-than 30d` | Delete ledger entries older than that (retention). Add `--include-undated` to also drop rows written before 0.3.1. |
 | `prefixwise export [--format jsonl\|csv] [--since 7d] [--where session=s1] [--baseline]` | Every ledger row (facts, never prompt text) for a spreadsheet, notebook or warehouse. |
@@ -505,7 +524,7 @@ The flowcharts are drawn by code: when the request flow or the classifier's orde
 
 ```bash
 pip install -e ".[dev]"
-python -m pytest tests -q                              # about 490 tests, 2 min
+python -m pytest tests -q                              # about 2,700 tests, 3 min
 python experiments/e1_open/e1_open.py --mock           # harness smoke test
 ```
 

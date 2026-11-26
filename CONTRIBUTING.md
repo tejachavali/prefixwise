@@ -7,7 +7,7 @@ Thanks for trying Prefixwise. Bug reports with a reproduction are the most usefu
 ```bash
 git clone https://github.com/tejachavali/prefixwise && cd prefixwise
 python -m pip install -e ".[dev]"
-python -m pytest tests -q            # the whole suite runs in ~15 s, no network
+python -m pytest tests -q            # the whole suite: about 3 minutes, no network
 python experiments/e1_open/e1_open.py --mock
 ```
 
