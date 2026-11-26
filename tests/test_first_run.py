@@ -350,8 +350,10 @@ def test_explain_refuses_what_is_not_a_request(tmp_path):
         out = cli("explain", str(fa), str(fb))
         no_traceback(out, 1, "not a request Prefixwise can read")
         assert "NONE" not in out.stdout
-    ok.write_text(json.dumps({"model": "m", "input": "hi", "prompt": {"id": "pmpt_1"}}))   # a Responses prompt template
-    assert cli("explain", str(ok)).returncode == 0
+    for body in ({"model": "m", "input": "hi", "prompt": {"id": "pmpt_1"}},            # a Responses prompt template
+                 {"model": "m", "instructions": "Be brief.", "prompt": {"id": "pmpt_1"}}):
+        ok.write_text(json.dumps(body))
+        assert cli("explain", str(ok)).returncode == 0, body
 
 
 def test_check_bodies_with_no_request_is_nothing_checked_not_an_error(tmp_path):
