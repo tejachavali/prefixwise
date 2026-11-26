@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- **The report says what a successful task cost.** When requests carry a task id and tasks have a recorded outcome (`X-Prefixwise-Task-Id`, then `prefixwise task ID --success` or `--failure`), the report ends with the unit a person decides by: how many tasks have an outcome and how many succeeded, what each success cost in dollars and tokens with the failed tasks included (they were paid for too), how much of the money went to the failed ones, how much of it was avoidable, and the cause that wasted most. It replaces the line "Tokens per successful task", which gave the tokens alone.
+  - Dollars are given only when every request of those tasks is priced; otherwise the lines give tokens and say why.
+  - Tasks that have requests and no outcome yet are counted and named, and are in none of the sums.
+  - In `report --json` and the API's findings: `tasks`, with `resolved`, `successful`, `failed`, `unresolved`, `cost_usd`, `cost_failed_usd`, `cost_per_successful_usd`, `tokens`, `tokens_failed`, `tokens_per_successful`, `avoidable_tokens`, `avoidable_cost_usd` and `top_waste`; `null` when no task has an outcome. `cost_per_successful_usd` and `tokens_per_successful` are the existing metrics `cost_per_successful_task_usd` and `tokens_per_successful_task`.
+
 ## 0.12.8: 2026-11-26
 
 Fixes from three independent audits of 0.12.7 (#184): a first-time-user run of the docs, an adversarial review of the core, and a check of every verdict on a real Claude Code session of 10,517 calls. Each finding was reproduced before it was fixed, and each fix was reviewed by an independent reviewer told to break it. New: `prefixwise demo`, and what an expired cache cost in the report.

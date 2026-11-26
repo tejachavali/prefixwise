@@ -348,7 +348,105 @@ def findings(ledger, since: float | None = None, until: float | None = None,
             "bill": bill(ledger, **window),
             "cache_not_reported": not_reported,
             "unexplained_share": unexplained_share(ledger, since, until),
-            "observed_lifetimes": observed_lifetimes(ledger, since, until)}
+            "observed_lifetimes": observed_lifetimes(ledger, since, until),
+            "tasks": task_costs(ledger, since, until)}
+
+
+def task_costs(ledger, since: float | None = None, until: float | None = None) -> dict | None:
+    """What the tasks with a recorded outcome cost, and what a success cost: the unit a person
+    decides by. None when no task with requests in the window has an outcome.
+
+    A task's tokens and dollars are those of its requests that got a verdict (as in
+    prefixwise.metrics). The cost of a success includes the failed tasks: they were paid for too.
+    Dollars are given only when every such request is priced; a partial sum would understate them.
+    `unresolved` counts the tasks that have requests and no outcome yet: they are in none of the
+    sums here."""
+    clauses, args = [], []
+    for op, val in ((">=", since), ("<", until)):
+        if val is not None:
+            clauses.append(f"recorded_at {op} ?")
+            args.append(val)
+    where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+    rows = f"(SELECT *, ({metrics.OK}) AS ok FROM entries{where})"
+    with ledger.reader() as conn:
+        by_outcome = conn.execute(
+            f"""SELECT t.success, COUNT(DISTINCT t.task_id), SUM(e.ok),
+                       SUM(CASE WHEN e.ok AND e.cost IS NOT NULL THEN 1 ELSE 0 END),
+                       SUM(CASE WHEN e.ok THEN e.cost END),
+                       SUM(CASE WHEN e.ok THEN e.prompt_tokens + COALESCE(e.completion_tokens, 0) END),
+                       SUM(CASE WHEN e.ok THEN e.avoidable_cost END),
+                       SUM(CASE WHEN e.ok THEN e.avoidable_tokens END)
+                FROM {rows} e JOIN tasks t ON e.task_id = t.task_id GROUP BY t.success""", args).fetchall()
+        if not by_outcome:
+            return None
+        top = conn.execute(
+            f"""SELECT e.cause, SUM(e.avoidable_tokens), SUM(e.avoidable_cost)
+                FROM {rows} e JOIN tasks t ON e.task_id = t.task_id
+                WHERE e.ok AND e.avoidable_tokens > 0 GROUP BY e.cause
+                ORDER BY SUM(e.avoidable_tokens) DESC, e.cause LIMIT 1""", args).fetchone()
+        unresolved = conn.execute(
+            f"""SELECT COUNT(DISTINCT task_id) FROM entries{where}{' AND' if where else ' WHERE'} task_id IS NOT NULL
+                AND task_id NOT IN (SELECT task_id FROM tasks)""", args).fetchone()[0]
+    got = {bool(r[0]): r for r in by_outcome}
+    zero = (None, 0, 0, 0, None, None, None, None)
+    ok, bad = got.get(True, zero), got.get(False, zero)
+    requests, priced = (ok[2] or 0) + (bad[2] or 0), (ok[3] or 0) + (bad[3] or 0)
+    all_priced = requests > 0 and priced == requests
+    both = lambda i: (ok[i] or 0) + (bad[i] or 0)  # noqa: E731
+    successful, tokens = ok[1], both(5)
+    out = {"resolved": ok[1] + bad[1], "successful": successful, "failed": bad[1], "unresolved": unresolved,
+           "tokens": tokens, "tokens_failed": bad[5] or 0,
+           "tokens_per_successful": tokens / successful if successful else None,
+           "avoidable_tokens": both(7),
+           "cost_usd": both(4) if all_priced else None,
+           "cost_failed_usd": (bad[4] or 0) if all_priced else None,
+           "cost_per_successful_usd": both(4) / successful if all_priced and successful else None,
+           "avoidable_cost_usd": both(6) if all_priced else None,
+           "top_waste": None}
+    if top is not None:
+        out["top_waste"] = {"cause": top[0], "what": CAUSE_PLAIN.get(top[0], top[0]), "avoidable_tokens": top[1],
+                            "avoidable_cost_usd": top[2] if all_priced else None}
+    return out
+
+
+def _tasks(t: dict | None) -> list[str]:
+    """The report's lines on what a finished task cost."""
+    if not t:
+        return []
+    n, ok, bad = t["resolved"], t["successful"], t["failed"]
+    dollars = t["cost_usd"] is not None
+    spent = _usd(t["cost_usd"]) if dollars else f"{_n(t['tokens'])} tokens"
+    head = f"Tasks: {n:,} with an outcome, {ok:,} succeeded."
+    if not ok:
+        head = f"Tasks: {n:,} with an outcome, none succeeded: {spent} spent on {'it' if n == 1 else 'them'}."
+    else:
+        each = (f"{_usd(t['cost_per_successful_usd'])} ({_n(t['tokens_per_successful'])} tokens)" if dollars
+                else f"{_n(t['tokens_per_successful'])} tokens")
+        head += f" Each success cost {each}"
+        if bad:
+            lost = t["cost_failed_usd"] if dollars else t["tokens_failed"]
+            total = t["cost_usd"] if dollars else t["tokens"]
+            head += (f", the {'failed task' if bad == 1 else f'{bad:,} failed tasks'} included: "
+                     f"{'it was' if bad == 1 else 'they were'} "
+                     f"{_usd(lost) if dollars else _n(lost) + ' tokens'} of the {spent} spent"
+                     + (f" ({share_pct(lost / total)})" if total else ""))
+        head += "."
+    lines = [head]
+    w = t["top_waste"]
+    if w and t["avoidable_tokens"]:
+        if dollars and t["cost_usd"]:
+            per = f"{_usd(t['avoidable_cost_usd'] / ok)} a success, " if ok else ""
+            lines.append(f"  Avoidable on these tasks: {per}{share_pct(t['avoidable_cost_usd'] / t['cost_usd'])} of "
+                         f"what they cost. Most of it: {w['what']}.")
+        else:
+            lines.append(f"  Avoidable on these tasks: {_n(t['avoidable_tokens'])} tokens. Most of it: {w['what']}.")
+    if not dollars:
+        lines.append("  No dollars: not every request of these tasks is priced.")
+    if t["unresolved"]:
+        m = t["unresolved"]
+        lines.append(f"  {m:,} more task{'s have' if m != 1 else ' has'} requests and no outcome yet, and "
+                     f"{'are' if m != 1 else 'is'} not counted here: prefixwise task ID --success (or --failure).")
+    return lines
 
 
 def observed_lifetimes(ledger, since: float | None = None, until: float | None = None) -> list[dict]:
@@ -568,8 +666,7 @@ f"{n:,} request{'' if n == 1 else 's'} on {m} (recorded before the table of {sin
         lines.append("The provider rejected the credentials (401/403). Prefixwise passes your agent's own API key "
                      "through; an agent signed in with a subscription instead of an API key (for example Codex "
                      "with a ChatGPT login) cannot be routed through a proxy.")
-    if s["tasks_successful"]:
-        lines.append(f"Tokens per successful task: {_n(s['tokens_per_successful_task'])}.")
+    lines.extend(_tasks(f.get("tasks")))
     return "\n".join(lines)
 
 
