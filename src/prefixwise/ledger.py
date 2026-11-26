@@ -52,7 +52,7 @@ class LedgerEntry:
     request_id: str | None = None
     completion_tokens: int = 0
     fixes: str | None = None  # comma-separated proxy fixes that rewrote this request
-    cost: float | None = None  # USD for the whole request; None = a rate was unknown
+    cost: float | None = None  # USD for the whole request; None = a rate was unknown, or no usage was reported
     price_as_of: str | None = None  # date of the price table that priced it
     # Schema 3 (docs/DATA.md): facts observed for every request, failures included.
     status: int = 200  # upstream HTTP status; >= 400 rows have no verdict and no tokens

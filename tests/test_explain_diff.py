@@ -71,4 +71,6 @@ def test_diff_handles_whitespace_only_changes_dict_blocks_and_large_blocks():
     lb = Turn(body={"model": "m", "messages": [{"role": "system", "content": "\n".join(edited)}, {"role": "user", "content": "hi"}]})
     t0 = time.perf_counter()
     e = explain_pair(la, lb, "openai", diff=True)
-    assert time.perf_counter() - t0 < 1.0 and e.diff and "more lines" in e.diff
+    # The bound guards against an unbounded diff. It is loose (the test takes about half a second) so
+    # a busy machine does not fail it.
+    assert time.perf_counter() - t0 < 10.0 and e.diff and "more lines" in e.diff

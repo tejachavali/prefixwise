@@ -50,14 +50,22 @@ class MissCause(str, Enum):
     UNKNOWN = "unknown"
 
 
-# Provider minimum cacheable prefix, tokens. Anthropic is model-dependent:
-# 512-4,096 (512 for Claude Fable/Mythos/Opus/Sonnet/Haiku 5.x, 2,048 for
-# Mythos Preview / Opus 4.7, 4,096 for Opus 4.6/4.5 and Haiku 4.5,
-# 1,024 for Opus 4.8 / Sonnet 5 / Sonnet 4.6). Use the model-specific
-# value when known; the dict below is the per-model table, not a range.
-ANTHROPIC_MIN_PREFIX = {
-    "512": 512, "2048": 2048, "4096": 4096, "1024": 1024,
-}
+# Provider minimum cacheable prefix, tokens. Anthropic's is per model (prompt-caching page, read
+# 2026-11-26): 512 for the 5.x models except Sonnet 5; 1,024 for Opus 4.8, Sonnet 5, Sonnet 4.6,
+# Sonnet 4.5, Opus 4.1, Opus 4 and Sonnet 4; 2,048 for Mythos Preview and Opus 4.7; 4,096 for
+# Opus 4.6, Opus 4.5 and Haiku 4.5. The Claude 3 models are from Anthropic's earlier table
+# (2,048 for the Haiku models, 1,024 for the others). First match wins.
+_MINOR = r"(?!\d)"  # the minor is this digit alone (a date may follow)
+_NO_MINOR = r"(?![-._]?\d{1,2}(?!\d))"  # the major alone: no minor after it (a date, @date or [1m] may follow)
+_ANTHROPIC_MIN_PREFIX = [(re.compile(pattern), tokens) for pattern, tokens in (
+    (rf"opus-4[-.][56]{_MINOR}|haiku-4[-.]5{_MINOR}", 4096),
+    (rf"opus-4[-.]7{_MINOR}|mythos-preview", 2048),
+    (rf"opus-4[-.][018]{_MINOR}|sonnet-4[-.][056]{_MINOR}", 1024),   # 4-0 is how some ids spell Opus 4 / Sonnet 4
+    (rf"(opus|sonnet)-4{_NO_MINOR}", 1024),                           # Opus 4 and Sonnet 4
+    (rf"sonnet-5{_NO_MINOR}", 1024),                                  # Sonnet 5 itself; Sonnet 5.5 is 512
+    (r"haiku-3|3-5-haiku|3-haiku", 2048),
+    (r"claude-3-|sonnet-3|opus-3", 1024),
+)]
 OPENAI_MIN_PREFIX = 1024
 # No provider keeps a cache entry for less than ~5 minutes (Anthropic default
 # 5 min; OpenAI in-memory 5-10 min). A cold cache within this gap of the
@@ -82,10 +90,8 @@ def anthropic_min_prefix(model: str) -> int:
     the lowest known minimum, so "below the minimum" is claimed only when no
     Anthropic model could have cached the prompt."""
     m = (model or "").lower()
-    for marker, tokens in (("opus-4-5", 4096), ("opus-4-6", 4096), ("haiku-4-5", 4096),
-                           ("opus-4-7", 2048), ("mythos-preview", 2048),
-                           ("opus-4-8", 1024), ("sonnet-4-6", 1024), ("sonnet-5-", 512), ("sonnet-5", 1024)):
-        if marker in m:
+    for pattern, tokens in _ANTHROPIC_MIN_PREFIX:
+        if pattern.search(m):
             return tokens
     return 512  # Claude 5.x (Fable, Mythos, Opus, Sonnet, Haiku), and the floor for unknown models
 

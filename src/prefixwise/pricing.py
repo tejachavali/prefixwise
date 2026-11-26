@@ -173,7 +173,7 @@ class PriceTable:
 
     def resolve(self, model: str, today: date | None = None) -> tuple[str | None, dict | None, bool]:
         """(table id, rates, approximate) for a model id. Exact, or a table id plus only a dated
-        snapshot (-20261007) and/or a cloud version suffix (-v1, -v1:0), optionally behind a cloud
+        snapshot (-20261007; OpenAI's -2026-10-07 too, as approximate) and/or a cloud version suffix (-v1, -v1:0), optionally behind a cloud
         prefix ('us.anthropic.'); a different model that merely starts with a table id
         (gpt-5.6-sol-pro) is NOT matched that way. Failing that, a Claude id of a known family
         (claude-opus-4-9) is priced at the nearest version of that family in the table, the newest
@@ -187,8 +187,13 @@ class PriceTable:
         approx = False
         if key is None:
             for k in self.models:
-                if re.search(rf"(^|[./:]){re.escape(k)}(-\d{{8}})?(-v\d+(:\d+)?)?$", model) and (key is None or len(k) > len(key)):
-                    key = k
+                # A dated snapshot: Anthropic's -20261007 is the model itself. OpenAI's -2026-10-07 is one
+                # snapshot of the alias, and snapshots of one alias have had different prices: it is
+                # priced at the alias's rate and reported as approximate.
+                m = re.search(rf"(^|[./:]){re.escape(k)}(-\d{{8}}|(?P<dashed>-20\d\d-(0[1-9]|1[0-2])-"
+                              rf"(0[1-9]|[12]\d|3[01])))?(-v\d+(:\d+)?)?$", model)
+                if m and (key is None or len(k) > len(key)):
+                    key, approx = k, bool(m.group("dashed"))
         if key is None:
             key, approx = self._nearest_in_family(model), True
         if key is None:
@@ -234,12 +239,15 @@ class PriceTable:
     def request_cost_parts(self, model: str, provider: str, usage: dict) -> dict | None:
         """Where one request's dollars went: {"cache_read", "input", "cache_write", "output"} in USD
         (input = prompt tokens neither read from nor written to the cache). None when a part that has
-        tokens has no rate: then the whole cost is unknown, not a partial sum. Unrounded: the cost is
-        rounded once, from their sum."""
+        tokens has no rate: then the whole cost is unknown, not a partial sum. None too when the usage
+        has no prompt tokens: every request has some, so the response reported no usage. Unrounded: the
+        cost is rounded once, from their sum."""
         rates = self.rates_for(model)
         if rates is None:
             return None
         b = breakdown(provider, usage)
+        if not b.prompt:
+            return None  # no prompt tokens: the response reported no usage. Its cost is not known, and is not $0
         r = self._tier(rates, b.prompt)
         parts = [("input", b.uncached_input, r.get("input")), ("cache_read", b.cache_read, r.get("cache_read")),
                  ("output", b.output, r.get("output")),
@@ -351,3 +359,12 @@ def _validate(name: str, rates: object, path: str) -> None:
         v = rates.get(k)
         if v is not None and not (isinstance(v, (int, float)) and v >= 0) and not (k == "cache_write" and v == "input"):
             raise ValueError(f"{path}: {name}.{k} must be a non-negative number")
+    since = rates.get("priced_since")
+    if since is not None:
+        try:
+            ok = (isinstance(since, str) and bool(re.fullmatch(r"\d{4}-\d{2}-\d{2}", since))
+                  and bool(date.fromisoformat(since)))  # dashes required: rows are compared as text
+        except ValueError:
+            ok = False
+        if not ok:
+            raise ValueError(f"{path}: {name}.priced_since must be a date like \"2026-11-26\"")
