@@ -166,7 +166,8 @@ def allowed(f: Finding, allow: list[dict]) -> bool:
 # -- judging rows ------------------------------------------------------------------------
 
 ROW_COLUMNS = ("session_id", "model", "provider", "cause", "status", "prompt_tokens", "cached_tokens",
-               "avoidable_tokens", "divergence_role", "divergence_index", "evidence", "detail", "request_id")
+               "avoidable_tokens", "divergence_role", "divergence_index", "evidence", "detail", "request_id",
+               "error")
 
 
 def rows_since(ledger, since: float) -> list[dict]:

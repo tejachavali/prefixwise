@@ -232,6 +232,20 @@ def test_canonical_tools_sorts_within_what_each_marker_covers():
     assert [n for n, _ in _fixed(last)[0]] == ["bash", "read_file", "web_search", "zip"]
 
 
+def test_canonical_tools_never_puts_a_marker_on_a_tool_that_cannot_carry_one():
+    search = {"type": "tool_search_tool_regex_20251119", "name": "tool_search_tool_regex"}
+    tools = [_tool("bash"), search, _tool("read", cache_control=MARK)]
+    out, _ = apply_fixes({"model": "m", "tools": tools, "messages": []}, ("canonical_tools",))
+    assert [(t["name"], "cache_control" in t) for t in out["tools"]] == [
+        ("tool_search_tool_regex", False), ("bash", False), ("read", True)]
+    deferred = [_tool("alpha"), _tool("zeta", defer_loading=True), _tool("bash", cache_control=MARK)]
+    out, _ = apply_fixes({"model": "m", "tools": deferred, "messages": []}, ("canonical_tools",))
+    assert [(t["name"], "cache_control" in t) for t in out["tools"]] == [("zeta", False), ("alpha", False), ("bash", True)]
+    only = [{**search, "cache_control": MARK}]            # nothing in the stretch may carry it: as sent
+    out, applied = apply_fixes({"model": "m", "tools": only, "messages": []}, ("canonical_tools",))
+    assert out["tools"] == only and applied == []
+
+
 def test_canonical_tools_keeps_a_marker_inside_function_where_it_was():
     """LiteLLM also reads a marker written inside an OpenAI-shaped tool's `function`."""
     def fn(name, mark=False):
@@ -299,9 +313,50 @@ def test_usage_on_every_chunk_does_not_hide_a_cut():
     assert [r[:2] for r in stream_rows([with_usage, FINISH])[1]] == [(200, None)]
 
 
+def test_a_stream_sent_under_a_json_content_type_is_still_a_stream():
+    """Told by the body, not only its label: the usage chunk Prefixwise asked for stays hidden."""
+    from test_production import HeaderUpstream
+
+    usage = b'data: {"id":"c1","choices":[],"usage":{"prompt_tokens":2000,"completion_tokens":1}}\n\n'
+    up = HeaderUpstream(200, headers={"Content-Type": "application/json"}, stream_lines=[CONTENT, FINISH, usage, DONE])
+    proxy, server, port = run_proxy(upstream_url=up.url)
+    try:
+        raw = raw_post(port, "/v1/chat/completions", json.dumps({**BODY, "stream": True}).encode())
+        head, _, body = raw.partition(b"\r\n\r\n")
+        assert b"text/event-stream" in head and b'"usage"' not in body and body.rstrip().endswith(b"[DONE]")
+        time.sleep(0.3)
+        assert [r[:2] for r in rows(proxy)] == [(200, None)] and rows(proxy, "prompt_tokens")[0][0] == 2000
+    finally:
+        server.shutdown(); up.server.shutdown()
+
+
+def test_a_long_json_body_is_relayed_in_time_that_grows_with_its_size():
+    """The relay summed the lines it held for every new line: 60,000 lines took 30 s."""
+    class Pretty(BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_POST(self):
+            self.rfile.read(int(self.headers["Content-Length"]))
+            data = json.dumps({**OPENAI_OK, "logprobs": list(range(60_000))}, indent=1).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+    upstream = ThreadingHTTPServer(("127.0.0.1", 0), Pretty)
+    proxy, server, port = run_proxy(upstream_url=f"http://127.0.0.1:{start(upstream)}")
+    try:
+        began = time.perf_counter()
+        raw = raw_post(port, "/v1/chat/completions", json.dumps({**BODY, "stream": True}).encode())
+        assert json.loads(raw.partition(b"\r\n\r\n")[2])["id"] == OPENAI_OK["id"]
+        assert time.perf_counter() - began < 10   # about 0.3 s; a relay that re-sums every line takes 30 s
+    finally:
+        server.shutdown(); upstream.shutdown()
+
+
 def test_a_json_body_answering_a_stream_request_is_a_response():
-    class JsonUpstream(FakeUpstream):
-        pass
     up = FakeUpstream(payload=OPENAI_OK)   # answers application/json whatever was asked
     proxy, server, port = run_proxy(upstream_url=up.url)
     try:
@@ -431,12 +486,24 @@ def test_a_failed_prepare_releases_its_engine_token():
         server.shutdown(); up.server.shutdown()
 
 
-def test_check_says_when_it_could_not_read_a_request():
-    from prefixwise.check import DEFAULT_FAIL_ON, judge
+def test_check_says_when_it_could_not_read_a_request(monkeypatch):
+    """From the ledger's own rows, as a real run reads them."""
+    from prefixwise.check import DEFAULT_FAIL_ON, judge, rows_since
 
-    report = judge([{"session_id": "s", "status": 200, "cause": None, "error": "not_recorded"},
-                    {"session_id": "s", "status": 200, "cause": "none"}], DEFAULT_FAIL_ON)
-    assert any("1 request could not be read" in w for w in report.warnings)
+    proxy, server, port = run_proxy(mock=True)
+    try:
+        assert post(port, "/v1/chat/completions", BODY)[0] == 200
+        monkeypatch.setattr(proxy, "_prepare", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("bug")))
+        assert post(port, "/v1/chat/completions", BODY)[0] == 200
+        report = judge(rows_since(proxy.ledger, 0), DEFAULT_FAIL_ON)
+        assert any("1 request could not be read" in w for w in report.warnings)
+    finally:
+        server.shutdown()
+
+
+def test_an_empty_error_object_on_a_normal_chunk_is_not_an_error():
+    odd = b'data: {"id":"c1","model":"m","error":{},"choices":[{"index":0,"delta":{"content":"hi"}}]}\n\n'
+    assert [r[:2] for r in stream_rows([odd, FINISH, DONE])[1]] == [(200, None)]
 
 
 def test_overhead_counts_the_time_spent_reading_the_request():

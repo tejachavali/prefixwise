@@ -527,10 +527,10 @@ class StreamAccumulator:
                 self.payload[key] = event[key]
         choices = event.get("choices") if isinstance(event.get("choices"), list) else []
         reasons = [c.get("finish_reason") for c in choices if isinstance(c, dict) and c.get("finish_reason")]
-        if isinstance(event.get("error"), dict) or "error" in reasons:
+        err = event.get("error") if isinstance(event.get("error"), dict) else {}
+        if err or "error" in reasons:
             # An error event mid-stream (OpenRouter sends finish_reason "error" with it): the answer
-            # ended, and not well.
-            err = event["error"] if isinstance(event.get("error"), dict) else {}
+            # ended, and not well. (An empty `error` object on a normal chunk is not one.)
             self.error = str(err.get("type") or err.get("code") or "upstream_error")[:80]
         elif reasons:
             self.finished = True
@@ -551,8 +551,9 @@ class StreamAccumulator:
             self.done = True
         if event.get("type") in ("response.failed", "error"):
             failed = event.get("response") if isinstance(event.get("response"), dict) else event
-            err = failed.get("error") if isinstance(failed.get("error"), dict) else {}
-            self.error = str(err.get("type") or err.get("code") or "upstream_error")[:80]
+            err = failed.get("error") if isinstance(failed.get("error"), dict) else failed  # (or flat on the event)
+            self.error = str(err.get("type") if err.get("type") not in (None, "error", "response.failed")
+                             else err.get("code") or "upstream_error")[:80]
         resp = event.get("response")
         if not isinstance(resp, dict):
             return
@@ -1134,7 +1135,7 @@ class PrefixwiseProxy:
         identity = _identity(self.fingerprinter.fingerprint_blocks(
             [blk for blk in raw_blocks if blk[0] in ("system", "system_dynamic")]
             + [blk for blk in raw_blocks if blk[0] in _CONVERSATION][:1]))
-        lane = (session_id, str(body.get("model", "unknown")))
+        lane = (session_id, _storable(str(body.get("model", "unknown"))))  # as the collector keys it
         stitched = api == "responses" and bool(body.get("previous_response_id"))
         # The conversation this request continues (a stitched Responses turn sends only its new
         # input: its conversation is its parent response's), and wait for that conversation's
@@ -2305,6 +2306,7 @@ def make_handler(proxy: PrefixwiseProxy):
             task_id, success = body.get("task_id"), body.get("success")
             if not isinstance(task_id, str) or not task_id or not isinstance(success, bool):
                 return self._json(400, _error(400, 'expected {"task_id": "<id>", "success": true|false}'))
+            task_id = _storable(task_id)  # as a request's row stores it
             proxy.ledger.set_task_outcome(task_id, success)
             return self._json(200, {"ok": True, "task_id": task_id, "success": success})
 
@@ -2329,9 +2331,21 @@ def make_handler(proxy: PrefixwiseProxy):
             # ride in them: fetch it afterwards from GET /requests/<id>.
             # An upstream may answer a stream request with a plain JSON body (a gateway that does not
             # stream, an error it reports with 200): it is relayed as what it is, and read as a payload.
+            # Told by the body, not only its label: a stream sent under a JSON content type is still a
+            # stream. The first line is read before any header goes out.
             ctype = ctx.get("upstream_content_type") or "text/event-stream"
-            plain = "json" in ctype.lower() and "event-stream" not in ctype.lower()
+            source = iter(lines)
+            first, failure = None, None
+            try:
+                first = next(source)
+            except StopIteration:
+                pass
+            except (http.client.HTTPException, OSError):
+                failure = "upstream_dropped"
+            looks_sse = first is not None and first.lstrip().startswith((b"data:", b"event:", b"id:", b"retry:", b":"))
+            plain = "json" in ctype.lower() and "event-stream" not in ctype.lower() and not looks_sse
             body_parts: list[bytes] = []
+            body_size = 0
             self.send_response(status)
             self.send_header("Content-Type", ctype if plain else "text/event-stream")
             self.send_header("Cache-Control", "no-cache")
@@ -2340,24 +2354,26 @@ def make_handler(proxy: PrefixwiseProxy):
                 self.send_header(k, v)
             self.end_headers()
             self._streaming = True  # the response has begun: from here nothing else may be written as one
-            failure = None
             recording = None  # set once the client has the whole answer, before it is recorded
             try:
                 # Reading (the upstream's side) and writing (the client's side) fail apart: the same
                 # error class means "the upstream dropped" on one and "the client left" on the other.
-                source = iter(lines)
-                while True:
-                    try:
-                        line = next(source)
-                    except StopIteration:
-                        break
-                    except (http.client.HTTPException, OSError):  # reset, timeout, or cut inside a chunk
-                        # After the model finished, an abrupt close cost the client nothing.
-                        failure = None if acc.complete else "upstream_dropped"
-                        break
+                line, pending = first, first is not None
+                while failure is None:
+                    if not pending:
+                        try:
+                            line = next(source)
+                        except StopIteration:
+                            break
+                        except (http.client.HTTPException, OSError):  # reset, timeout, or cut inside a chunk
+                            # After the model finished, an abrupt close cost the client nothing.
+                            failure = None if acc.complete else "upstream_dropped"
+                            break
+                    pending = False
                     if plain:
-                        if sum(map(len, body_parts)) < MAX_BODY_BYTES:
+                        if body_size < MAX_BODY_BYTES:
                             body_parts.append(line)
+                            body_size += len(line)
                         keep = True
                     else:
                         keep = acc.feed(line)

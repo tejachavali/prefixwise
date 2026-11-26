@@ -198,6 +198,14 @@ def _tool_with_marker(tool: object, where: str, value) -> object:
     return {**tool, "cache_control": value}
 
 
+def _takes_marker(tool: object) -> bool:
+    """Whether a `cache_control` may be put on this tool. Not on a tool-search tool or a tool whose
+    loading is deferred (they are not part of the prompt's tool prefix; LiteLLM never marks them),
+    nor on something that is not a tool object."""
+    return (isinstance(tool, dict) and not tool.get("defer_loading")
+            and not str(tool.get("type") or "").startswith("tool_search_tool"))
+
+
 def canonical_tools(tools: list) -> list:
     """Tools sorted by name (unnamed tools keep their order, at the end), with every tool's keys
     sorted and its schema's set arrays (`required`, a list `type`) sorted. Same set in, same bytes
@@ -205,24 +213,32 @@ def canonical_tools(tools: list) -> list:
 
     A `cache_control` marker on a tool is a position, not a property of that tool: it caches the
     tools up to and including it. So the list is sorted within each stretch that ends at a marker,
-    and the marker goes back on the last tool of its stretch: it covers the same tools as the
-    client marked, in an order that no longer depends on how the client listed them. (Sorting the
-    whole list moved a marker with its tool, so one on the last tool, which caches every tool,
-    could end up covering one.)"""
+    and the marker goes back at the end of its stretch: it covers the same tools as the client
+    marked, in an order that no longer depends on how the client listed them. (Sorting the whole
+    list moved a marker with its tool, so one on the last tool, which caches every tool, could end
+    up covering one.) The marker may therefore sit on another tool than the client put it on. It is
+    only put on a tool that can carry one: tools that cannot are ordered first in their stretch,
+    and a stretch with no tool that can is left as the client sent it."""
     def ordered(stretch: list) -> list:
         named = sorted((t for t in stretch if _tool_name(t) is not None), key=_tool_name)
         return named + [t for t in stretch if _tool_name(t) is None]
 
     out: list = []
-    stretch: list = []
+    stretch: list = []  # the client's tools since the last marker, marker included, untouched
     for tool in tools:
+        stretch.append(tool)
         where, value = _marker_of(tool)
-        stretch.append(_tool_without_marker(tool))
-        if where is not None:
-            done = [_sorted_keys(schema_sets(t)) for t in ordered(stretch)]
+        if where is None:
+            continue
+        bare = [_tool_without_marker(t) for t in stretch]
+        carriers = ordered([t for t in bare if _takes_marker(t)])
+        if not carriers:
+            out.extend(stretch)  # nothing here may carry the marker: as sent
+        else:
+            done = [_sorted_keys(schema_sets(t)) for t in ordered([t for t in bare if not _takes_marker(t)]) + carriers]
             done[-1] = _sorted_keys(_tool_with_marker(done[-1], where, value))
             out.extend(done)
-            stretch = []
+        stretch = []
     out.extend(_sorted_keys(schema_sets(t)) for t in ordered(stretch))
     return out
 

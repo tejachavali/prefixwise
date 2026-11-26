@@ -219,7 +219,8 @@ def body_facts(provider: str, body: dict, model: str = "", credential: str = "")
                        if isinstance(m, dict) and m.get("role") in ("system", "developer")), None)
     salt = body.get("cache_salt")
     if salt:  # vLLM and SGLang isolate caches by it: another salt could never have shared the prefix
-        credential = f"{credential}:{hashlib.sha256(str(salt).encode("utf-8", "surrogatepass")).hexdigest()[:12]}"
+        salted = hashlib.sha256(str(salt).encode("utf-8", "surrogatepass")).hexdigest()[:12]
+        credential = f"{credential}:{salted}"
     if tools or system:
         f.prefix_key = _h([provider, f.model, credential, _strip_markers(tools), _strip_markers(system)])
         (f.prefix_key_canonical, f.prefix_key_masked, f.prefix_key_masked_time,
