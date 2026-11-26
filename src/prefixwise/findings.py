@@ -357,10 +357,13 @@ def task_costs(ledger, since: float | None = None, until: float | None = None) -
     decides by. None when no task with requests in the window has an outcome.
 
     A task's tokens and dollars are those of its requests that got a verdict (as in
-    prefixwise.metrics). The cost of a success includes the failed tasks: they were paid for too.
-    Dollars are given only when every such request is priced; a partial sum would understate them.
-    `unresolved` counts the tasks that have requests and no outcome yet: they are in none of the
-    sums here."""
+    prefixwise.metrics), and with a window only of its requests inside it (`window_only`): a task
+    that began before the window cost more than is counted here. The cost of a success includes
+    the failed tasks: they were paid for too. Dollars are given only when every such request is
+    priced; a partial sum would understate them. The avoidable dollars need more: a request can be
+    priced and its avoidable part not (a price file with no cache-read rate), and then they are not
+    given either. `unresolved` counts the tasks that have requests and no outcome yet: they are in
+    none of the sums here."""
     clauses, args = [], []
     for op, val in ((">=", since), ("<", until)):
         if val is not None:
@@ -373,40 +376,53 @@ def task_costs(ledger, since: float | None = None, until: float | None = None) -
             f"""SELECT t.success, COUNT(DISTINCT t.task_id), SUM(e.ok),
                        SUM(CASE WHEN e.ok AND e.cost IS NOT NULL THEN 1 ELSE 0 END),
                        SUM(CASE WHEN e.ok THEN e.cost END),
-                       SUM(CASE WHEN e.ok THEN e.prompt_tokens + COALESCE(e.completion_tokens, 0) END),
-                       SUM(CASE WHEN e.ok THEN e.avoidable_cost END),
-                       SUM(CASE WHEN e.ok THEN e.avoidable_tokens END)
+                       SUM(CASE WHEN e.ok THEN e.prompt_tokens + COALESCE(e.completion_tokens, 0) END)
                 FROM {rows} e JOIN tasks t ON e.task_id = t.task_id GROUP BY t.success""", args).fetchall()
         if not by_outcome:
             return None
-        top = conn.execute(
-            f"""SELECT e.cause, SUM(e.avoidable_tokens), SUM(e.avoidable_cost)
+        causes = conn.execute(
+            f"""SELECT e.cause, SUM(e.avoidable_tokens), SUM(e.avoidable_cost),
+                       SUM(CASE WHEN e.avoidable_cost IS NULL THEN 1 ELSE 0 END)
                 FROM {rows} e JOIN tasks t ON e.task_id = t.task_id
-                WHERE e.ok AND e.avoidable_tokens > 0 GROUP BY e.cause
-                ORDER BY SUM(e.avoidable_tokens) DESC, e.cause LIMIT 1""", args).fetchone()
+                WHERE e.ok AND e.avoidable_tokens > 0 GROUP BY e.cause""", args).fetchall()
         unresolved = conn.execute(
             f"""SELECT COUNT(DISTINCT task_id) FROM entries{where}{' AND' if where else ' WHERE'} task_id IS NOT NULL
-                AND task_id NOT IN (SELECT task_id FROM tasks)""", args).fetchone()[0]
+                AND task_id != '' AND task_id NOT IN (SELECT task_id FROM tasks)""", args).fetchone()[0]
     got = {bool(r[0]): r for r in by_outcome}
-    zero = (None, 0, 0, 0, None, None, None, None)
+    zero = (None, 0, 0, 0, None, None)
     ok, bad = got.get(True, zero), got.get(False, zero)
-    requests, priced = (ok[2] or 0) + (bad[2] or 0), (ok[3] or 0) + (bad[3] or 0)
-    all_priced = requests > 0 and priced == requests
     both = lambda i: (ok[i] or 0) + (bad[i] or 0)  # noqa: E731
+    all_priced = both(3) == both(2)  # every request with a verdict has a cost (none at all: nothing was spent)
     successful, tokens = ok[1], both(5)
+    # The avoidable dollars are known when the requests are priced and every avoidable row has its own.
+    avoidable_known = all_priced and not any(c[3] for c in causes)
+    avoidable_tokens = sum(c[1] for c in causes)
+    avoidable_cost = sum(c[2] or 0 for c in causes) if avoidable_known else None
     out = {"resolved": ok[1] + bad[1], "successful": successful, "failed": bad[1], "unresolved": unresolved,
+           "window_only": since is not None or until is not None,
            "tokens": tokens, "tokens_failed": bad[5] or 0,
            "tokens_per_successful": tokens / successful if successful else None,
-           "avoidable_tokens": both(7),
+           "avoidable_tokens": avoidable_tokens,
            "cost_usd": both(4) if all_priced else None,
            "cost_failed_usd": (bad[4] or 0) if all_priced else None,
            "cost_per_successful_usd": both(4) / successful if all_priced and successful else None,
-           "avoidable_cost_usd": both(6) if all_priced else None,
+           "avoidable_cost_usd": avoidable_cost,
            "top_waste": None}
-    if top is not None:
+    if causes:
+        # The cause that wasted most: by dollars where they are known, else by tokens. `share` is
+        # its part of the avoidable total in that same unit.
+        size = (lambda c: c[2] or 0) if avoidable_known else (lambda c: c[1])
+        total = avoidable_cost if avoidable_known else avoidable_tokens
+        top = max(causes, key=lambda c: (size(c), c[1], c[0]))
         out["top_waste"] = {"cause": top[0], "what": CAUSE_PLAIN.get(top[0], top[0]), "avoidable_tokens": top[1],
-                            "avoidable_cost_usd": top[2] if all_priced else None}
+                            "avoidable_cost_usd": top[2] if avoidable_known else None,
+                            "share": size(top) / total if total else None}
     return out
+
+
+def _small(x: float) -> str:
+    """Dollars, with a sum too small for four decimals said as such, not as $0.0000."""
+    return "under $0.0001" if 0 < x < 0.00005 else _usd(x)
 
 
 def _tasks(t: dict | None) -> list[str]:
@@ -415,33 +431,40 @@ def _tasks(t: dict | None) -> list[str]:
         return []
     n, ok, bad = t["resolved"], t["successful"], t["failed"]
     dollars = t["cost_usd"] is not None
-    spent = _usd(t["cost_usd"]) if dollars else f"{_n(t['tokens'])} tokens"
+    spent = _small(t["cost_usd"]) if dollars else f"{_n(t['tokens'])} tokens"
+    here = " in this window" if t["window_only"] else ""
     head = f"Tasks: {n:,} with an outcome, {ok:,} succeeded."
     if not ok:
-        head = f"Tasks: {n:,} with an outcome, none succeeded: {spent} spent on {'it' if n == 1 else 'them'}."
+        head = f"Tasks: {n:,} with an outcome, none succeeded: {spent} spent on {'it' if n == 1 else 'them'}{here}."
     else:
-        each = (f"{_usd(t['cost_per_successful_usd'])} ({_n(t['tokens_per_successful'])} tokens)" if dollars
+        each = (f"{_small(t['cost_per_successful_usd'])} ({_n(t['tokens_per_successful'])} tokens)" if dollars
                 else f"{_n(t['tokens_per_successful'])} tokens")
-        head += f" Each success cost {each}"
+        head += f" Each success cost {each}{here}"
         if bad:
             lost = t["cost_failed_usd"] if dollars else t["tokens_failed"]
             total = t["cost_usd"] if dollars else t["tokens"]
             head += (f", the {'failed task' if bad == 1 else f'{bad:,} failed tasks'} included: "
                      f"{'it was' if bad == 1 else 'they were'} "
-                     f"{_usd(lost) if dollars else _n(lost) + ' tokens'} of the {spent} spent"
+                     f"{_small(lost) if dollars else _n(lost) + ' tokens'} of the {spent} spent"
                      + (f" ({share_pct(lost / total)})" if total else ""))
         head += "."
     lines = [head]
     w = t["top_waste"]
     if w and t["avoidable_tokens"]:
-        if dollars and t["cost_usd"]:
-            per = f"{_usd(t['avoidable_cost_usd'] / ok)} a success, " if ok else ""
-            lines.append(f"  Avoidable on these tasks: {per}{share_pct(t['avoidable_cost_usd'] / t['cost_usd'])} of "
-                         f"what they cost. Most of it: {w['what']}.")
+        known = t["avoidable_cost_usd"] is not None and dollars and t["cost_usd"]
+        if known:
+            per = f"{_small(t['avoidable_cost_usd'] / ok)} a success, " if ok else ""
+            amount = f"{per}{share_pct(t['avoidable_cost_usd'] / t['cost_usd'])} of what they cost"
         else:
-            lines.append(f"  Avoidable on these tasks: {_n(t['avoidable_tokens'])} tokens. Most of it: {w['what']}.")
+            amount = f"{_n(t['avoidable_tokens'])} tokens" + (
+                " (their dollars are not known: a rate is missing for them)" if dollars else "")
+        part = ("" if w["share"] is None else "Most of it: " if w["share"] > 0.5
+                else f"The largest part ({share_pct(w['share'])}): ")
+        lines.append(f"  Avoidable on these tasks: {amount}." + (f" {part}{w['what']}." if part else ""))
     if not dollars:
         lines.append("  No dollars: not every request of these tasks is priced.")
+    if t["window_only"]:
+        lines.append("  Only requests in this window are counted: a task that began before it cost more than this.")
     if t["unresolved"]:
         m = t["unresolved"]
         lines.append(f"  {m:,} more task{'s have' if m != 1 else ' has'} requests and no outcome yet, and "

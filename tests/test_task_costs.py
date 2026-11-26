@@ -60,6 +60,7 @@ def test_no_outcome_no_lines():
     add(led, None, 0.10)
     assert task_costs(led) is None and findings(led)["tasks"] is None
     assert "Tasks:" not in render(findings(led))
+    assert "Tokens per successful task" not in render(findings(three()))  # the line this replaces is gone
 
 
 def test_a_failed_request_has_no_tokens_or_cost_in_the_sums_and_its_task_still_counts():
@@ -77,7 +78,7 @@ def test_a_failed_request_has_no_tokens_or_cost_in_the_sums_and_its_task_still_c
                            legit=None, task_id="t1", completion_tokens=10, cost=0.80, error="upstream_dropped"))
     t = task_costs(led)
     assert t["cost_usd"] == pytest.approx(1.00) and t["avoidable_cost_usd"] == pytest.approx(0.07)
-    assert t["top_waste"]["cause"] == "tool_reserialize"
+    assert t["top_waste"]["cause"] == "tool_reserialize" and t["avoidable_tokens"] == 1300
 
 
 def test_no_dollars_unless_every_request_of_these_tasks_is_priced():
@@ -157,3 +158,79 @@ def test_the_report_and_its_json_carry_it(tmp_path, capsys):
     assert main(["report", "--ledger", path, "--json"]) == 0
     rep = json.loads(capsys.readouterr().out)
     assert rep["findings"]["tasks"]["cost_per_successful_usd"] == pytest.approx(0.50)
+
+
+# -- what an independent review found ------------------------------------------------------------
+
+def test_the_cause_named_is_the_one_that_cost_most_and_is_called_most_only_above_half():
+    # more tokens on a cheap model, more dollars on a dear one: dollars decide
+    led = Ledger()
+    add(led, "t1", 0.10, "volatile_system", 600, 0.01)
+    add(led, "t1", 0.10, "tool_reserialize", 500, 0.09)
+    led.set_task_outcome("t1", True)
+    t = task_costs(led)
+    assert t["top_waste"]["cause"] == "tool_reserialize" and t["top_waste"]["share"] == pytest.approx(0.9)
+    assert "Most of it: the same tools were sent in a different order or format." in _tasks(t)[1]
+    # three causes, none above half: its share is given, and it is not called most
+    led = Ledger()
+    for cause, tokens in (("volatile_system", 400), ("tool_reserialize", 300), ("history_edit", 300)):
+        add(led, "t1", 0.10, cause, tokens, tokens / 1e4)
+    led.set_task_outcome("t1", True)
+    t = task_costs(led)
+    assert t["top_waste"]["cause"] == "volatile_system" and t["top_waste"]["share"] == pytest.approx(0.4)
+    line = _tasks(t)[1]
+    assert "The largest part (40%): the system prompt changed only in a date, time or id." in line
+    assert "Most of it" not in line
+
+
+def test_avoidable_dollars_are_not_given_when_a_priced_request_has_none():
+    """A price file with input and output rates and no cache-read rate: the request has a cost, its
+    avoidable part has none. The tokens are given, not "$0.00, 0%"."""
+    led = Ledger()
+    add(led, "t1", 0.0031, "volatile_system", 3000, None)
+    add(led, "t1", 0.0020, "tool_reserialize", 500, 0.0004)
+    led.set_task_outcome("t1", True)
+    t = task_costs(led)
+    assert t["cost_usd"] == pytest.approx(0.0051) and t["avoidable_cost_usd"] is None
+    assert t["top_waste"]["cause"] == "volatile_system" and t["top_waste"]["avoidable_cost_usd"] is None  # by tokens
+    line = _tasks(t)[1]
+    assert line.startswith("  Avoidable on these tasks: 3,500 tokens (their dollars are not known: a rate is missing")
+    assert "0%" not in line and "$" not in line
+
+
+def test_with_a_window_the_lines_say_only_requests_in_it_are_counted():
+    led = Ledger()
+    now = time.time()
+    add(led, "t1", 1.00, at=now - 7200)
+    add(led, "t1", 0.10, at=now - 60)
+    led.set_task_outcome("t1", True)
+    assert task_costs(led)["window_only"] is False
+    assert "window" not in "\n".join(_tasks(task_costs(led)))
+    t = task_costs(led, since=now - 3600)
+    assert t["window_only"] is True and t["cost_per_successful_usd"] == pytest.approx(0.10)
+    lines = _tasks(t)
+    assert lines[0] == "Tasks: 1 with an outcome, 1 succeeded. Each success cost $0.1000 (1,010 tokens) in this window."
+    assert "Only requests in this window are counted: a task that began before it cost more than this." in lines[1]
+
+
+def test_a_task_whose_every_request_failed_cost_nothing_as_the_metric_says():
+    led = Ledger()
+    add(led, "t1", None, error="upstream_dropped", prompt=0)
+    led.set_task_outcome("t1", True)
+    t = task_costs(led)
+    assert t["cost_per_successful_usd"] == 0.0 == metrics.summary(led)["cost_per_successful_task_usd"]
+    assert "No dollars" not in "\n".join(_tasks(t))
+
+
+def test_an_empty_task_id_is_no_task():
+    led = three()
+    add(led, "", 0.10)
+    assert task_costs(led)["unresolved"] == 1  # t4 alone
+
+
+def test_a_sum_too_small_for_four_decimals_is_said_as_such():
+    led = Ledger()
+    add(led, "t1", 0.00002, "volatile_system", 10, 0.00001)
+    led.set_task_outcome("t1", True)
+    text = "\n".join(_tasks(task_costs(led)))
+    assert "$0.0000" not in text and "Each success cost under $0.0001" in text
