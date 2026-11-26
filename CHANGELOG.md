@@ -14,7 +14,7 @@
   - **A hit is now reading what the previous request on the same model left in the cache**, not half of the smaller prompt. The front of a Claude Code prompt (system prompt and tools) can be in the cache whatever the conversation did, so a just-compacted prompt passed as a hit though none of its history came back: 16 compactions and a model switch were called `none`.
   - **An expiry is named before an upgrade or a changed system prompt.** Eight resumes after more than an hour idle were called "Claude Code was upgraded". A change at the front of the prompt is now named only when under half was read.
   - **The time a request was sent is read from its inputs**, not from a record Claude Code writes when the response arrives. That had hidden two 5-minute expiries (`unknown`) and made 32 gaps negative.
-  - **Each request is compared with the previous one on its own model**, so a side call on another model in between changes nothing, and switching back to a model whose cache is intact is a hit.
+  - **Each request is compared with the previous one on its own model**, so a small side call on another model in between is not taken for the conversation, and switching back to a model whose cache is intact is a hit.
   - A compaction no longer counts the previous write as left unread (the summary call that read it is not logged).
   - Rows imported by an earlier version keep their verdicts. The import says how many there are; to classify them again, import into a new ledger (`--ledger new.db`).
 

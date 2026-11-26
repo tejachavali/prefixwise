@@ -55,7 +55,7 @@ each verdict with Anthropic's own cache diagnosis, which Claude Code requests an
 3. **Two expiries were `unknown`, because the send time was read from the wrong entry.** Claude
    Code writes a `deferred_tools_record` entry when a response arrives (stamped within 50 ms of
    it, on all 2,905 in the main conversation), and the importer took the last entry before a
-   response as the time the request was sent. For 4,388 of the 10,850 logged requests (40%) the
+   response as the time the request was sent. For 4,388 of the 10,850 requests as logged (the 10,517 distinct ones, some in two files), 40%, the
    "sent" time was therefore the response time. Two subagent calls sent 318 s and 319 s after the
    previous one, past the 5-minute lifetime, read as 292 s and 153 s. The same reading gave 32
    rows a negative gap (a message queued while the previous response streamed is stamped when it

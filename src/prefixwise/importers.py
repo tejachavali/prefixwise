@@ -30,8 +30,9 @@ cause is claimed only from what the log shows changed in the cached prefix:
                      breaks the cache
   unknown            nothing in the log explains it, and it says so
 
-Each request is compared with the previous one on the same model, since caches are per model: a
-side call on another model in between changes nothing. A request that read less than was left,
+Each request is compared with the previous one on the same model that used the cache, since
+caches are per model: a small side call on another model in between is not taken for the
+conversation, and a call that read and wrote nothing does not count as a use. A request that read less than was left,
 after a compaction, an expiry or a model switch, gets that cause even when it read more than half:
 a short or just-compacted conversation can lose all of its own history and still read most of its
 prompt, because the system prompt and tools at the front can be in the cache independently of it
@@ -230,18 +231,19 @@ class _Lane:
     with this, not with whatever came just before it on another model."""
     req: _Request
     prompt: int
-    held: int           # what it left in the cache (read + written); the last known, if it left nothing
+    held: int           # what it left in the cache (read + written)
     ttl: float | None   # how long its write is kept: granted, else carried from an earlier write, else asked for
+    granted: bool       # the log showed that lifetime on a write (not only what the request asked for)
     usage: dict
     compactions: int    # compaction boundaries the stream had seen by then
     summed: bool        # its usage is the sum of several model calls: no basis for an exact comparison
 
 
-def _classify(prev: _Request | None, prev_ttl: float | None, same: _Lane | None, r: _Request, prompt: int,
+def _classify(prev: _Request | None, prev_lane: _Lane | None, same: _Lane | None, r: _Request, prompt: int,
               read: int, subagent: bool, compacted: bool = False) -> tuple[str, bool | None, str, str | None]:
     """(cause, legit, evidence, detail) from what the log shows. prev: the stream's previous request,
-    prev_ttl: how long its write is kept; same: the previous request on this request's model;
-    compacted: a compaction boundary was logged since `same`."""
+    prev_lane: its model's lane; same: the previous request on this request's model that used the
+    cache; compacted: a compaction boundary was logged since `same`."""
     several = isinstance(r.usage.get("iterations"), list) and len(r.usage["iterations"]) > 1
     summed = ("unknown", None, "the response combined several model calls; its usage is their sum", None)
     if prev is None:
@@ -266,6 +268,9 @@ def _classify(prev: _Request | None, prev_ttl: float | None, same: _Lane | None,
     reusable = min(same.held, prompt) if exact else min(same.prompt, prompt)
     if exact and prompt > 0 and read >= FULL_SHARE * reusable:
         return "none", None, f"read what the previous request{here} left in the cache", None
+    if not exact and prompt > 0 and read >= FULL_SHARE * prompt:
+        # Nothing is known to have been left on this model, yet the whole prompt was read.
+        return "none", None, "read its whole prompt from the cache", None
     partly = prompt > 0 and read >= HIT_SHARE * reusable
     kept_half = ("none", None, f"read at least half of what the previous request{here} left in the cache, and "
                                "the log shows nothing that explains the rest", None)
@@ -278,13 +283,17 @@ def _classify(prev: _Request | None, prev_ttl: float | None, same: _Lane | None,
     expired = since_use > (same.ttl if same.ttl is not None else ANY_TTL)
     # Less was read than was left. A compaction, an expiry or a model switch explains it even above
     # half: the front of the prompt can be in the cache independently of this conversation.
-    if switched and expired:
+    if switched and expired and prev_lane is not None:
         since_prev = (r.sent or r.done) - (prev.sent or prev.done)
-        if since_prev <= (prev_ttl if prev_ttl is not None else ANY_TTL):
-            # The conversation was live on the other model: staying there would have hit.
+        # The conversation was on the other model if that request carried a prompt of this one's
+        # size. A small side call (a title, a classification) is not the conversation.
+        carried = min(prev_lane.prompt, prompt) >= HIT_SHARE * max(prev_lane.prompt, prompt)
+        if carried and since_prev <= (prev_lane.ttl if prev_lane.ttl is not None else ANY_TTL):
+            # It was live there: staying would have hit.
             return "model_switch", True, (f"{switch}; {r.model}'s own cache, last used {since_use:.0f} s ago, "
                                           "had expired"), None
-    if compacted:
+    if compacted and exact and prompt < same.held:
+        # (A request on another model whose prompt did not shrink was not the one compacted.)
         return "compaction_rewrite", True, "the conversation was compacted before this request", None
     upgraded = (f"Claude Code was upgraded ({was.version} -> {r.version})"
                 if was.version and r.version and was.version != r.version else None)
@@ -292,8 +301,9 @@ def _classify(prev: _Request | None, prev_ttl: float | None, same: _Lane | None,
         # An expiry explains the miss by itself. A change in the same gap is context, not the cause:
         # the cache was gone either way.
         why = f"{since_use:.0f} s since the previous request{here}; " + (
-            f"its cache write was kept {same.ttl:.0f} s" if same.ttl is not None else
-            "longer than any cache lifetime (1 hour)")
+            "longer than any cache lifetime (1 hour)" if same.ttl is None else
+            f"its cache write was kept {same.ttl:.0f} s" if same.granted else
+            f"it asked for a cache kept {same.ttl:.0f} s")
         detail = None
         if was.ttl_requested == "1h" and same.ttl == 300.0:
             detail, why = "ttl_shortened", why + " although that request asked for a 1-hour cache"
@@ -369,8 +379,8 @@ def import_claude_code(root: str | os.PathLike | None = None, ledger: Ledger | N
                 prompt = _int(u.get("input_tokens")) + read + write
                 compactions += r.events.count("compact_boundary")
                 same = lanes.get(r.model)
-                prev_ttl = lanes[prev.model].ttl if prev is not None else None
-                cause, legit, why, detail = _classify(prev, prev_ttl, same, r, prompt, read, subagent,
+                prev_lane = lanes.get(prev.model) if prev is not None else None
+                cause, legit, why, detail = _classify(prev, prev_lane, same, r, prompt, read, subagent,
                                                       compacted=same is not None and compactions > same.compactions)
                 # This request's own cache lifetime: what its write was granted, else what it asked for.
                 asked = {"1h": 3600.0, "5m": 300.0}.get(r.ttl_requested or "")
@@ -383,9 +393,14 @@ def import_claude_code(root: str | os.PathLike | None = None, ledger: Ledger | N
                 held = same.held if same is not None and same.held > 0 else None
                 avoidable = avoidable_for_turn(legit, prompt, read, prev_prompt_before, held)
                 several = isinstance(u.get("iterations"), list) and len(u["iterations"]) > 1
-                lanes[r.model] = _Lane(req=r, prompt=prompt, held=(read + write) or (same.held if same else 0),
-                                       ttl=_granted_ttl(u) or (same.ttl if same else None) or asked, usage=u,
-                                       compactions=compactions, summed=several)
+                if read + write > 0 or same is None or same.held == 0:
+                    # A call that read and wrote nothing did not touch this model's cache: what the
+                    # lane holds, since when and for how long stay as they were.
+                    granted = _granted_ttl(u)
+                    lanes[r.model] = _Lane(req=r, prompt=prompt, held=read + write,
+                                           ttl=granted or (same.ttl if same else None) or asked,
+                                           granted=bool(granted or (same and same.granted)), usage=u,
+                                           compactions=compactions, summed=several)
                 prev = r
                 if since is not None and r.done < since:
                     continue

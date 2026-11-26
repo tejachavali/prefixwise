@@ -333,6 +333,31 @@ def test_caches_are_per_model(tmp_path):
     got = named(tmp_path / "c", side_call_then_a_miss_inside_the_lifetime)
     assert got[2]["cause"] == "unknown" and "on this model" in got[2]["evidence"]   # the side call is not blamed
 
+    def side_call_just_before_a_resume(log):
+        # A 9k call on another model ten seconds before the conversation resumes is not the conversation
+        # "live elsewhere": the resume's miss is the hour that passed, with its write left unread.
+        log.user(0); log.reply(5, usage(read=WARM, w1h=440_000))
+        log.user(3990); log.reply(3992, usage(w5=9_000), model=HAIKU, ttl="5m")
+        log.user(4000); log.reply(4005, usage(read=WARM, w1h=441_000))
+    got = named(tmp_path / "e", side_call_just_before_a_resume)
+    assert got[2]["cause"] == "ttl_expired" and got[2]["unread_write_tokens"] == 440_000
+
+    def side_model_expired_while_the_main_one_is_live(log):
+        log.user(0); log.reply(5, usage(w5=9_000), model=HAIKU, ttl="5m")
+        log.user(10); log.reply(15, usage(read=WARM, w1h=440_000))
+        log.user(400); log.reply(405, usage(w5=9_100), model=HAIKU, ttl="5m")   # Haiku's own 5 minutes passed
+    got = named(tmp_path / "f", side_model_expired_while_the_main_one_is_live)
+    assert got[2]["cause"] == "ttl_expired" and "400 s since the previous request on this model" in got[2]["evidence"]
+
+    def compaction_seen_from_each_model(log):
+        log.user(0); log.reply(5, usage(read=890_000, w1h=10_000))
+        log.user(10); log.reply(15, usage(fresh=1_600), model=HAIKU, ttl="5m")      # a side call that caches nothing
+        log.compact(60); log.user(65); log.reply(70, usage(read=WARM, w1h=40_000), model=FABLE)  # compacted, on Fable
+        log.user(80); log.reply(85, usage(fresh=1_600), model=HAIKU, ttl="5m")      # the side call again: not compacted
+        log.user(90); log.reply(95, usage(read=WARM, w1h=41_000))                   # back on Opus: its 900k is gone
+    got = named(tmp_path / "g", compaction_seen_from_each_model)
+    assert [r["cause"] for r in got] == ["none", "model_switch", "model_switch", "unknown", "compaction_rewrite"]
+
     def first_request_on_a_model(log):
         log.user(0); log.reply(5, usage(read=WARM, w1h=50_000))
         log.user(30); log.reply(35, usage(read=WARM, w1h=50_000), model=FABLE)     # 55% read: the rest is the switch's
@@ -398,6 +423,27 @@ def test_the_hit_test_is_against_what_was_left_in_the_cache(tmp_path):
     got = named(tmp_path / "e", a_call_that_cached_nothing_in_between)
     assert got[2]["cause"] == "unknown", got[2]         # measured against the 100k, not the call that left nothing
 
+    def a_call_that_cached_nothing_does_not_reset_the_clock(log):
+        log.user(0); log.reply(5, usage(read=WARM, w1h=440_000))
+        log.user(3500); log.reply(3505, usage(fresh=3_000))               # touched no cache
+        log.user(4000); log.reply(4005, usage(read=WARM, w1h=441_000))    # 4,000 s since the cache was used
+    got = named(tmp_path / "g", a_call_that_cached_nothing_does_not_reset_the_clock)
+    assert got[2]["cause"] == "ttl_expired" and "4000 s" in got[2]["evidence"]
+    assert got[2]["unread_write_tokens"] == 440_000                        # the write that was lost
+
+    def nothing_was_ever_left_on_this_model(log):
+        log.user(0); log.reply(5, usage(fresh=1_500), ttl="5m")
+        log.user(400); log.reply(405, usage(read=30_000, fresh=300), ttl="5m")   # read 99% of its prompt
+    got = named(tmp_path / "h", nothing_was_ever_left_on_this_model)
+    assert got[1]["cause"] == "none" and "whole prompt" in got[1]["evidence"]
+
+    def a_hit_that_writes_nothing_keeps_the_lifetime(log):
+        log.user(0); log.reply(5, usage(w5=100_000), ttl="5m")
+        log.user(100); log.reply(105, usage(read=100_000, fresh=200), ttl=None)   # a hit: no write, nothing asked
+        log.user(500); log.reply(505, usage(read=0, w5=100_500), ttl="5m")        # 400 s after the hit refreshed it
+    got = named(tmp_path / "i", a_hit_that_writes_nothing_keeps_the_lifetime)
+    assert got[2]["cause"] == "ttl_expired" and "400 s" in got[2]["evidence"] and "was kept 300 s" in got[2]["evidence"]
+
     def previous_usage_is_a_sum(log):
         # 4,000 s later, 60% of the prompt read. Against a sum of two calls nothing exact can be said:
         # it is not called an expiry.
@@ -417,7 +463,7 @@ def test_expiry_without_the_write_split(tmp_path):
         log.user(0); log.reply(5, bare(0, 100_000), ttl="5m")
         log.user(400); log.reply(405, bare(0, 100_500), ttl="5m")
     got = named(tmp_path / "a", asked_for_five_minutes)
-    assert got[1]["cause"] == "ttl_expired" and "kept 300 s" in got[1]["evidence"]
+    assert got[1]["cause"] == "ttl_expired" and "it asked for a cache kept 300 s" in got[1]["evidence"]
 
     def nothing_known(log):
         log.user(0); log.reply(5, bare(0, 100_000), ttl=None, version="2.1.100")
@@ -497,5 +543,5 @@ def test_rows_from_an_earlier_version_of_the_rules_are_kept_and_counted(tmp_path
     assert (stats["imported"], stats["skipped_known"], stats["older_verdicts"]) == (0, 2, 2)
     assert {r[1] for r in rows(led)} == {"unknown"}  # kept as they were
     out = subprocess.run([sys.executable, "-m", "prefixwise", "import", "claude-code", "--path", str(tmp_path),
-                          "--ledger", str(tmp_path / "l.db")], capture_output=True, text=True)
+                          "--ledger", str(tmp_path / "l.db")], capture_output=True, text=True, env=ENV)
     assert "2 requests" in out.stderr and "earlier version of the rules" in out.stderr and "new ledger" in out.stderr
