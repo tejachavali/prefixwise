@@ -108,7 +108,7 @@ All write the same kind of ledger and print the same report. An import keeps its
 | Your own vLLM server | `vllm serve <model> ... --middleware prefixwise.PrefixwiseMiddleware`: no proxy, no port change ([docs/VLLM.md](docs/VLLM.md)) |
 | vLLM with LMCache | the same `--middleware` flag, or `prefixwise serve --upstream <url>` in front, which detects the engine ([docs/LMCACHE.md](docs/LMCACHE.md)) |
 | SGLang, with or without HiCache | `prefixwise serve --upstream <url>` in front; it detects the engine ([docs/SGLANG.md](docs/SGLANG.md)) |
-| Your own Python code | `client = prefixwise.wrap(Anthropic())` (or OpenAI) |
+| Your own Python code | `client = prefixwise.wrap(Anthropic())` (or OpenAI, or a Bedrock runtime client) |
 | LiteLLM (also Claude Code through a LiteLLM proxy) | `litellm.callbacks = [PrefixwiseCallback()]`, or `callbacks: prefixwise.litellm_callback.prefixwise_callback` in the proxy server's config |
 | Claude Code or Codex on a subscription | `prefixwise import claude-code` / `prefixwise import codex` |
 | A gateway's request log (JSON Lines) | `prefixwise import gateway --path requests.jsonl`: yesterday's traffic, the live proxy's verdicts, nothing changed in production |

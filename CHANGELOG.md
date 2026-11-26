@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- **Claude on Amazon Bedrock, recorded from boto3.** `prefixwise.wrap(boto3.client("bedrock-runtime"))` records `converse` and `invoke_model` calls to Claude, judged by Anthropic's caching rules as on Anthropic's own API, and priced by the Bedrock model id. Before, Bedrock was covered only through LiteLLM.
+  - `converse`: the request is read in Anthropic's format, block for block, each `cachePoint` a breakpoint on the block before it (with its `ttl`). `inputTokens` is read as what was neither read from nor written to the cache, as on Anthropic's API; `cacheDetails` splits the write by lifetime when it accounts for all of it. A response with no cache counts (no cache point) has its write "not reported", not zero.
+  - `invoke_model`: a body in Anthropic's format (`anthropic_version`). The response body is a stream the caller reads once: Prefixwise reads it and hands back one with the same bytes. If that read fails, the caller meets the same error when it reads. An application inference profile (an ARN) is priced by the model the response names.
+  - Not recorded: `converse_stream`, `invoke_model_with_response_stream`, other models, a body passed as a file object, a call that raises, and `converse` under an inference-profile ARN, where nothing says which model ran.
+  - Not checked against a live Bedrock account: the tests run boto3 against botocore's Stubber, which validates each request and response against the service's published model.
+  - Prices: a regional endpoint (`us.`, `eu.`, ...) is priced at the global rate. Bedrock lists some newer models 10% higher on regional endpoints; that premium is not in the price table yet.
+
 ## 0.12.8: 2026-11-26
 
 Fixes from three independent audits of 0.12.7 (#184): a first-time-user run of the docs, an adversarial review of the core, and a check of every verdict on a real Claude Code session of 10,517 calls. Each finding was reproduced before it was fixed, and each fix was reviewed by an independent reviewer told to break it. New: `prefixwise demo`, and what an expired cache cost in the report.

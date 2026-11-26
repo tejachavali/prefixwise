@@ -653,10 +653,17 @@ def wrap(client, *, recorder: Recorder | None = None, agent_id: str | None = Non
     through the openai SDK): chat.completions.create / .parse and responses.create / .parse
     (stream=True too), and chat.completions.stream and responses.stream, which call create;
     `with_raw_response` calls too. Not recorded: with_streaming_response, and a streamed call
-    made through with_raw_response."""
+    made through with_raw_response.
+
+    boto3.client("bedrock-runtime"): converse and invoke_model calls to Claude
+    (prefixwise.bedrock)."""
     module = type(client).__module__.split(".")[0]
+    from .bedrock import is_bedrock_client, wrap_bedrock
+    if is_bedrock_client(client):  # boto3.client("bedrock-runtime"): Claude on Amazon Bedrock
+        return wrap_bedrock(client, recorder or default_recorder(), agent_id)
     if module not in ("anthropic", "openai"):
-        raise TypeError(f"prefixwise.wrap: expected an Anthropic or OpenAI client, got {type(client).__name__}")
+        raise TypeError("prefixwise.wrap: expected an Anthropic, OpenAI or Bedrock runtime client, "
+                        f"got {type(client).__name__}")
     recorder = recorder or default_recorder()
     if module == "anthropic":
         _patch(client.messages, "create", "anthropic", "chat", recorder, agent_id)
