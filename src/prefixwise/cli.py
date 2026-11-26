@@ -572,8 +572,8 @@ def cmd_run(args) -> int:
         return 2
     # Where the agent would have gone: its own base URLs if set (a gateway), kept exactly
     # as given, else the providers. OPENAI_BASE_URL includes the API version path.
-    anthropic = (os.environ.get("ANTHROPIC_BASE_URL") or "https://api.anthropic.com").rstrip("/")
-    openai = (os.environ.get("OPENAI_BASE_URL") or "https://api.openai.com/v1").rstrip("/")
+    anthropic = (os.environ.get("ANTHROPIC_BASE_URL") or "").strip().rstrip("/") or "https://api.anthropic.com"
+    openai = (os.environ.get("OPENAI_BASE_URL") or "").strip().rstrip("/") or "https://api.openai.com/v1"
     mock = bool(args.mock) or os.environ.get("PREFIXWISE_MOCK_UPSTREAM") == "1"
     for name, url in (("ANTHROPIC_BASE_URL", anthropic), ("OPENAI_BASE_URL", openai)):
         if not mock:

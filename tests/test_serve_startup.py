@@ -19,7 +19,8 @@ BODY = json.dumps({"model": "gpt-5.6-luna", "messages": [{"role": "user", "conte
 
 
 def _env(tmp_path, **extra):
-    env = {k: v for k, v in os.environ.items() if not k.startswith("PREFIXWISE_")}
+    env = {k: v for k, v in os.environ.items()  # nothing of the developer's own setup reaches the commands
+           if not k.startswith("PREFIXWISE_") and k not in ("ANTHROPIC_BASE_URL", "OPENAI_BASE_URL")}
     src = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src")
     env.update(PYTHONPATH=src, PYTHONUNBUFFERED="1", HOME=str(tmp_path), **extra)
     return env
@@ -132,11 +133,24 @@ def _fails(args, tmp_path, **extra_env):
 
 
 @pytest.mark.parametrize("upstream", ["notaurl", "ftp://127.0.0.1:9", "http://", "http://localhost:80a0",
-                                      "https://user:pw@gw.example/v1", "http://[::1"])
+                                      "https://user:hunter2@gw.example/v1", "http://[::1",
+                                      "https://user:hunter2@gw.example:80a0/v1", "user:hunter2@gw.example/v1",
+                                      "ftp://user:hunter2@gw.example"])
 def test_a_bad_upstream_is_refused_at_startup(tmp_path, upstream):
     err = _fails(SERVE + ["--upstream", upstream], tmp_path)
     assert "--upstream must" in err, err
-    assert "pw" not in err                              # a password in the URL is not echoed
+    assert "hunter2" not in err                         # a password in the URL is never echoed
+
+
+def test_a_password_in_an_unused_upstream_is_not_printed(tmp_path):
+    proc, _, banner = _started(SERVE + ["--mock", "--upstream", "https://user:hunter2@gw.example/v1"], tmp_path)
+    try:
+        banner.append(proc.stdout.readline())
+        text = "".join(banner)
+        assert "https://...@gw.example/v1 is not used" in text and "hunter2" not in text
+    finally:
+        proc.kill()
+        proc.wait()
 
 
 def test_a_bad_upstream_is_refused_before_anything_is_sent_to_it(tmp_path):
@@ -164,6 +178,15 @@ def test_run_names_the_variable_that_holds_a_bad_base_url(tmp_path):
     cmd = [sys.executable, "-m", "prefixwise", "run", "--", sys.executable, "-c", "print('agent ran')"]
     err = _fails(cmd, tmp_path, OPENAI_BASE_URL="localhost:11434/v1")
     assert "OPENAI_BASE_URL must be an http:// or https:// URL" in err and "Unset OPENAI_BASE_URL" in err
+    assert "hunter2" not in _fails(cmd, tmp_path, OPENAI_BASE_URL="user:hunter2@gw.example/v1")
+    # A base URL with a stray line ending (an env file edited on Windows) is trimmed before anything uses it.
+    sock, url = _listener()
+    try:
+        out = subprocess.run(cmd, cwd=tmp_path, env=_env(tmp_path, OPENAI_BASE_URL=url + "/v1\r"), text=True,
+                             capture_output=True, timeout=60)
+        assert "agent ran" in out.stdout and "Traceback" not in out.stderr, out.stderr
+    finally:
+        sock.close()
     # A general upstream that `run` never uses does not stop it.
     out = subprocess.run(cmd, cwd=tmp_path, env=_env(tmp_path, PREFIXWISE_UPSTREAM_URL="notaurl"), text=True,
                          capture_output=True, timeout=60)

@@ -587,10 +587,16 @@ def _spans(setting):
         return None
 
 
+def _no_userinfo(url: str) -> str:
+    """The URL as it may be printed: a user name and password before the host are replaced by '...'."""
+    return re.sub(r"^((?:[A-Za-z][A-Za-z0-9+.-]*:)?(?://)?)[^/?#]*@", r"\1...@", url)
+
+
 def checked_upstream(url: str, name: str = "the upstream") -> str:
     """The upstream base URL, trimmed; ValueError (one line, naming where it came from) when requests
     could never be sent to it: not http(s), no host, a port that is not a number, or credentials in
-    the URL (they belong in a header: PREFIXWISE_API_KEY, or the client's own)."""
+    the URL (they belong in a header: PREFIXWISE_API_KEY, or the client's own). The message never
+    repeats a password."""
     url = (url or "").strip()
     try:
         parts = urllib.parse.urlsplit(url)
@@ -599,10 +605,10 @@ def checked_upstream(url: str, name: str = "the upstream") -> str:
     except ValueError:
         ok = False
     if not ok:
-        raise ValueError(f"{name} must be an http:// or https:// URL, got {url!r}")
+        raise ValueError(f"{name} must be an http:// or https:// URL, got {_no_userinfo(url)!r}")
     if parts.username or parts.password:
-        raise ValueError(f"{name} must not carry a user name or password in the URL ({parts.scheme}://"
-                         f"{parts.hostname}...): send credentials in a header")
+        raise ValueError(f"{name} must not carry a user name or password in the URL ({_no_userinfo(url)}): "
+                         "send credentials in a header")
     return url.rstrip("/")
 
 
@@ -2309,7 +2315,7 @@ def serve(host: str = "127.0.0.1", port: int = 8080, *, ledger_path: str | None 
     elif not quiet:
         target = "MOCK upstream (synthetic usage, no API calls)" if proxy.mock else proxy.upstream_url
         if proxy.mock and proxy.upstream_url:  # asked for by --mock or PREFIXWISE_MOCK_UPSTREAM=1
-            target += f"; {proxy.upstream_url} is not used"
+            target += f"; {_no_userinfo(proxy.upstream_url)} is not used"
         print(f"Prefixwise proxy on http://{host}:{server.server_address[1]}")
         print(f"  upstream: {target}")
         if proxy.mock and proxy.api_key and not mock and os.environ.get("PREFIXWISE_MOCK_UPSTREAM") != "1":
