@@ -658,8 +658,9 @@ def wrap(client, *, recorder: Recorder | None = None, agent_id: str | None = Non
     boto3.client("bedrock-runtime"): converse and invoke_model calls to Claude
     (prefixwise.bedrock)."""
     module = type(client).__module__.split(".")[0]
-    from .bedrock import is_bedrock_client, wrap_bedrock
-    if is_bedrock_client(client):  # boto3.client("bedrock-runtime"): Claude on Amazon Bedrock
+    service = getattr(getattr(getattr(client, "meta", None), "service_model", None), "service_name", None)
+    if service == "bedrock-runtime":  # boto3.client("bedrock-runtime"): Claude on Amazon Bedrock
+        from .bedrock import wrap_bedrock  # (imported only here: it needs botocore)
         return wrap_bedrock(client, recorder or default_recorder(), agent_id)
     if module not in ("anthropic", "openai"):
         raise TypeError("prefixwise.wrap: expected an Anthropic, OpenAI or Bedrock runtime client, "

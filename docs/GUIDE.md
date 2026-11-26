@@ -239,7 +239,7 @@ with prefixwise.session("fix-bug-42", task_id="fix-bug-42"):
     client.messages.create(...)                       # then `prefixwise report`, as above
 ```
 
-Claude on **Amazon Bedrock**, through boto3: wrap the runtime client. `converse` and `invoke_model` calls to Claude are recorded and judged by Anthropic's caching rules (a Converse `cachePoint` is a breakpoint on the block before it); other models, and the two streaming calls, pass through unrecorded. Details and limits: [`bedrock.py`](../src/prefixwise/bedrock.py).
+Claude on **Amazon Bedrock**, through boto3: wrap the runtime client. `converse` and `invoke_model` calls to Claude are recorded and judged by Anthropic's caching rules (a Converse `cachePoint` is a breakpoint on the block before it), a prompt router by the model it chose; other models, provisioned throughput and the two streaming calls pass through unrecorded. Details and limits: [`bedrock.py`](../src/prefixwise/bedrock.py).
 
 ```python
 import boto3

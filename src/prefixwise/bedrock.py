@@ -10,37 +10,50 @@
 `converse` and `invoke_model` are recorded when the model is Claude. Each call is judged by
 Anthropic's caching rules, as on Anthropic's own API: Bedrock runs Anthropic's models with the same
 prefix cache, and a Converse `cachePoint` is a breakpoint on the block before it. Nothing is sent
-anywhere and the call and its return value are the SDK's own. Recording can never break a call: a
-failure is reported once and ignored.
+anywhere. The caller's arguments are not changed, and the return value is the SDK's own, except
+that `invoke_model`'s response body is a new StreamingBody with the same bytes (below). Recording
+never raises into the call: a failure is reported once and leaves a `not_recorded` row.
 
-- `converse`: the request (messages, system, toolConfig, additionalModelRequestFields) is read in
-  Anthropic's format, block for block. Usage: `inputTokens` is what was not read from or written
-  to the cache, as on Anthropic's API; `cacheReadInputTokens` and `cacheWriteInputTokens` are read
-  and written, and `cacheDetails` splits the write by lifetime when it accounts for all of it.
-  When the usage carries no cache counts (no cachePoint), the write is "not reported", not zero.
+- `converse`: the request (messages, system, toolConfig, outputConfig, inferenceConfig,
+  additionalModelRequestFields) is read in Anthropic's format, block for block. Bytes (images,
+  documents, redacted thinking) are compared by their content. Usage: `inputTokens` is what was not
+  read from or written to the cache, as on Anthropic's API; `cacheReadInputTokens` and
+  `cacheWriteInputTokens` are read and written. The write is split by lifetime from
+  `cacheDetails` when that accounts for all of it; otherwise from the request when every cache
+  point asks for the same lifetime; otherwise it is priced as a 5-minute write. When the usage
+  carries no cache counts, the write is "not reported", not zero.
 - `invoke_model`: a body in Anthropic's format (`anthropic_version`). The response body is a
-  stream the caller reads once; Prefixwise reads it and gives the caller a new one with the same
-  bytes. A body passed as a file object is not read and the call is not recorded.
+  stream the caller reads once; Prefixwise reads it to the end and gives the caller a new
+  StreamingBody with the same bytes. If that read fails, the caller meets the same error when it
+  reads. A body passed as a file object is not read and the call is not recorded.
 
-Claude is told by the model id: `anthropic.` or `claude` in it. An application inference profile
-(an ARN with neither) is recorded on `invoke_model`, where the body says it is Anthropic's and the
-response names the model, and not on `converse`, where nothing says which model ran.
+Which model ran: a Claude model id, with or without a region prefix (`us.`, `eu.`, `global.`), or a
+system inference profile's ARN, which names it. A prompt router names the model it chose in the
+response's trace; without that the call is not recorded. On `invoke_model`, a model id that does
+not name Claude (an application inference profile's ARN) is read from the response's `model`.
 
-Not recorded: `converse_stream`, `invoke_model_with_response_stream`, other models, and calls that
-raise.
+Not recorded: `converse_stream`, `invoke_model_with_response_stream`, other models, calls that
+raise, `converse` under an application inference profile (nothing says which model ran), and
+provisioned throughput (a `provisioned-model` ARN), which is billed by the hour, not per token.
 """
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import io
 import json
+import re
 import sys
 import time
 
-from .litellm_callback import _anthropic_from_converse, _converse_blocks
+from .converse import _anthropic_from_converse, _converse_blocks
 
 _STOP = {"end_turn": "end_turn", "tool_use": "tool_use", "max_tokens": "max_tokens",
          "stop_sequence": "stop_sequence"}
+# anthropic.claude-..., with a region prefix (us., eu., global., ...) or inside an ARN
+# (foundation-model/..., inference-profile/..., default-prompt-router/...)
+_CLAUDE = re.compile(r"(?:^|[./:])anthropic\.claude", re.I)
 
 
 def is_bedrock_client(client) -> bool:
@@ -49,47 +62,109 @@ def is_bedrock_client(client) -> bool:
     return getattr(model, "service_name", None) == "bedrock-runtime"
 
 
-def _claude(model_id) -> bool:
-    m = str(model_id or "").lower()
-    return "anthropic." in m or "claude" in m
+def names_claude(model_id) -> bool:
+    return bool(_CLAUDE.search(str(model_id or "")))
 
 
-def anthropic_usage(usage: dict) -> dict:
-    """Bedrock Converse usage in Anthropic's shape. `inputTokens` excludes what was read from and
-    written to the cache, as Anthropic's `input_tokens` does. The write count is carried only when
-    Bedrock sent one, so a request without cache points is "not reported", not "wrote 0"."""
+def _router(model_id: str) -> bool:
+    return "prompt-router/" in model_id
+
+
+def _provisioned(model_id: str) -> bool:
+    return ":provisioned-model/" in model_id
+
+
+def _jsonable(value):
+    """The request with its bytes (images, documents, redacted thinking) as text, so a changed
+    image or document reads as changed. A long blob is kept as its digest: that is all a
+    comparison needs."""
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        data = bytes(value)
+        if len(data) > 4096:
+            return "sha256:" + hashlib.sha256(data).hexdigest()
+        return base64.b64encode(data).decode()
+    if isinstance(value, dict):
+        return {k: _jsonable(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_jsonable(v) for v in value]
+    return value
+
+
+def _lifetimes(kwargs: dict) -> set:
+    """The lifetimes the request's cache points ask for ("5m" when none is given)."""
+    found = set()
+
+    def walk(v):
+        if isinstance(v, dict):
+            point = v.get("cachePoint")
+            if isinstance(point, dict):
+                found.add(point.get("ttl") or "5m")
+            for x in v.values():
+                walk(x)
+        elif isinstance(v, list):
+            for x in v:
+                walk(x)
+    for key in ("system", "messages", "toolConfig"):
+        walk(kwargs.get(key))
+    return found
+
+
+def anthropic_usage(usage: dict, lifetimes: set | None = None) -> dict:
+    """Bedrock usage in Anthropic's shape. `inputTokens` excludes what was read from and written
+    to the cache, as Anthropic's `input_tokens` does (Converse's names, and InvokeModel's `*Count`
+    names). The write count is carried only when Bedrock sent one, so a request without cache
+    points is "not reported", not "wrote 0". The write is split by lifetime from `cacheDetails`
+    when that adds up to it; else, when `lifetimes` (what the request's cache points asked for) is
+    one lifetime, all of it is that one."""
     out = {"input_tokens": int(usage.get("inputTokens") or 0), "output_tokens": int(usage.get("outputTokens") or 0)}
     read = usage.get("cacheReadInputTokens", usage.get("cacheReadInputTokenCount"))
     write = usage.get("cacheWriteInputTokens", usage.get("cacheWriteInputTokenCount"))
     if read is not None:
         out["cache_read_input_tokens"] = int(read)
-    if write is not None:
-        out["cache_creation_input_tokens"] = int(write)
-        details = usage.get("cacheDetails")
-        if isinstance(details, list) and details:
-            by = {"5m": 0, "1h": 0}
-            for d in details:
-                if isinstance(d, dict) and d.get("ttl") in by:
-                    by[d["ttl"]] += int(d.get("inputTokens") or 0)
-            if by["5m"] + by["1h"] == int(write):  # a split that does not add up is no split
-                out["cache_creation"] = {"ephemeral_5m_input_tokens": by["5m"], "ephemeral_1h_input_tokens": by["1h"]}
+    if write is None:
+        return out
+    write = int(write)
+    out["cache_creation_input_tokens"] = write
+    by = None
+    details = usage.get("cacheDetails")
+    if isinstance(details, list) and details:
+        split = {"5m": 0, "1h": 0}
+        for d in details:
+            if isinstance(d, dict) and d.get("ttl") in split:
+                split[d["ttl"]] += int(d.get("inputTokens") or 0)
+        if split["5m"] + split["1h"] == write:  # a split that does not add up is no split
+            by = split
+    if by is None and lifetimes and len(lifetimes) == 1 and next(iter(lifetimes)) in ("5m", "1h"):
+        ttl = next(iter(lifetimes))
+        by = {"5m": write if ttl == "5m" else 0, "1h": write if ttl == "1h" else 0}
+    if by is not None:
+        out["cache_creation"] = {"ephemeral_5m_input_tokens": by["5m"], "ephemeral_1h_input_tokens": by["1h"]}
     return out
 
 
-def converse_request(kwargs: dict) -> dict:
+def converse_request(kwargs: dict, model: str | None = None) -> dict:
     """A Converse request in Anthropic's format, as Bedrock caches it."""
-    model = str(kwargs.get("modelId") or "")
-    body = _anthropic_from_converse(kwargs, model)
+    kwargs = _jsonable(kwargs)
+    body = _anthropic_from_converse(kwargs, str(model or kwargs.get("modelId") or ""))
     config = kwargs.get("inferenceConfig") or {}
     if isinstance(config, dict):
         for theirs, ours in (("maxTokens", "max_tokens"), ("temperature", "temperature"), ("topP", "top_p"),
                              ("stopSequences", "stop_sequences")):
             if config.get(theirs) is not None:
                 body.setdefault(ours, config[theirs])
+    output = kwargs.get("outputConfig")
+    if isinstance(output, dict) and output:  # effort and output format: Anthropic's output_config
+        theirs = {}
+        if output.get("effort") is not None:
+            theirs["effort"] = output["effort"]
+        if output.get("textFormat") is not None:
+            theirs["format"] = output["textFormat"]
+        if theirs:
+            body["output_config"] = {**(body.get("output_config") or {}), **theirs}
     return body
 
 
-def converse_response(response: dict, model: str) -> dict | None:
+def converse_response(response: dict, model: str, lifetimes: set | None = None) -> dict | None:
     """A Converse response in Anthropic's format; None when it carries no usage."""
     usage = response.get("usage")
     if not isinstance(usage, dict):
@@ -97,70 +172,57 @@ def converse_response(response: dict, model: str) -> dict | None:
     message = ((response.get("output") or {}).get("message") or {})
     meta = response.get("ResponseMetadata") or {}
     return {"id": meta.get("RequestId") or f"bedrock-{time.time_ns()}", "type": "message", "role": "assistant",
-            "model": model, "content": _converse_blocks(message.get("content")),
+            "model": model, "content": _converse_blocks(_jsonable(message.get("content"))),
             "stop_reason": _STOP.get(response.get("stopReason"), response.get("stopReason")),
-            "usage": anthropic_usage(usage)}
+            "usage": anthropic_usage(usage, lifetimes)}
 
 
-class _Body:
-    """The response body handed back after Prefixwise read the original: the same bytes, with the
-    methods callers use on botocore's StreamingBody."""
-
-    def __init__(self, data: bytes, original):
-        try:
-            from botocore.response import StreamingBody
-            self._b = StreamingBody(io.BytesIO(data), len(data))
-        except Exception:  # noqa: BLE001 - botocore absent or changed: a plain reader still works
-            self._b = io.BytesIO(data)
-        self._original = original
-
-    def __getattr__(self, name):
-        return getattr(self._b, name)
-
-    def __iter__(self):
-        return iter(self._b)
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *exc):
-        self.close()
-
-    def close(self):
-        try:
-            self._b.close()
-        finally:
-            close = getattr(self._original, "close", None)
-            if callable(close):
-                close()
+def converse_model(model_id: str, response: dict) -> str | None:
+    """The Claude model a converse call ran on, or None when it cannot be told or is not Claude.
+    (A provisioned-model or application-inference-profile ARN names no model: None.)"""
+    if _router(model_id):
+        invoked = ((response.get("trace") or {}).get("promptRouter") or {}).get("invokedModelId")
+        return str(invoked) if invoked and names_claude(invoked) else None
+    return model_id if names_claude(model_id) else None
 
 
-class _Failed:
-    """A body whose read failed while Prefixwise read it: the caller meets the same error, when it
-    reads, as it would have without Prefixwise."""
+def _streaming_body(data: bytes):
+    from botocore.response import StreamingBody
+    return StreamingBody(io.BytesIO(data), len(data))
 
-    def __init__(self, exc: BaseException, original):
-        self._exc, self._original = exc, original
 
-    def read(self, *args, **kwargs):
-        raise self._exc
+def _failed_body(exc: BaseException, original):
+    """A StreamingBody whose reads raise what Prefixwise's read of the original raised: the caller
+    meets the same error, when it reads, as it would have."""
+    from botocore.response import StreamingBody
 
-    iter_chunks = iter_lines = readlines = read
+    class FailedBody(StreamingBody):
+        def read(self, amt=None):
+            raise exc
 
-    def __iter__(self):
-        raise self._exc
+        def close(self):
+            try:
+                original.close()
+            finally:
+                super().close()
 
-    def close(self):
-        close = getattr(self._original, "close", None)
-        if callable(close):
-            close()
+    return FailedBody(io.BytesIO(b""), 0)
 
 
 def _warn(recorder, exc) -> None:
-    if not getattr(recorder, "_warned", False):
-        recorder._warned = True
+    if not getattr(recorder, "_bedrock_warned", False):
+        recorder._bedrock_warned = True
         print(f"prefixwise: could not record a Bedrock call ({type(exc).__name__}: {exc}); "
               "the call itself was unaffected", file=sys.stderr)
+
+
+def _not_recorded(recorder, model: str, agent_id, started) -> None:
+    """A call that could not be read is still a row, so error rates stay honest. Never raises."""
+    try:
+        recorder.record_failure("anthropic", {"model": model, "messages": []}, status=200, error="not_recorded",
+                                agent_id=agent_id, latency_ms=(time.perf_counter() - started) * 1000)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def wrap_bedrock(client, recorder, agent_id: str | None = None):
@@ -178,15 +240,20 @@ def _patch_converse(original, recorder, agent_id):
     def converse(*args, **kwargs):
         started = time.perf_counter()
         result = original(*args, **kwargs)
+        model = None
         try:
-            model = str(kwargs.get("modelId") or "")
-            if _claude(model) and isinstance(result, dict):
-                response = converse_response(result, model)
+            if isinstance(result, dict):
+                model = converse_model(str(kwargs.get("modelId") or ""), result)
+            if model is not None:
+                lifetimes = _lifetimes(kwargs)
+                response = converse_response(result, model, lifetimes)
                 if response is not None:
-                    recorder.record("anthropic", converse_request(kwargs), response, api="chat", agent_id=agent_id,
-                                    latency_ms=(time.perf_counter() - started) * 1000, genai_provider="aws.bedrock")
+                    recorder.record("anthropic", converse_request(kwargs, model), response, api="chat",
+                                    agent_id=agent_id, latency_ms=(time.perf_counter() - started) * 1000,
+                                    genai_provider="aws.bedrock")
         except Exception as exc:  # noqa: BLE001 - recording never breaks the call
             _warn(recorder, exc)
+            _not_recorded(recorder, model or str(kwargs.get("modelId") or ""), agent_id, started)
         return result
     converse.__doc__ = getattr(original, "__doc__", None)
     return converse
@@ -196,29 +263,38 @@ def _patch_invoke(original, recorder, agent_id):
     def invoke_model(*args, **kwargs):
         started = time.perf_counter()
         result = original(*args, **kwargs)
+        model = str(kwargs.get("modelId") or "")
         try:
             raw = kwargs.get("body")
-            if isinstance(raw, (bytes, bytearray, str)) and isinstance(result, dict) and result.get("body") is not None:
+            if (isinstance(raw, (bytes, bytearray, str)) and isinstance(result, dict)
+                    and result.get("body") is not None and not _provisioned(model)):
                 body = json.loads(raw)
-                model = str(kwargs.get("modelId") or "")
                 if isinstance(body, dict) and "anthropic_version" in body and isinstance(body.get("messages"), list):
                     stream = result["body"]
                     try:
                         data = stream.read()
                     except Exception as exc:  # the caller would have met this reading it: it still will
-                        result["body"] = _Failed(exc, stream)
+                        result["body"] = _failed_body(exc, stream)
                         raise
-                    result["body"] = _Body(data, stream)
+                    result["body"] = _streaming_body(data)
+                    try:
+                        stream.close()
+                    except Exception:  # noqa: BLE001 - read to its end already
+                        pass
                     latency = (time.perf_counter() - started) * 1000
                     response = json.loads(data)
                     if isinstance(response, dict) and isinstance(response.get("usage"), dict):
+                        # A model id that does not name Claude (an application inference profile)
+                        # is judged and priced by the model the response names.
+                        if not names_claude(model) and response.get("model"):
+                            model = str(response["model"])
                         request = {**body, "model": model}
-                        request.pop("anthropic_version", None)
                         response.setdefault("model", model)
                         recorder.record("anthropic", request, response, api="chat", agent_id=agent_id,
                                         latency_ms=latency, genai_provider="aws.bedrock")
         except Exception as exc:  # noqa: BLE001 - recording never breaks the call
             _warn(recorder, exc)
+            _not_recorded(recorder, model, agent_id, started)
         return result
     invoke_model.__doc__ = getattr(original, "__doc__", None)
     return invoke_model
