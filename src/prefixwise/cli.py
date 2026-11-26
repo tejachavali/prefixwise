@@ -946,9 +946,11 @@ def cmd_import(args) -> int:
 
 def _import_gateway(log_path: str, ledger_path: str, args, since: float | None) -> dict | None:
     """Read a gateway's JSON Lines request log and replay it into the ledger (prefixwise.gateway_import)."""
-    from .gateway_import import ended, read_log, replay
+    from .gateway_import import ended, read_log_counts, replay
 
-    entries, bad = read_log(log_path)
+    entries, bad, repeated = read_log_counts(log_path)
+    # A repeat is in the window when the request it repeats is.
+    dups = sum(1 for i in repeated if since is None or ended(entries[i]) >= since)
     # The window holds the requests that ended at or after --since: a request is recorded when it ends.
     in_window = [e for e in entries if since is None or ended(e) >= since]
     if not in_window:
@@ -982,7 +984,7 @@ def _import_gateway(log_path: str, ledger_path: str, args, since: float | None) 
     if bad:
         print(f"prefixwise: skipped {bad} line(s) without a request body, a response or a start time", file=sys.stderr)
     return {"logs": 1, "imported": st["imported"], "in_window": len(entries), "skipped_known": 0,
-            "duplicates": 0, "unreadable": 0, "first": max(st["first"] or entries[0]["start"], since or 0),  # the window, not before it
+            "duplicates": dups, "unreadable": 0, "first": max(st["first"] or entries[0]["start"], since or 0),  # the window, not before it
             "last": st["last"] or entries[-1]["end"], "failed": st["failed"]}
 
 
