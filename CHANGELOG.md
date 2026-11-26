@@ -2,8 +2,13 @@
 
 ## Unreleased
 
-- **`prefixwise serve` with no upstream is a mock again.** Its help, the Dockerfile and the guide say that with no `--upstream` (and no `PREFIXWISE_UPSTREAM_URL`) the proxy answers with synthetic responses. It did not: every request got a 500 while `/health` stayed green, unless `--mock` was passed. That covered the Docker image's default command, the `prefixwise-proxy` script, and `PREFIXWISE_MOCK_UPSTREAM=1`. `prefixwise run` and `--mock` were not affected. Found by starting the command as its own docs say; the tests and the CI image check now send a real request.
-- **Startup errors say what to do.** An `--upstream` that is not an `http://` or `https://` URL is refused at startup (it used to start, then answer every request with a 500). A port already in use, or out of range, gives one line naming the port and `--port`, on `serve`, `run` and `check`, not a traceback.
+- **`prefixwise serve` with no upstream is a mock again.** Its help, the Dockerfile and the guide say that with no `--upstream` (and no `PREFIXWISE_UPSTREAM_URL`) the proxy answers with synthetic responses. It did not: every request got a 500 while `/health` stayed green, unless `--mock` was passed. That covered the Docker image's default command and the `prefixwise-proxy` script. `prefixwise run` and `--mock` were not affected. Found by starting the command as its own docs say; the tests and the CI image check now send a real request.
+  - **`PREFIXWISE_MOCK_UPSTREAM=1` now means mock on `serve`, even with an upstream set.** Before, `serve` ignored it and forwarded to the upstream. If that variable is in your environment and you want real calls, unset it. The banner says when an upstream is set but not used, and no engine probe (which carries `PREFIXWISE_API_KEY`) is sent to it.
+  - **A key with no upstream gets a warning.** `PREFIXWISE_API_KEY` set and no upstream now starts as a mock and says so in the banner. Before, on a host beyond localhost it refused to start; on localhost it started and answered 500.
+- **Startup errors say what to do.**
+  - An upstream that requests could never be sent to is refused at startup, before anything is sent to it: not `http://` or `https://`, no host, a port that is not a number, or a user name and password in the URL. These used to start and then answer every request with a 500, or end in a traceback. Stray spaces or a line ending around the URL are trimmed.
+  - `prefixwise run` checks the agent's `ANTHROPIC_BASE_URL` and `OPENAI_BASE_URL` the same way and names the variable. Before, a base URL without `http://` let the agent start and then failed each request.
+  - A port already in use, or out of range, gives one line naming the port and `--port`, on `serve`, `collect`, `run` and `check`, not a traceback.
 
 ## 0.12.7: 2026-11-26
 

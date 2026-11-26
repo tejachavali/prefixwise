@@ -376,7 +376,7 @@ Every number Prefixwise shows is also data. Each request leaves a row of facts (
 ## Security
 
 - **What it stores:** the ledger keeps fingerprints of prompt blocks (hashes), token counts, causes, and your session, task and agent labels. It never stores prompt text or API keys. The ledger file is created readable by its owner only. Set `PREFIXWISE_HMAC_KEY` so hashes of short, guessable blocks are keyed.
-- **Where it listens:** `127.0.0.1` by default. To listen beyond localhost (a team server, or Docker with a published port), set `PREFIXWISE_AUTH_TOKEN`; clients then send it as `X-Prefixwise-Token`, and every endpoint but `/health` requires it. With `PREFIXWISE_API_KEY` set, the proxy refuses to listen beyond localhost without a token, because anyone who reached the port could spend your key. Publish Docker ports on `127.0.0.1` (`-p 127.0.0.1:8080:8080`).
+- **Where it listens:** `127.0.0.1` by default. To listen beyond localhost (a team server, or Docker with a published port), set `PREFIXWISE_AUTH_TOKEN`; clients then send it as `X-Prefixwise-Token`, and every endpoint but `/health` requires it. With `PREFIXWISE_API_KEY` set and an upstream to forward to, the proxy refuses to listen beyond localhost without a token, because anyone who reached the port could spend your key. (With no upstream it is a mock: the key goes nowhere, and the banner warns that it is set but unused.) Publish Docker ports on `127.0.0.1` (`-p 127.0.0.1:8080:8080`).
 - **Keys:** the client's own auth headers pass through to the upstream untouched and are never logged. `X-Prefixwise-*` headers are never forwarded.
 - **Limits:** request bodies over 32 MiB (`PREFIXWISE_MAX_BODY_BYTES`) get a 413, and malformed requests get a 400 naming the field.
 
