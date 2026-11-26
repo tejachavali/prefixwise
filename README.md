@@ -144,7 +144,7 @@ Off by default. If the upstream rejects a request carrying markers Prefixwise pl
 prefixwise check -- pytest tests/agent_scenarios      # exit 2 on a cache regression
 ```
 
-The command is whatever runs your agent; it gets the mock's address in `ANTHROPIC_BASE_URL` and `OPENAI_BASE_URL`. A run in which no request reached the mock exits 1 ("nothing checked"), so a gate cannot pass by looking at nothing.
+The command is whatever runs your agent; it gets the mock's address in `ANTHROPIC_BASE_URL` and `OPENAI_BASE_URL`. A run in which no request got a verdict exits 1 ("nothing checked"), not 0; `--allow-empty` (or the Action's `allow-empty: true`) is for a job that may run no scenario.
 
 The costly regressions pass every functional test: a tool list built from a set, a timestamp added to the system prompt, a marker moved. `prefixwise check` runs your agent's scenarios against a local mock provider, with no API calls, and fails on four: tools in a changed order, a volatile system prompt, a misplaced marker, a mutated tool result. As a GitHub Action:
 

@@ -191,10 +191,12 @@ def rows_since(ledger, since: float) -> list[dict]:
 
 
 def judge(rows: list[dict], fail_on: tuple, allow: list[dict] | None = None, mock: bool = True,
-          allow_empty: bool = False) -> Report:
+          allow_empty: bool = False, reached: int | None = None) -> Report:
     """Rows of one run (the ledger's columns), in order, to a report: findings for the gated causes,
-    eligible turns per model (a turn with a previous turn to reuse), scenarios and requests."""
-    rep = Report(fail_on=fail_on, mock=mock, reached=len(rows), allow_empty=allow_empty)
+    eligible turns per model (a turn with a previous turn to reuse), scenarios and requests.
+    reached: how many model-call requests the mock received, when the caller counted them (a request
+    the mock refused, such as one to a path it does not serve, leaves no row)."""
+    rep = Report(fail_on=fail_on, mock=mock, reached=max(len(rows), reached or 0), allow_empty=allow_empty)
     turns: dict[str, int] = {}
     for r in rows:
         scenario = str(r.get("session_id") or "default")
@@ -226,7 +228,8 @@ def judge(rows: list[dict], fail_on: tuple, allow: list[dict] | None = None, moc
     if not rep.requests:
         if rep.reached:
             what = (f"{rep.reached} request{'' if rep.reached == 1 else 's'} reached Prefixwise and none got a "
-                    "verdict (each failed or could not be read)")
+                    "verdict (each was refused, failed or could not be read: the mock serves /v1/messages, "
+                    "/v1/chat/completions and /v1/responses)")
         elif mock:
             what = ("no request reached the mock. The command gets the mock's address in ANTHROPIC_BASE_URL and "
                     "OPENAI_BASE_URL: an agent with its base URL written into the code, or one that never made a "

@@ -13,10 +13,15 @@ from prefixwise import demo
 from prefixwise.cli import COMMAND_ORDER, build_parser, main
 
 ROOT = Path(__file__).resolve().parent.parent
-ENV = {**os.environ, "PYTHONPATH": str(ROOT / "src"), "NO_COLOR": "1"}
-for _k in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "PREFIXWISE_LEDGER_PATH", "PREFIXWISE_FIXES",
-           "PREFIXWISE_HMAC_KEY", "PREFIXWISE_UPSTREAM_URL", "PREFIXWISE_PRICES"):
-    ENV.pop(_k, None)
+# No setting of the developer's shell reaches the commands under test.
+ENV = {k: v for k, v in os.environ.items()
+       if not k.startswith("PREFIXWISE_") and k not in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_BASE_URL",
+                                                         "OPENAI_BASE_URL", "PORT")}
+ENV.update(PYTHONPATH=str(ROOT / "src"), NO_COLOR="1")
+POST = ("import json,os,sys,urllib.request as u,urllib.error as e\n"
+        "b=json.dumps({'model':'gpt-5.6-luna','messages':[{'role':'user','content':'hi'}]}).encode()\n"
+        "try: u.urlopen(u.Request(os.environ['OPENAI_BASE_URL']+sys.argv[1],b,{'content-type':'application/json'})).read()\n"
+        "except e.HTTPError as x: print('status', x.code)\n")
 
 
 def cli(*args, cwd=None, env=None):
@@ -57,6 +62,71 @@ def test_demo_runs_in_process_and_leaves_nothing_behind(tmp_path, monkeypatch, c
     assert list(tmp_path.iterdir()) == []           # no ledger in the user's directory
 
 
+def test_demo_takes_nothing_from_the_shell(tmp_path):
+    """A collector, fixes or an engine set in the shell must not reach it: "no network" has to be true,
+    and the broken run has to break."""
+    env = {**ENV, "PREFIXWISE_COLLECTOR": "http://127.0.0.1:9", "PREFIXWISE_FIXES": "optimize",
+           "PREFIXWISE_HMAC_KEY": "k", "PREFIXWISE_ENGINE": "vllm", "PREFIXWISE_LEDGER_PATH": str(tmp_path / "x.db")}
+    out = cli("demo", "--pause", "0", env=env)
+    assert out.returncode == 0, out.stderr
+    before = out.stdout.split("act 5: the fix")[0]
+    assert before.count("tool_reserialize") >= 2 and "volatile_system" in before and "history_edit" in before
+    assert not (tmp_path / "x.db").exists()
+
+
+def test_demo_keep_never_overwrites_a_ledger(tmp_path):
+    mine = tmp_path / "before.db"
+    mine.write_bytes(b"my own ledger")
+    out = cli("demo", "--pause", "0", "--keep", str(tmp_path))
+    assert out.returncode == 1 and "already holds before.db" in out.stderr and "Traceback" not in out.stderr
+    assert mine.read_bytes() == b"my own ledger" and not (tmp_path / "after.db").exists()
+    blocked = tmp_path / "a-file"
+    blocked.write_text("x")
+    out = cli("demo", "--pause", "0", "--keep", str(blocked / "sub"))
+    assert out.returncode == 1 and "cannot keep the ledgers" in out.stderr and "Traceback" not in out.stderr
+
+
+def test_demo_failures_are_one_line_and_leave_nothing(tmp_path, monkeypatch, capsys):
+    made = []
+    real = demo.tempfile.mkdtemp
+    monkeypatch.setattr(demo.tempfile, "mkdtemp", lambda **kw: made.append(real(dir=str(tmp_path), **kw)) or made[-1])
+    for boom, code in ((demo.DemoError("the provider answered 500"), 1), (KeyboardInterrupt(), 130)):
+        def fail(*a, _boom=boom, **kw):
+            raise _boom
+        monkeypatch.setattr(demo, "run_session", fail)
+        assert demo.run(["--pause", "0", "--no-color"]) == code
+        err = capsys.readouterr().err
+        assert "Traceback" not in err and err.strip().startswith("prefixwise demo:")
+    assert len(made) == 2 and not any(os.path.exists(d) for d in made)
+    for bad in ("-1", "nan"):
+        with pytest.raises(SystemExit) as exc:
+            demo.run(["--pause", bad])
+        assert exc.value.code == 2
+
+
+def test_demo_into_a_closed_pipe_or_without_a_terminal():
+    piped = subprocess.run(["bash", "-c", f"{sys.executable} -m prefixwise demo --pause 0 | head -2"],
+                           capture_output=True, text=True, env=ENV, timeout=120)
+    assert piped.stdout.startswith("Prefixwise demo") and "Traceback" not in piped.stderr
+    assert "BrokenPipe" not in piped.stderr
+    closed = subprocess.run([sys.executable, "-m", "prefixwise", "demo", "--step", "--pause", "0"],
+                            capture_output=True, text=True, env=ENV, timeout=120, preexec_fn=lambda: os.close(0))
+    assert closed.returncode == 0 and "before and after" in closed.stdout and "Traceback" not in closed.stderr
+
+
+def test_demo_colours_only_a_terminal(monkeypatch, capsys):
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    monkeypatch.setenv("PYTHONPATH", str(ROOT / "src"))
+    assert demo.run(["--pause", "0"]) == 0
+    assert "\033[" not in capsys.readouterr().out          # captured output is not a terminal
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True, raising=False)
+    assert demo.run(["--pause", "0"]) == 0
+    assert "\033[" in capsys.readouterr().out
+    monkeypatch.setenv("NO_COLOR", "1")
+    assert demo.run(["--pause", "0"]) == 0
+    assert "\033[" not in capsys.readouterr().out
+
+
 def test_demo_live_without_a_key_is_one_line(monkeypatch, capsys):
     for k in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY"):
         monkeypatch.delenv(k, raising=False)
@@ -79,6 +149,9 @@ def test_help_lists_demo_first_and_every_command():
     assert sorted(listed) == sorted(sub.choices) == sorted(COMMAND_ORDER)
     assert listed == list(COMMAND_ORDER)
     assert cli("help").stdout == cli("--help").stdout
+    assert cli("help", "check").stdout == cli("check", "--help").stdout
+    assert cli("help", "demo").stdout == cli("demo", "--help").stdout
+    assert "prefixwise demo" in cli().stdout                 # the no-argument text starts a new user there
 
 
 # -- prefixwise check: nothing checked is not a pass -------------------------------------
@@ -122,7 +195,8 @@ def test_run_says_why_no_request_arrived(tmp_path):
     led = str(tmp_path / "l.db")
     crashed = cli("run", "--mock", "--ledger", led, "--", sys.executable, "-c", "raise SystemExit(4)")
     assert crashed.returncode == 4
-    assert "exited 4 before it made a model call" in crashed.stderr and "BASE_URL" not in crashed.stderr
+    assert "exited 4" in crashed.stderr and "its own output says why" in crashed.stderr
+    assert "ANTHROPIC_BASE_URL=http://127.0.0.1:" in crashed.stderr   # it may also have run and gone elsewhere
     missing = cli("run", "--mock", "--ledger", led, "--", "no-such-command-prefixwise")
     assert missing.returncode == 127 and "did not start" in missing.stderr
     quiet = cli("run", "--mock", "--ledger", led, "--", sys.executable, "-c", "pass")
@@ -144,8 +218,8 @@ def test_a_file_that_is_not_a_ledger(tmp_path):
     text = tmp_path / "notes.txt"
     text.write_text("hello\n")
     for command in (("report",), ("fixes",), ("export",), ("request", "abc")):
-        no_traceback(cli(*command, "--ledger", str(text)), 1, "is not a ledger")
-    no_traceback(cli("report", "--ledger", str(tmp_path)), 1, "is not a ledger")
+        no_traceback(cli(*command, "--ledger", str(text)), 1, "cannot open", "as a ledger")
+    no_traceback(cli("report", "--ledger", str(tmp_path)), 1, "cannot open", "as a ledger")
     assert text.read_text() == "hello\n"
 
 
@@ -158,11 +232,7 @@ def test_task_and_prune_do_not_create_a_ledger(tmp_path):
 @pytest.fixture
 def ledger(tmp_path):
     path = str(tmp_path / "l.db")
-    out = cli("run", "--mock", "--ledger", path, "--", sys.executable, "-c", (
-        "import json,os,urllib.request as u\n"
-        "b=json.dumps({'model':'gpt-5.6-luna','messages':[{'role':'user','content':'hi'}]}).encode()\n"
-        "u.urlopen(u.Request(os.environ['OPENAI_BASE_URL']+'/chat/completions',b,"
-        "{'content-type':'application/json'})).read()\n"))
+    out = cli("run", "--mock", "--ledger", path, "--", sys.executable, "-c", POST, "/chat/completions")
     assert out.returncode == 0, out.stderr
     return path
 
@@ -209,21 +279,61 @@ def test_explain_refuses_what_is_not_a_request(tmp_path):
     assert "NONE" not in out.stdout                 # it used to answer "prefix reused"
     empty = tmp_path / "empty.jsonl"
     empty.write_text("")
-    no_traceback(cli("explain", str(empty)), 1, "is empty")
+    no_traceback(cli("explain", str(empty)), 1, "holds no request")
+    real = tmp_path / "real.json"
+    real.write_text(json.dumps({"model": "m", "messages": [{"role": "user", "content": "hi"}]}))
+    no_traceback(cli("explain", str(empty), str(real)), 1, "empty.jsonl holds no request")
     arr = tmp_path / "arr.json"
     arr.write_text("[]")
     no_traceback(cli("explain", str(arr)), 1, "holds no request")
     mixed = tmp_path / "mixed.jsonl"
     mixed.write_text('{"model": "m", "messages": [{"role": "user", "content": "hi"}]}\n{"b": 2}\n')
     no_traceback(cli("explain", str(mixed)), 1, "record 2", "not a request")
-    no_traceback(cli("check", "--bodies", str(empty)), 2, "is empty")
-    # real requests still explain, on each API's prompt field
+    # every request the block extractor reads still explains: a prompt can be only a system prompt and tools
+    tools = [{"name": "t", "input_schema": {"type": "object"}}]
     for body in ({"model": "m", "messages": [{"role": "user", "content": "hi"}]},
                  {"model": "m", "input": "hi"},
+                 {"model": "m", "system": "You are a bot.", "tools": tools},
+                 {"model": "m", "instructions": "You are a bot.", "tools": tools},
+                 {"request": {"model": "m", "system": "s", "tools": tools}},
                  {"request": {"model": "m", "messages": []}, "usage": {"prompt_tokens": 5}}):
         ok = tmp_path / "ok.json"
         ok.write_text(json.dumps(body))
-        assert cli("explain", str(ok)).returncode == 0
+        assert cli("explain", str(ok)).returncode == 0, body
+    # an API whose prompt is not read is refused, where two different requests compared as unchanged
+    for a, b in (({"model": "g", "contents": [{"parts": [{"text": "one"}]}]},
+                  {"model": "g", "contents": [{"parts": [{"text": "something else entirely"}]}]}),
+                 ({"model": "c", "prompt": "one"}, {"model": "c", "prompt": "another"})):
+        fa, fb = tmp_path / "a.json", tmp_path / "b.json"
+        fa.write_text(json.dumps(a))
+        fb.write_text(json.dumps(b))
+        out = cli("explain", str(fa), str(fb))
+        no_traceback(out, 1, "not a request Prefixwise can read")
+        assert "NONE" not in out.stdout
+
+
+def test_check_bodies_with_no_request_is_nothing_checked_not_an_error(tmp_path):
+    empty, real = tmp_path / "empty.jsonl", tmp_path / "real.jsonl"
+    empty.write_text("")
+    real.write_text(json.dumps({"model": "m", "messages": [{"role": "user", "content": "hi"}]}) + "\n")
+    out = cli("check", "--bodies", str(empty))
+    assert out.returncode == 1 and "the files hold no request" in out.stdout and "NOTHING CHECKED" in out.stdout
+    assert cli("check", "--bodies", str(empty), "--allow-empty").returncode == 0      # as before this change
+    assert cli("check", "--bodies", str(empty), str(real)).returncode == 0            # one empty file among others
+
+
+def test_check_tells_refused_requests_from_none(tmp_path):
+    """A command whose requests reach the mock and are refused (a path it does not serve) is not told
+    that nothing reached it."""
+    out = cli("check", "--", sys.executable, "-c", POST, "/embeddings")
+    assert out.returncode == 1 and "NOTHING CHECKED" in out.stdout
+    assert "1 request reached Prefixwise and none got a verdict" in out.stdout
+    assert "no request reached the mock" not in out.stdout
+
+
+def test_the_action_can_allow_an_empty_run():
+    action = (ROOT / "action.yml").read_text()
+    assert "allow-empty:" in action and 'args+=(--allow-empty)' in action
 
 
 def test_examples_are_priced():
@@ -261,6 +371,41 @@ def test_client_url_is_one_a_client_can_use():
     from prefixwise.proxy import _client_url
 
     assert _client_url("0.0.0.0", 8080) == "http://127.0.0.1:8080"
+    assert _client_url("localhost", 8080) == "http://127.0.0.1:8080"
     assert _client_url("127.0.0.1", 9000) == "http://127.0.0.1:9000"
-    assert _client_url("::1", 8080) == "http://[::1]:8080"
     assert _client_url("10.0.0.5", 8080) == "http://10.0.0.5:8080"
+
+
+def test_serve_prints_what_a_client_sets(tmp_path):
+    proc = subprocess.Popen([sys.executable, "-m", "prefixwise", "serve", "--mock", "--port", "0", "--ledger",
+                             str(tmp_path / "l.db")], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=ENV)
+    try:
+        seen = ""
+        for line in proc.stdout:
+            seen += line
+            if "clients:" in line:
+                break
+        assert "OPENAI_BASE_URL=http://127.0.0.1:" in seen and "/v1  ANTHROPIC_BASE_URL=http://127.0.0.1:" in seen
+        assert "GET /api/v1" in seen
+    finally:
+        proc.terminate()
+        proc.wait(10)
+
+
+def test_a_failed_upstream_is_explained_in_the_report(tmp_path):
+    out = cli("run", "--ledger", str(tmp_path / "l.db"), "--", sys.executable, "-c", POST, "/chat/completions",
+              env={**ENV, "OPENAI_BASE_URL": "http://127.0.0.1:9/v1", "ANTHROPIC_BASE_URL": "http://127.0.0.1:9"})
+    assert "prefixwise_proxy_error" in out.stderr
+    assert "no usable answer from the upstream" in out.stderr
+
+
+def test_an_import_says_where_its_ledger_is(tmp_path):
+    log = tmp_path / "requests.jsonl"
+    log.write_text(json.dumps({"start_time": 1795000000, "end_time": 1795000002,
+                               "request": {"model": "gpt-5.6-luna", "messages": [{"role": "user", "content": "hi"}]},
+                               "response": {"id": "r1", "usage": {"prompt_tokens": 9, "completion_tokens": 1}}}) + "\n")
+    out = cli("import", "gateway", "--path", str(log), cwd=tmp_path)
+    assert out.returncode == 0, out.stderr
+    assert "from a gateway log" in out.stdout and "keeps its own ledger" in out.stdout
+    assert "prefixwise report --ledger prefixwise-gateway.db --detail" in out.stdout
+    assert cli("report", cwd=tmp_path).returncode == 1          # plain `report` reads another file, as the import said

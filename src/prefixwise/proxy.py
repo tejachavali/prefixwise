@@ -751,6 +751,7 @@ class PrefixwiseProxy:
         # turn, and holds a conversation's first mock response so per-second timestamps move.
         self.request_observer = None  # callable(provider, session_id, raw_blocks)
         self.check_mode = False  # POST /api/v1/check/scenario may rename default_session
+        self.posts_seen = 0  # POSTs outside the API and /tasks, served or refused (prefixwise check reads it)
         self.mock_tool_calls = False
         self._mock_calls: OrderedDict = OrderedDict()  # (session, model) -> was the last mock answer a tool call
         self.mock_first_turn_delay = 0.0
@@ -2246,6 +2247,8 @@ def make_handler(proxy: PrefixwiseProxy):
                 except Exception as exc:
                     print(f"prefixwise: internal error on {path}: {type(exc).__name__}", file=sys.stderr)
                     return self._json(500, _error(500, "internal error in the Prefixwise API"))
+            if path != "/tasks":
+                proxy.posts_seen += 1
             if proxy.collect_only and path != "/tasks":
                 return self._json(404, _error(404, "this is a collector (prefixwise collect): it has no upstream; "
                                                   "point clients at an edge (prefixwise serve)"))
@@ -2445,9 +2448,7 @@ def make_handler(proxy: PrefixwiseProxy):
 
 def _client_url(host: str, port: int) -> str:
     """The address a client on this machine reaches a server bound to `host` at."""
-    local = host in ("", "0.0.0.0", "::", "localhost")
-    name = "127.0.0.1" if local else f"[{host}]" if ":" in host else host
-    return f"http://{name}:{port}"
+    return f"http://{'127.0.0.1' if host in ('', '0.0.0.0', 'localhost') else host}:{port}"
 
 
 def serve(host: str = "127.0.0.1", port: int = 8080, *, ledger_path: str | None = None,

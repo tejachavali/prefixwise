@@ -56,7 +56,7 @@ def pause(args, prompt: str) -> None:
         return
     try:
         input(_paint(f"{prompt}  [Enter]", DIM))
-    except EOFError:
+    except (EOFError, RuntimeError, OSError):  # no terminal to wait on (stdin closed): carry on
         pass
 
 
@@ -321,11 +321,18 @@ def start_proxy(ledger: str, provider: str, live: bool, optimize: bool):
         "anthropic": "https://api.anthropic.com",
         "openai": "https://api.openai.com",
     }
+    # Every setting explicit (empty, not None), so no PREFIXWISE_* variable of the shell reaches the
+    # demo: a collector would be sent its rows, and PREFIXWISE_FIXES would fix the run meant to break.
     proxy = PrefixwiseProxy(
         ledger_path=ledger,
         mock=not live,
-        fixes=["optimize"] if optimize else None,
+        fixes=["optimize"] if optimize else (),
         upstreams=upstreams if live else None,
+        hmac_key=b"",
+        engine="",
+        kv_events="",
+        otel="",
+        collector_url="",
     )
     proxy.api_key = None  # the agent's own key passes through; the demo never holds one
     server = PrefixwiseHTTPServer(("127.0.0.1", 0), make_handler(proxy))
@@ -358,9 +365,9 @@ def main(argv: list[str] | None = None, prog: str = "prefixwise demo") -> int:
     ap.add_argument(
         "--pause",
         type=float,
-        default=0.8,
+        default=0.5,
         metavar="SECONDS",
-        help="without --step, the wait between acts (default 0.8)",
+        help="without --step, the wait between acts (default 0.5)",
     )
     ap.add_argument(
         "--keep", metavar="DIR", help="keep the two ledgers in this directory"
@@ -372,8 +379,8 @@ def main(argv: list[str] | None = None, prog: str = "prefixwise demo") -> int:
         and not os.environ.get("NO_COLOR")
         and sys.stdout.isatty()
     )
-    if args.pause < 0:
-        ap.error("--pause cannot be negative")
+    if not 0 <= args.pause <= 3600:  # also refuses nan
+        ap.error("--pause takes a number of seconds, 0 or more")
 
     provider = args.provider or (
         "anthropic"
@@ -390,19 +397,40 @@ def main(argv: list[str] | None = None, prog: str = "prefixwise demo") -> int:
         raise DemoError(
             "--live needs ANTHROPIC_API_KEY or OPENAI_API_KEY in the environment"
         )
-    workdir = args.keep or tempfile.mkdtemp(prefix="prefixwise-demo-")
     run = time.strftime(
         "%H%M%S"
     )  # a new tag per run: a second run cannot read the first's cache
     sessions = (f"demo-before-{run}", f"demo-after-{run}")
-    os.makedirs(workdir, exist_ok=True)
-    for name in ("before.db", "after.db"):
-        for suffix in ("", "-wal", "-shm"):
-            try:
-                os.remove(os.path.join(workdir, name + suffix))
-            except FileNotFoundError:
-                pass
+    if args.keep:
+        workdir = args.keep
+        try:
+            os.makedirs(workdir, exist_ok=True)
+        except OSError as exc:
+            raise DemoError(f"cannot keep the ledgers in {workdir}: {exc.strerror or exc}") from None
+        taken = [n for n in ("before.db", "after.db") if os.path.exists(os.path.join(workdir, n))]
+        if taken:  # never overwrite a ledger: `before.db` is a name people give their own
+            raise DemoError(f"{workdir} already holds {' and '.join(taken)}; --keep takes a directory "
+                            "without them")
+        _play(args, provider, key, workdir, sessions)
+    else:
+        workdir = tempfile.mkdtemp(prefix="prefixwise-demo-")
+        try:
+            _play(args, provider, key, workdir, sessions)
+        finally:  # also on Ctrl-C or an error: nothing is left behind
+            shutil.rmtree(workdir, ignore_errors=True)
+    say()
+    say("next, on your own traffic", BOLD)
+    say("  prefixwise import claude-code     # the Claude Code logs already on this machine; no key")
+    say("  prefixwise run -- <your agent>    # any agent that reads ANTHROPIC_BASE_URL or OPENAI_BASE_URL")
+    return 0
 
+
+def _usd(x: float) -> str:
+    """Dollars to four places, five under a cent: the mock's sums are that small."""
+    return f"${x:.4f}" if x >= 0.01 else f"${x:.5f}"
+
+
+def _play(args, provider: str, key: str, workdir: str, sessions: tuple) -> None:
     say("Prefixwise demo", BOLD)
     say(
         f"provider: {provider}{' (live)' if args.live else ' (mock: no key, no network, no cost)'}; model {MODEL[provider]}",
@@ -471,20 +499,18 @@ def main(argv: list[str] | None = None, prog: str = "prefixwise demo") -> int:
     say("before and after", BOLD)
     say(f"  {'':22}{'before':>12}{'after':>12}")
     say(f"  {'served from cache':22}{b['hit'] * 100:>11.1f}%{a['hit'] * 100:>11.1f}%")
-    say(
-        f"  {'cost of the run':22}{'$' + format(b['cost'], '.4f'):>12}{'$' + format(a['cost'], '.4f'):>12}"
-    )
+    say(f"  {'cost of the run':22}{_usd(b['cost']):>12}{_usd(a['cost']):>12}")
     say(f"  {'avoidable tokens':22}{b['avoidable']:>12,}{a['avoidable']:>12,}")
     saved = b["cost"] - a["cost"]
     if b["cost"] and saved > 0:
         say(
-            f"\n  saved ${saved:.4f}, {saved / b['cost'] * 100:.0f}% of the run's cost "
-            f"(the report had called ${b['avoidable_cost']:.4f} avoidable)",
+            f"\n  saved {_usd(saved)}, {saved / b['cost'] * 100:.0f}% of the run's cost "
+            f"(the report had called {_usd(b['avoidable_cost'])} avoidable)",
             GREEN,
         )
     elif b["cost"]:
         say(
-            f"\n  no saving this time (before ${b['cost']:.4f}, after ${a['cost']:.4f}): see the two ledgers",
+            f"\n  no saving this time (before {_usd(b['cost'])}, after {_usd(a['cost'])}): see the two ledgers",
             RED,
         )
     if not args.live:
@@ -499,13 +525,6 @@ def main(argv: list[str] | None = None, prog: str = "prefixwise demo") -> int:
             f"turn by turn: prefixwise report --ledger {os.path.join(workdir, 'before.db')} --session {sessions[0]}",
             DIM,
         )
-    else:
-        shutil.rmtree(workdir, ignore_errors=True)
-    say()
-    say("next, on your own traffic", BOLD)
-    say("  prefixwise import claude-code     # the Claude Code logs already on this machine; no key")
-    say("  prefixwise run -- <your agent>    # any agent that reads ANTHROPIC_BASE_URL or OPENAI_BASE_URL")
-    return 0
 
 
 def run(argv: list[str] | None = None, prog: str = "prefixwise demo") -> int:
@@ -517,6 +536,12 @@ def run(argv: list[str] | None = None, prog: str = "prefixwise demo") -> int:
         return 130
     except DemoError as exc:
         print(f"\n{prog}: {exc}", file=sys.stderr)
+        return 1
+    except BrokenPipeError:  # `prefixwise demo | head`: the reader left; exit quietly, as the CLI does
+        try:
+            os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        except (OSError, ValueError):
+            pass
         return 1
 
 

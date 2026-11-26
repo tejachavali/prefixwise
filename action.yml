@@ -23,6 +23,10 @@ inputs:
     description: Path to an allow-list (JSON) of known findings, keyed scenario, cause, divergence_role.
     required: false
     default: ""
+  allow-empty:
+    description: Pass a run in which no request got a verdict. By default such a run fails the job (exit 1), since the gate checked nothing. Needs Prefixwise 0.12.8 or later.
+    required: false
+    default: "false"
   baseline:
     description: Path to a baseline from `prefixwise export --baseline`, for the monthly projection. Default .prefixwise-baseline.json when present.
     required: false
@@ -63,6 +67,7 @@ runs:
         STRICT: ${{ inputs.strict }}
         ALLOW: ${{ inputs.allow }}
         BASELINE: ${{ inputs.baseline }}
+        ALLOW_EMPTY: ${{ inputs.allow-empty }}
         COMMAND: ${{ inputs.command }}
       run: |
         set +e
@@ -71,6 +76,7 @@ runs:
         [ "$STRICT" = "true" ] && args+=(--strict)
         [ -n "$ALLOW" ] && args+=(--allow "$ALLOW")
         [ -n "$BASELINE" ] && args+=(--baseline "$BASELINE")
+        [ "$ALLOW_EMPTY" = "true" ] && args+=(--allow-empty)
         report="$RUNNER_TEMP/prefixwise-check.json"
         text="$RUNNER_TEMP/prefixwise-check.txt"
         prefixwise check "${args[@]}" --json-file "$report" -- bash -c "$COMMAND" | tee "$text"

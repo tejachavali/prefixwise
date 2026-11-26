@@ -16,6 +16,8 @@ from prefixwise.demo import run
 
 if __name__ == "__main__":
     argv = sys.argv[1:]
+    if "-h" in argv or "--help" in argv:
+        print(__doc__)
     if "--auto" in argv:
         argv = [a for a in argv if a != "--auto"]
         if "--pause" not in argv and not any(a.startswith("--pause=") for a in argv):

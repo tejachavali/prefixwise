@@ -149,8 +149,12 @@ def explain_pair(prev: Turn | None, curr: Turn, provider: str | None = None,
                        secondary=[c.value for c in result.secondary], diff=text)
 
 
-# What makes a JSON object a request: the field its prompt is in, on any of the APIs read here.
-_PROMPT_KEYS = ("messages", "input", "prompt", "contents")
+# What makes a JSON object a request this module can read: a field the block extractor takes a
+# prompt from, on Anthropic's Messages API, OpenAI's Chat Completions and the Responses API. A
+# body with only a system prompt and tools is one. A Gemini `contents` body or a legacy completions
+# `prompt` body is not read: its prompt would be left out and two different requests would compare
+# as unchanged.
+_PROMPT_KEYS = ("messages", "input", "instructions", "system", "tools")
 
 
 def _turn_from_record(rec: dict) -> Turn:
@@ -160,8 +164,9 @@ def _turn_from_record(rec: dict) -> Turn:
     body = rec.get("request") or rec.get("body")
     if not isinstance(body if body is not None else rec, dict) or not any(
             k in (body if body is not None else rec) for k in _PROMPT_KEYS):
-        raise ValueError('not a request: expected a request body (an object with "messages", "input", "prompt" or '
-                         '"contents"), or {"request": <body>, "usage": ...}')
+        raise ValueError('not a request Prefixwise can read: expected the body of an Anthropic Messages, OpenAI Chat '
+                         'Completions or Responses request (an object with "messages", "input", "instructions", '
+                         '"system" or "tools"), or {"request": <body>, "usage": ...}')
     if body is None:
         return Turn(body=rec, session_id=str(rec.get("session_id") or "default"))
     usage = rec.get("usage") or (rec.get("response") or {}).get("usage")
@@ -176,7 +181,7 @@ def load_turns(path: str | Path) -> list[Turn]:
     text = Path(path).read_text()
     stripped = text.strip()
     if not stripped:
-        raise ValueError(f"{path} is empty: no request to explain")
+        return []
     try:
         data = json.loads(stripped)
     except ValueError:
@@ -185,8 +190,6 @@ def load_turns(path: str | Path) -> list[Turn]:
         except ValueError as exc:
             raise ValueError(f"{path} is not JSON or JSON Lines ({exc})") from None
     records = data if isinstance(data, list) else [data]
-    if not records:
-        raise ValueError(f"{path} holds no request")
     turns = []
     for i, r in enumerate(records, 1):
         try:

@@ -37,9 +37,9 @@ def _open_existing_ledger(args):
     import sqlite3
     try:
         return Ledger(path)
-    except sqlite3.Error as exc:  # a text file, a directory, a file from some other program
-        sys.exit(f"prefixwise: {path} is not a ledger Prefixwise can open ({exc}). Pass the SQLite file a "
-                 "Prefixwise proxy or import wrote, with --ledger.")
+    except sqlite3.Error as exc:  # a text file, a directory, a ledger that cannot be read or is cut short
+        sys.exit(f"prefixwise: cannot open {path} as a ledger ({exc}). --ledger takes the SQLite file a "
+                 "Prefixwise proxy or import wrote.")
 
 
 def _fmt_int(n) -> str:
@@ -324,7 +324,8 @@ def cmd_report(args) -> int:
         print(json.dumps({"findings": found, "summary": summary, "by": args.by, "rows": rows}, indent=2))
         return 0
     if since is not None and not (found["summary"]["requests"] or found["summary"]["requests_failed"]):
-        older = led.summary()["requests"]
+        everything = findings(led, prices=table)["summary"]
+        older = everything["requests"] + everything["requests_failed"]
         if older:  # the filter emptied it: "nothing recorded yet" would be wrong
             print(f"No requests since {args.since}. The ledger holds {older:,} older "
                   f"request{'' if older == 1 else 's'}: widen or drop --since to see them.")
@@ -684,13 +685,14 @@ def cmd_run(args) -> int:
     if not (found["summary"]["requests"] or found["summary"]["requests_failed"]):
         if child is None:
             print("No requests reached Prefixwise: the command did not start.", file=sys.stderr)
-        elif code:
-            print(f"No requests reached Prefixwise: {cmd[0]} exited {code} before it made a model call. Its own "
-                  "output above says why.", file=sys.stderr)
         else:
-            print(f"No requests reached Prefixwise. {cmd[0]} was started with ANTHROPIC_BASE_URL={base} and "
-                  f"OPENAI_BASE_URL={base}/v1; an agent that does not read those needs its base URL set to one of "
-                  "them in its own settings.", file=sys.stderr)
+            # Which of the two it was cannot be told from here: say both, and what was set.
+            print("No requests reached Prefixwise"
+                  + (f", and {cmd[0]} exited {code}. If it stopped before its first model call, its own output "
+                     "says why. If it did make calls, they" if code else f". If {cmd[0]} made model calls, they")
+                  + f" went somewhere else: it was started with ANTHROPIC_BASE_URL={base} and "
+                  f"OPENAI_BASE_URL={base}/v1, and an agent that does not read those needs its base URL set to "
+                  "one of them in its own settings.", file=sys.stderr)
     else:
         if mock:
             print("(mock: synthetic responses and usage, so the numbers below are illustrative)", file=sys.stderr)
@@ -788,7 +790,8 @@ def cmd_check(args) -> int:
         server.server_close()
         code = 128 - code if code < 0 else code
         rows = check.rows_since(proxy.ledger, start)
-        rep = check.judge(rows, fail_on, allow, mock=True, allow_empty=args.allow_empty)
+        rep = check.judge(rows, fail_on, allow, mock=True, allow_empty=args.allow_empty,
+                          reached=proxy.posts_seen)
         rep.agent_exit = code
         rep.warnings = watch.warnings(rep) + rep.warnings
         check.project(rep, baseline, prices)
@@ -1058,12 +1061,17 @@ def cmd_explain(args) -> int:
     try:
         if len(args.files) == 2:
             prev, curr = (load_turns(f) for f in args.files)
+            for name, held in zip(args.files, (prev, curr)):
+                if not held:
+                    sys.exit(f"prefixwise: {name} holds no request")
             if len(prev) != 1 or len(curr) != 1:
                 sys.exit("prefixwise: with two files, each must hold exactly one request")
             results = [explain_pair(prev[0], curr[0], provider, diff=args.diff)]
             labels = [f"{args.files[0]} -> {args.files[1]}"]
         elif len(args.files) == 1:
             turns = load_turns(args.files[0])
+            if not turns:
+                sys.exit(f"prefixwise: {args.files[0]} holds no request")
             results = explain_session(turns, provider, diff=args.diff)
             labels = [f"turn {i + 1} ({t.session_id})" for i, t in enumerate(turns)]
         else:
@@ -1367,8 +1375,11 @@ def main(argv: list[str] | None = None) -> int:
         from prefixwise import demo
         return demo.run(argv[1:])
     parser = build_parser()
-    if argv == ["help"]:
-        argv = ["--help"]
+    if argv[:1] == ["help"]:  # `prefixwise help` and `prefixwise help <command>`
+        if argv[1:2] == ["demo"]:
+            from prefixwise import demo
+            return demo.run(["--help"])
+        argv = [*argv[1:2], "--help"]
     args = parser.parse_args(argv)
     if getattr(args, "func", None) is None:
         print(GETTING_STARTED)

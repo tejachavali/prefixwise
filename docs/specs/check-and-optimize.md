@@ -38,7 +38,8 @@ never stored or sent anywhere; only block hashes, counts and Prefixwise's verdic
   `WARN` naming the scenario (a per-minute or per-day stamp would cost a miss per change in
   production; a fixed cutoff date is to be ignored).
 - Exit codes: 2 when a gated cause is found and not allowed, else 1 when the command exited
-  non-zero, else 0. With `--json` the command's own stdout goes to stderr so stdout is the report.
+  non-zero or no request got a verdict (the gate checked nothing; `--allow-empty` makes that a
+  pass), else 0. With `--json` the command's own stdout goes to stderr so stdout is the report.
 - The Action pins the version from its own tag (`@v0.10.0` installs `prefixwise==0.10.0`; a moving
   `@v0.10` installs the latest).
 
@@ -86,7 +87,8 @@ FAIL tool_reserialize  scenario=refactor_task turn=3  first changed block: tools
 prefix tokens per turn x (rate paid for those tokens on a miss, the cache-write rate where they are written again - cache-read price)`, from `pricing.py` and the ledger. Without
 a baseline, report tokens only. Never invent a price (the pricing rule).
 
-**Exit codes:** 0 pass, 2 a gated cause found (not in `--allow`), 1 the run itself failed.
+**Exit codes:** 0 pass, 2 a gated cause found (not in `--allow`), 1 the run itself failed or no
+request got a verdict (unless `--allow-empty`).
 
 **GitHub Action** (composite, in this repo as `action.yml`):
 
