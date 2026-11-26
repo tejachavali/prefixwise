@@ -282,16 +282,14 @@ def findings(ledger, since: float | None = None, until: float | None = None,
     waste.sort(key=lambda x: -x["avoidable_tokens"])
     expected.sort(key=lambda x: -x["requests"])
     table = prices or PriceTable.load(None)
-    unpriced, approximate, no_usage, earlier_rate = [], [], 0, []
+    unpriced, approximate, earlier_rate = [], [], []
     for row in metrics.query(ledger, ["requests", "requests_priced", "prompt_tokens"], by="model", **window):
         model = row["model"]
         if not model or not row["requests"]:
             continue
         if not row["requests_priced"]:  # from the rows, as they were priced: not from today's table
-            if row["prompt_tokens"]:
+            if row["prompt_tokens"]:  # (none of its responses reported usage: counted below, not a missing rate)
                 unpriced.append(model)
-            else:  # no response reported usage: that is why there is no cost, whatever the table holds
-                no_usage += row["requests"]
             continue
         key, rates, approx = table.resolve(model)
         if approx:
@@ -310,12 +308,17 @@ def findings(ledger, since: float | None = None, until: float | None = None,
                 earlier_rate.append((model, n, rates["priced_since"]))
     from .classifier import CACHE_NOT_REPORTED
     clauses, args = ["cause = 'unknown'", _starts_with("evidence")], [CACHE_NOT_REPORTED, CACHE_NOT_REPORTED]
+    # Answered requests whose response reported no usage: they have no cost, whatever the table holds.
+    silent, silent_args = ["error IS NULL", "cost IS NULL", "prompt_tokens = 0"], []
     for col, op, val in (("recorded_at", ">=", since), ("recorded_at", "<", until)):
         if val is not None:
             clauses.append(f"{col} {op} ?")
             args.append(val)
+            silent.append(f"{col} {op} ?")
+            silent_args.append(val)
     with ledger.reader() as conn:
         not_reported = conn.execute("SELECT COUNT(*) FROM entries WHERE " + " AND ".join(clauses), args).fetchone()[0]
+        no_usage = conn.execute("SELECT COUNT(*) FROM entries WHERE " + " AND ".join(silent), silent_args).fetchone()[0]
     errors = metrics.query(ledger, ["requests_failed"], by="error", **window)
     statuses = metrics.query(ledger, ["requests_failed"], by="status", **window)
     summary = {k: s[k] for k in ("requests", "requests_failed", "prompt_tokens", "cached_tokens",
@@ -430,14 +433,16 @@ def render(f: dict, command: str = "serve", headline: bool = True) -> str:
                          + " (add the exact rates with --prices FILE).")
         if f.get("priced_at_an_earlier_rate"):
             lines.append("Priced before the model had its own rates, at a related model's: " + "; ".join(
-                f"{n:,} requests on {m} (recorded before the table of {since})"
+f"{n:,} request{'' if n == 1 else 's'} on {m} (recorded before the table of {since})"
                 for m, n, since in f["priced_at_an_earlier_rate"])
                 + ". Stored costs are kept as computed then.")
         if f.get("unpriced_models"):
             lines.append("Not priced: " + ", ".join(f["unpriced_models"])
                          + " (not in the price table: `prefixwise prices` shows the table, --prices FILE adds rates).")
         if f.get("no_usage_requests"):
-            lines.append(f"No cost for {f['no_usage_requests']:,} requests whose responses reported no usage.")
+            n = f["no_usage_requests"]
+            lines.append(f"No cost for {n:,} request{'' if n == 1 else 's'} whose response{'' if n == 1 else 's'} "
+                         "reported no usage.")
         if f["waste"]:
             waste_usd = ""
             if s["requests_priced"]:

@@ -469,10 +469,10 @@ def cmd_prices(args) -> int:
     print(_table(rows, ["model", "provider", "input", "cache read", "cache write", "write 1h", "output",
                         "tiered", "valid until"]))
     print("\ncache write: Anthropic's 5-minute write, OpenAI's 30-minute write (the defaults).")
-    print("\nA model not listed has no cost ('-'). Two cases are priced at a listed model's rate, and the\n"
-          "report names them: a Claude id newer than the table (the nearest version of its family) and an\n"
-          "OpenAI dated snapshot (its alias). Add exact rates with PREFIXWISE_PRICES=/path/prices.json (same\n"
-          "format as the built-in table; see `--json`).")
+    print("\nA model not listed has no cost ('-'). Two kinds of id are priced at a listed model's rate: a Claude\n"
+          "id newer than the table (the nearest version of its family) and an OpenAI dated snapshot (its alias).\n"
+          "The report names a request's model when it is one of these. Add exact rates with\n"
+          "PREFIXWISE_PRICES=/path/prices.json (same format as the built-in table; see `--json`).")
     return 0
 
 

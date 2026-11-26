@@ -185,6 +185,24 @@ def test_no_usage_is_reported_as_no_usage_not_as_a_missing_price(tmp_path, capsy
     assert main(["report", "--ledger", path, "--by", "model"]) == 0
     out = capsys.readouterr().out
     assert "no response reported usage" in out and "price table" not in out
+    # mixed: the same model with one response that did report usage
+    proxy._forward = lambda *a, **k: (200, {"id": "chatcmpl-2", "model": "gpt-5.6-terra", "usage": USAGE})
+    assert proxy.handle("openai", {**ASK, "model": "gpt-5.6-terra"}, {"x-prefixwise-session-id": "t"})[1].cost > 0
+    found = findings(proxy.ledger)
+    assert found["no_usage_requests"] == 3 and found["unpriced_models"] == []
+    assert "No cost for 3 requests" in render(found)
+
+
+def test_price_file_dates_are_checked(tmp_path):
+    path = tmp_path / "p.json"
+    for bad in (20261126, "yesterday", ["2026-11-26"]):
+        path.write_text(json.dumps({"models": {"m": {"input": 1.0, "cache_read": 0.1, "output": 2.0,
+                                                     "priced_since": bad}}}))
+        with pytest.raises(ValueError, match="priced_since must be a date"):
+            PriceTable.load(str(path))
+    path.write_text(json.dumps({"models": {"m": {"input": 1.0, "cache_read": 0.1, "output": 2.0,
+                                                 "priced_since": "2026-11-26"}}}))
+    assert PriceTable.load(str(path)).rates_for("m")["priced_since"] == "2026-11-26"
 
 
 def test_rows_priced_before_a_model_had_its_own_rates_are_named(tmp_path):
@@ -199,7 +217,7 @@ def test_rows_priced_before_a_model_had_its_own_rates_are_named(tmp_path):
     led.record(LedgerEntry(**row, cost=12.0, price_as_of="2026-11-26", request_id="new"))
     found = findings(led)
     assert found["priced_at_an_earlier_rate"] == [("claude-fable-5-2", 1, "2026-11-26")]
-    assert "1 requests on claude-fable-5-2 (recorded before the table of 2026-11-26)" in render(found)
+    assert "1 request on claude-fable-5-2 (recorded before the table of 2026-11-26)" in render(found)
 
 
 def test_fable_and_mythos_5_2_have_their_own_rows():

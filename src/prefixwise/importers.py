@@ -426,6 +426,8 @@ def import_claude_code(root: str | os.PathLike | None = None, ledger: Ledger | N
                     cache_ttl_seconds=own_ttl,
                     classifier_version=CLASSIFIER_VERSION)
                 entry.avoidable_cost = prices.avoidable_cost(r.model, avoidable, prompt, "anthropic", u)
+                if entry.cost is None:  # no rates, or no usage: no dollar figure of any kind
+                    entry.avoidable_cost = None
                 # A compaction's summary call reads the previous write, and Claude Code does not log
                 # that call: the write was not left unread. A request that used no cache at all leaves
                 # its model's lane as it was, so the write is counted at the next request that does.
@@ -617,6 +619,8 @@ def import_codex(root: str | os.PathLike | None = None, ledger: Ledger | None = 
                 uncached_tokens=parts.uncached_input, cache_write_tokens=parts.cache_write,
                 gap_seconds=gap, evidence=f"from the log: {why}", classifier_version="codex-log-2")
             entry.avoidable_cost = prices.avoidable_cost(r.model, avoidable, r.prompt, "openai", r.usage)
+            if entry.cost is None:  # no rates, or no usage: no dollar figure of any kind
+                entry.avoidable_cost = None
             if entry.cost is not None:
                 entry.price_as_of = prices.as_of
             ledger.record(entry, at=r.done)

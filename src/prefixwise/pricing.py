@@ -359,3 +359,11 @@ def _validate(name: str, rates: object, path: str) -> None:
         v = rates.get(k)
         if v is not None and not (isinstance(v, (int, float)) and v >= 0) and not (k == "cache_write" and v == "input"):
             raise ValueError(f"{path}: {name}.{k} must be a non-negative number")
+    since = rates.get("priced_since")
+    if since is not None:
+        try:
+            ok = isinstance(since, str) and bool(date.fromisoformat(since))
+        except ValueError:
+            ok = False
+        if not ok:
+            raise ValueError(f"{path}: {name}.priced_since must be a date like \"2026-11-26\"")

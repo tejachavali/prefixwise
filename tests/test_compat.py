@@ -61,7 +61,8 @@ def test_anthropic_minimums_by_model():
     table = {
         512: ["claude-fable-5-2", "claude-opus-5-5", "claude-opus-5", "claude-opus-5-20260301",
              "claude-sonnet-5-5", "claude-sonnet-5-5-20261001", "anthropic/claude-sonnet-5.5",
-             "claude-haiku-5-5-20261007", "claude-sonnet-5-6", "some-new-claude"],
+             "claude-haiku-5-5-20261007", "claude-sonnet-5-6", "some-new-claude",
+             "claude-sonnet-55", "claude-sonnet-5_5"],  # odd spellings of 5.5 must not get Sonnet 5's 1,024
         1024: ["claude-sonnet-5", "claude-sonnet-5-20260601", "claude-sonnet-5@20260601",
               "claude-sonnet-5[1m]", "anthropic/claude-sonnet-5:beta", "claude-opus-4-8",
               "claude-sonnet-4-6", "claude-sonnet-4-5", "claude-sonnet-4-5-20250929",

@@ -56,7 +56,7 @@ class MissCause(str, Enum):
 # Opus 4.6, Opus 4.5 and Haiku 4.5. The Claude 3 models are from Anthropic's earlier table
 # (2,048 for the Haiku models, 1,024 for the others). First match wins.
 _MINOR = r"(?!\d)"  # the minor is this digit alone (a date may follow)
-_NO_MINOR = r"(?![-.]\d{1,2}(?!\d))"  # the major alone: no minor after it (a date, @date or [1m] may follow)
+_NO_MINOR = r"(?![-._]?\d{1,2}(?!\d))"  # the major alone: no minor after it (a date, @date or [1m] may follow)
 _ANTHROPIC_MIN_PREFIX = [(re.compile(pattern), tokens) for pattern, tokens in (
     (rf"opus-4[-.][56]{_MINOR}|haiku-4[-.]5{_MINOR}", 4096),
     (rf"opus-4[-.]7{_MINOR}|mythos-preview", 2048),
