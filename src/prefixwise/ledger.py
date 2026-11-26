@@ -205,10 +205,28 @@ def _scrub_claude_code_ids(conn) -> int:
     try:
         if not conn.execute(f"SELECT EXISTS (SELECT 1 FROM entries WHERE {where})").fetchone()[0]:
             return 0
+        conn.execute("PRAGMA secure_delete = ON")  # the old values are zeroed where they are freed
         cur = conn.execute(f"UPDATE entries SET session_id = json_extract(session_id, '$.session_id') WHERE {where}")
         return cur.rowcount or 0
     except Exception:  # noqa: BLE001 - no JSON functions, or a read-only or busy ledger: leave the rows
         return 0
+
+
+def _purge_freed_pages(conn, path: str, scrubbed: int) -> None:
+    """After a scrub, the old values can still sit in the file's freed pages and in the write-ahead
+    log until they are overwritten. Rebuild the file (VACUUM) and empty the log, so the device and
+    account ids are gone from the ledger itself; copies and backups taken before keep them. A ledger
+    another process holds open cannot be rebuilt: say so, with the command that finishes the job."""
+    try:
+        conn.execute("VACUUM")
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        print(f"prefixwise: removed Claude Code's device and account ids from {scrubbed} ledger row(s) "
+              f"in {path} (0.12.7 keeps the session id only)", file=sys.stderr)
+    except Exception:  # noqa: BLE001 - busy (another process has it open): the rows are rewritten already
+        print(f"prefixwise: removed Claude Code's device and account ids from {scrubbed} ledger row(s) in "
+              f"{path}, but could not compact the file while another process has it open; old values may "
+              f"remain in its free space until you stop that process and run: sqlite3 {path} VACUUM",
+              file=sys.stderr)
 
 
 class Ledger:
@@ -255,13 +273,15 @@ class Ledger:
             self.conn.execute("CREATE INDEX IF NOT EXISTS entries_request ON entries(request_id)")
             self.conn.execute("CREATE INDEX IF NOT EXISTS entries_session ON entries(session_id)")
             self.conn.execute("CREATE INDEX IF NOT EXISTS entries_time ON entries(recorded_at)")
-            _scrub_claude_code_ids(self.conn)
+            scrubbed = _scrub_claude_code_ids(self.conn)
             self.conn.execute(
                 """CREATE TABLE IF NOT EXISTS tasks (
                     task_id TEXT PRIMARY KEY, success INTEGER NOT NULL, recorded_at REAL
                 )"""
             )
             self.conn.commit()
+            if scrubbed:
+                _purge_freed_pages(self.conn, path, scrubbed)
 
     def add_sink(self, sink) -> None:
         """A LedgerSink (record(entry, at), close(timeout)) that gets a copy of every row once it is

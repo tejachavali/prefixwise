@@ -71,3 +71,28 @@ def test_an_older_ledger_is_scrubbed_of_the_device_and_account_ids(tmp_path):
     with sqlite3.connect(path) as c:
         ids = [r[0] for r in c.execute("SELECT session_id FROM entries ORDER BY id")]
     assert ids == ["sess-42", "plain-session", '{"not":"claude"}', '{"session_id":"main","run":1}']  # only Claude Code's shape
+
+
+def test_the_scrub_leaves_no_trace_of_the_old_ids_in_the_file(tmp_path, capsys):
+    """Found by review: rewriting the rows left the old values in SQLite's freed pages (and in the
+    write-ahead log). After a scrub the file is rebuilt, so the ids are gone from its bytes."""
+    import os
+
+    from prefixwise.ledger import Ledger, LedgerEntry
+
+    path = str(tmp_path / "old.db")
+    led = Ledger(path)
+    for i in range(50):
+        led.record(LedgerEntry(session_id=USER_ID, agent_id="a", provider="anthropic", model="m", cause="none",
+                               legit=None, prompt_tokens=i, cached_tokens=0, avoidable_tokens=0,
+                               avoidable_cost=0.0, task_success=None))
+    led.conn.close()
+    Ledger(path).conn.close()
+
+    def raw():
+        return b"".join(open(p, "rb").read() for p in (path, path + "-wal") if os.path.exists(p))
+    data = raw()
+    assert b"dev-abc123" not in data and b"acct-9f8e" not in data and b"sess-42" in data
+    assert "removed Claude Code's device and account ids from 50 ledger row(s)" in capsys.readouterr().err
+    Ledger(path).conn.close()  # nothing left to do: no message, no rebuild
+    assert "removed" not in capsys.readouterr().err
