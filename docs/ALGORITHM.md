@@ -418,7 +418,9 @@ Anthropic's request shape, and the Anthropic early-breakpoint case (each has han
   system prompt is the lane's, it is compared with the lane's latest turn:
   - A request of several messages then reads as `history_edit`, though it may be another
     conversation's turn. That happens beyond 64 remembered conversations in a session and model
-    (the least recently used is dropped; `PREFIXWISE_LANE_THREADS` raises the limit), and when a
+    (the least recently used is dropped; `PREFIXWISE_LANE_THREADS` raises the limit), sooner when
+    the remembered turns are long (together they hold at most 16,000 blocks, `PREFIXWISE_LANE_BLOCKS`,
+    about 12 MB; the 8 most recent conversations are kept whatever their size), and when a
     conversation's earlier turns were never seen: a restart of the collector, traffic that began
     before the proxy, earlier turns sent through another collector.
   - A second conversation that starts with several messages (few-shot examples, a restored

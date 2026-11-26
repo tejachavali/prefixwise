@@ -580,6 +580,31 @@ def test_interleaved_conversations_are_each_compared_with_their_own_previous_tur
     assert all("the cache served all of the reusable prefix" in e.evidence for e in later)
 
 
+def test_a_lane_of_long_conversations_is_held_to_a_block_budget_but_never_below_eight(monkeypatch):
+    """64 conversations of a thousand messages would be about 50 MB in one lane. The remembered turns
+    share a budget of blocks; past it the least recently used go, down to the 8 a lane always kept."""
+    from prefixwise import collector
+
+    def lane_after(n, budget):
+        monkeypatch.setattr(collector, "LANE_BLOCKS", budget)
+        proxy = scripted([gpt(2300, 0)] * n)
+        for i in range(n):
+            proxy.handle("openai", {"model": "gpt-5.6-terra", "messages": [
+                AGENT, {"role": "user", "content": f"document {i} " * 100},
+                {"role": "assistant", "content": "ok"}, {"role": "user", "content": "go"}]}, S)
+        (lane,) = [v for k, v in proxy.lane_threads.items() if k[0] == "s"]
+        return lane
+
+    assert collector.LANE_BLOCKS == 16000 and collector.LANE_THREADS_FLOOR == 8
+    per_turn = len(next(iter(lane_after(1, 16000).threads.values()))[0].blocks)
+    assert len(lane_after(20, 16000).threads) == 20                    # far inside the budget: all remembered
+    assert len(lane_after(20, per_turn * 12).threads) == 12            # the budget holds twelve such turns
+    assert len(lane_after(20, per_turn * 3).threads) == 8              # never fewer than eight, whatever their size
+    assert len(lane_after(20, 0).threads) == 8
+    kept = lane_after(20, per_turn * 12)
+    assert kept.latest in kept.threads and len(kept.threads) == 12     # the newest are the ones kept
+
+
 def test_twelve_interleaved_conversations_that_share_an_instruction_are_found_by_their_openings():
     """Unique documents and answers, the same instruction text after each answer: each conversation
     is found by its opening message, so the shared message plays no part. (With 8 remembered, 33 of

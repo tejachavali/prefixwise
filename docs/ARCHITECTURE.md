@@ -214,7 +214,8 @@ interleaving in one session are each compared with their own last turn, however 
 ran in between, and the provider's diagnostics are chained to that same turn (a Responses turn
 sent with `previous_response_id` belongs to its parent's conversation and is compared with the turn
 it names). Known limits: conversations that open with the identical message are treated as one;
-past 64 conversations in a lane the least recently used one is forgotten; a request whose opening
+past 64 conversations in a lane, or past 16,000 remembered blocks between them
+(`PREFIXWISE_LANE_BLOCKS`; never fewer than 8 conversations), the least recently used one is forgotten; a request whose opening
 is not remembered (a forgotten or never-seen conversation, a trimmed history) is compared with the
 lane's latest turn, and each such request adds a remembered conversation. An earlier point of its
 own conversation (its messages open the compared turn's: a record delivered late, a rewind) is not

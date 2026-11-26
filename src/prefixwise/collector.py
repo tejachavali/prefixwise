@@ -45,6 +45,12 @@ MAX_SESSIONS = int(os.environ.get("PREFIXWISE_MAX_SESSIONS", "10000"))
 # by its opening message, so every request with an opening not seen before adds one: the 65th
 # drops the least recently used.
 LANE_THREADS = max(1, int(os.environ.get("PREFIXWISE_LANE_THREADS", "64")))
+# ... and a lane's memory is bounded: its remembered turns hold at most this many blocks between them
+# (about 12 MB at 0.75 kB each), so 64 very long conversations, or one agent that trims a long
+# history every turn, cannot grow a lane to 50 MB. Past the budget the least recently used go, but
+# never below the 8 conversations a lane kept before it remembered 64, whatever their size.
+LANE_BLOCKS = max(0, int(os.environ.get("PREFIXWISE_LANE_BLOCKS", "16000")))
+LANE_THREADS_FLOOR = 8
 _CONVERSATION = ("messages", "tool_results", "user")
 
 
@@ -548,7 +554,9 @@ class Collector:
                 state = _Lane()
             state.threads[identity[0]] = (curr, now, facts, response_id)
             state.threads.move_to_end(identity[0])
-            while len(state.threads) > LANE_THREADS:
+            while len(state.threads) > LANE_THREADS or (
+                    len(state.threads) > min(LANE_THREADS_FLOOR, LANE_THREADS)
+                    and sum(len(t[0].blocks) for t in state.threads.values()) > LANE_BLOCKS):
                 state.threads.popitem(last=False)
             state.latest = identity[0]
             self.lane_threads[lane] = state  # (re)assigning refreshes the lane in the LRU
