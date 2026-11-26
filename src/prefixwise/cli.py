@@ -1114,8 +1114,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("collect", help="run a collector: one ledger for several edges (prefixwise serve "
                                         "--collector URL, or PREFIXWISE_COLLECTOR for wrap and LiteLLM)")
-    p.add_argument("--host", default=os.environ.get("PREFIXWISE_HOST", "127.0.0.1"))
-    p.add_argument("--port", type=int, default=int(os.environ.get("PORT", "8081")))
+    p.add_argument("--host", default=os.environ.get("PREFIXWISE_HOST", "127.0.0.1"),
+                   help="address to listen on (default: $PREFIXWISE_HOST or 127.0.0.1; beyond localhost it needs "
+                        "a token, see --allow-unauthenticated)")
+    p.add_argument("--port", type=int, default=int(os.environ.get("PORT", "8081")),
+                   help="port to listen on (default: $PORT or 8081)")
     p.add_argument("--prices", metavar="FILE", help="extra or overriding rates (default: $PREFIXWISE_PRICES)")
     p.add_argument("--allow-unauthenticated", action="store_true",
                    help="listen beyond localhost without PREFIXWISE_AUTH_TOKEN (anyone who reaches the port "
@@ -1133,8 +1136,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_collect)
 
     p = sub.add_parser("serve", help="run the proxy")
-    p.add_argument("--host", default=os.environ.get("PREFIXWISE_HOST", "127.0.0.1"))
-    p.add_argument("--port", type=int, default=int(os.environ.get("PORT", "8080")))
+    p.add_argument("--host", default=os.environ.get("PREFIXWISE_HOST", "127.0.0.1"),
+                   help="address to listen on (default: $PREFIXWISE_HOST or 127.0.0.1). Beyond localhost, set "
+                        "PREFIXWISE_AUTH_TOKEN: without one, anyone who can reach the port can use the proxy and "
+                        "read the ledger (it starts with a warning; with PREFIXWISE_API_KEY set it refuses, see "
+                        "--allow-unauthenticated)")
+    p.add_argument("--port", type=int, default=int(os.environ.get("PORT", "8080")),
+                   help="port to listen on (default: $PORT or 8080)")
     p.add_argument("--upstream", help="upstream base URL, e.g. https://api.openai.com "
                                       "(default: $PREFIXWISE_UPSTREAM_URL; none = mock mode). "
                                       "API key: $PREFIXWISE_API_KEY, or the client's own auth header.")
@@ -1188,8 +1196,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--by", default=None, choices=["cause", "session_id", "agent_id", "model",
                                                   "provider", "task_id"],
                    help="print the per-group table, grouped by this (implies --detail)")
-    p.add_argument("--limit", type=int, default=20)
-    p.add_argument("--json", action="store_true")
+    p.add_argument("--limit", type=int, default=20, help="rows in the --by breakdown (default 20)")
+    p.add_argument("--json", action="store_true", help="the report as JSON on stdout")
     ledger_opt(p)
     p.add_argument("--since", metavar="WHEN", help="only requests since then: unix seconds or 24h, 7d, ...")
     p.add_argument("--detail", action="store_true", help="also print totals and the per-group table")
@@ -1207,19 +1215,19 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("prices", help="the dated price table used for dollar costs")
     p.add_argument("--prices", metavar="FILE", help="also load this rates file (default: $PREFIXWISE_PRICES)")
-    p.add_argument("--json", action="store_true")
+    p.add_argument("--json", action="store_true", help="as JSON on stdout")
     p.set_defaults(func=cmd_prices)
 
     p = sub.add_parser("fixes", help="fixes ranked by the tokens they would save, from your ledger")
-    p.add_argument("--json", action="store_true")
+    p.add_argument("--json", action="store_true", help="as JSON on stdout")
     ledger_opt(p)
     p.set_defaults(func=cmd_fixes)
 
     p = sub.add_parser("task", help="record a task outcome")
-    p.add_argument("task_id")
+    p.add_argument("task_id", help="the task's id, as sent in X-Prefixwise-Task-Id")
     g = p.add_mutually_exclusive_group(required=True)
-    g.add_argument("--success", dest="outcome", action="store_const", const="success")
-    g.add_argument("--failure", dest="outcome", action="store_const", const="failure")
+    g.add_argument("--success", dest="outcome", action="store_const", const="success", help="the task succeeded")
+    g.add_argument("--failure", dest="outcome", action="store_const", const="failure", help="the task failed")
     ledger_opt(p)
     p.set_defaults(func=cmd_task)
 
@@ -1287,7 +1295,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--baseline", action="store_true",
                    help=f"instead: write ./{BASELINE_FILE} for `prefixwise check` (per model: turns per month, "
                         "eligible turns per month, mean reusable prefix tokens; counts only, no ids or text)")
-    p.add_argument("--format", choices=["jsonl", "csv"], default="jsonl")
+    p.add_argument("--format", choices=["jsonl", "csv"], default="jsonl", help="default: jsonl")
     p.add_argument("--since", metavar="WHEN", help="unix seconds, or a duration back from now: 24h, 7d")
     p.add_argument("--where", action="append", default=[], metavar="FIELD=VALUE",
                    help="filter (repeatable): cause, session, agent, model, provider, task, api, error")
@@ -1322,7 +1330,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("request", help="show one request's ledger entry")
     p.add_argument("request_id", help="the X-Prefixwise-Request-Id response header")
-    p.add_argument("--json", action="store_true")
+    p.add_argument("--json", action="store_true", help="as JSON on stdout")
     ledger_opt(p)
     p.set_defaults(func=cmd_request)
 
@@ -1330,9 +1338,12 @@ def build_parser() -> argparse.ArgumentParser:
                        description="Explain cache misses offline. Give two request files (JSON), "
                                    "or one session file: a JSON array or JSONL of request bodies, "
                                    'or of {"request": body, "usage": {...}} records.')
-    p.add_argument("files", nargs="+")
-    p.add_argument("--provider", default="auto", choices=["auto", "openai", "anthropic", "vllm"])
-    p.add_argument("--json", action="store_true")
+    p.add_argument("files", nargs="+",
+                   help="two request bodies (JSON), or one session: a JSON Lines file or JSON array of request "
+                        'bodies or {"request": ..., "usage": ...} records, in order')
+    p.add_argument("--provider", default="auto", choices=["auto", "openai", "anthropic", "vllm"],
+                   help="whose request format and prefix order (default: told from the body)")
+    p.add_argument("--json", action="store_true", help="the explanations as JSON on stdout")
     p.add_argument("--diff", action="store_true",
                    help="also print the first differing block before and after, as fingerprinted (cache markers "
                         "removed), from the files given: the hashes say where it changed, this says what. Read from "
@@ -1354,6 +1365,10 @@ def _order_commands(sub) -> None:
     rows = getattr(sub, "_choices_actions", None)   # argparse keeps the help rows here; no public way to sort
     if not isinstance(rows, list):
         return
+    for row in rows:  # `prefixwise <command> --help` opens with the command's one line from the list
+        parser = sub.choices.get(getattr(row, "dest", ""))
+        if parser is not None and not parser.description and row.help:
+            parser.description = row.help[0].upper() + row.help[1:] + ("" if row.help.endswith(".") else ".")
     rank = {name: i for i, name in enumerate(COMMAND_ORDER)}
     rows.sort(key=lambda row: rank.get(getattr(row, "dest", ""), len(rank)))
 

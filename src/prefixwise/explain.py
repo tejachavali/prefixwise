@@ -171,8 +171,9 @@ def _turn_from_record(rec: dict) -> Turn:
     readable = isinstance(sent, dict) and any(k in sent for k in _PROMPT_KEYS)
     # ... and not one whose prompt is in a field that is not read, even beside one that is (a Gemini
     # body with tools, a completions-style prompt with a system field).
-    unread = isinstance(sent, dict) and ("contents" in sent or ("prompt" in sent and not ("messages" in sent
-                                                                                       or "input" in sent)))
+    # (A Responses request can carry a `prompt` template, an object, beside its `input` or `instructions`.)
+    unread = isinstance(sent, dict) and ("contents" in sent or ("prompt" in sent and not (
+        "messages" in sent or "input" in sent or ("instructions" in sent and isinstance(sent["prompt"], dict)))))
     if not readable or unread:
         raise ValueError('not a request Prefixwise can read: expected the body of an Anthropic Messages, OpenAI Chat '
                          'Completions or Responses request (an object with "messages", "input", "instructions", '

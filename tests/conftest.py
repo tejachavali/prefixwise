@@ -7,6 +7,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import os
 
-# A developer's own PREFIXWISE_HMAC_KEY would key every hash the tests compare with bare ones (every
-# edge reads it). Tests that want a key pass one or set the variable themselves.
-os.environ.pop("PREFIXWISE_HMAC_KEY", None)
+# No setting of the developer's shell reaches the tests: a PREFIXWISE_HMAC_KEY would key every hash
+# they compare with bare ones, a PREFIXWISE_PRICES file would change every dollar. Tests that want a
+# setting pass it or set the variable themselves.
+# (PREFIXWISE_TEST_* are the suite's own: CI points the record-log tests at its Redis with one.)
+for _name in [n for n in os.environ if n.startswith("PREFIXWISE_") and not n.startswith("PREFIXWISE_TEST_")]:
+    del os.environ[_name]
